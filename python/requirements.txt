@@ -1,0 +1,6 @@
+numpy
+soundfile
+librosa
+scipy
+rich
+pymediainfo

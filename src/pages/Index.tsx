@@ -1,0 +1,857 @@
+import { useState, useCallback, useEffect, useRef } from "react";
+import { 
+  Film, 
+  Tv, 
+  FolderOpen, 
+  Music, 
+  Play, 
+  FileVideo,
+  FileAudio,
+  Check,
+  AlertCircle,
+  Download,
+  X,
+  Settings2,
+  History,
+  Trash2,
+  RotateCcw,
+} from "lucide-react";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+type SyncMode = "movie" | "series";
+type ProcessingStatus = "idle" | "processing" | "complete";
+
+interface FileItem {
+  id: string;
+  name: string;
+  path: string;
+  type: "video" | "audio";
+}
+
+interface BridgeResult {
+  videoFile: string;
+  audioFile: string;
+  startDelay: number | null;
+  endDelay: number | null;
+  error?: string | null;
+}
+
+interface SyncResult extends BridgeResult {
+  confidence: "high" | "medium" | "low";
+}
+
+interface HistoryEntry {
+  id: string;
+  date: Date;
+  mode: SyncMode;
+  results: SyncResult[];
+  fileCount: number;
+}
+
+interface PickResponse {
+  folder: string | null;
+  files: FileItem[];
+}
+
+export default function Index() {
+  const isTauri = !!(window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  const [mode, setMode] = useState<SyncMode>("movie");
+  const [videoFiles, setVideoFiles] = useState<FileItem[]>([]);
+  const [audioFiles, setAudioFiles] = useState<FileItem[]>([]);
+  const [status, setStatus] = useState<ProcessingStatus>("idle");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [segmentDuration, setSegmentDuration] = useState(300);
+  const [matchPattern, setMatchPattern] = useState("S(\\d+)E(\\d+)");
+  const [results, setResults] = useState<SyncResult[]>([]);
+  const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [dragOver, setDragOver] = useState<"video" | "audio" | null>(null);
+  const [videoFolder, setVideoFolder] = useState<string | null>(null);
+  const [audioFolder, setAudioFolder] = useState<string | null>(null);
+  const [videoSource, setVideoSource] = useState<"folder" | "files" | null>(null);
+  const [audioSource, setAudioSource] = useState<"folder" | "file" | null>(null);
+  const [currentFile, setCurrentFile] = useState<string | null>(null);
+  const [fileProgress, setFileProgress] = useState(0);
+  const [eta, setEta] = useState<string>("--");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showConsole, setShowConsole] = useState(false);
+  const processStartRef = useRef<number | null>(null);
+  const currentFileRef = useRef<string | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => {
+    const saved = localStorage.getItem("syncmaster-history");
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Save history to localStorage
+  useEffect(() => {
+    localStorage.setItem("syncmaster-history", JSON.stringify(history));
+  }, [history]);
+
+  const computeConfidence = useCallback((startDelay: number | null, endDelay: number | null) => {
+    if (startDelay === null || endDelay === null) return "low";
+    const diff = Math.abs(startDelay - endDelay);
+    if (diff < 50) return "high";
+    if (diff < 500) return "medium";
+    return "low";
+  }, []);
+
+  const getParentFolder = (filePath: string) => {
+    const normalized = filePath.replace(/\\/g, "/");
+    const index = normalized.lastIndexOf("/");
+    return index > 0 ? normalized.slice(0, index) : null;
+  };
+
+  const getUniqueParent = (files: FileItem[]) => {
+    const parents = new Set(files.map(file => getParentFolder(file.path)).filter(Boolean));
+    if (parents.size === 1) return Array.from(parents)[0] as string;
+    return null;
+  };
+
+  const formatEta = (ms: number) => {
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  };
+
+  const handleDrop = useCallback((e: React.DragEvent, type: "video" | "audio") => {
+    e.preventDefault();
+    setDragOver(null);
+    
+    const items = Array.from(e.dataTransfer.files);
+    const newFiles: FileItem[] = items.map((file, index) => ({
+      id: `${type}-${Date.now()}-${index}`,
+      name: file.name,
+      path: (file as unknown as { path?: string }).path || file.name,
+      type,
+    }));
+
+    if (type === "video") {
+      setVideoFiles(prev => [...prev, ...newFiles]);
+      setVideoSource("files");
+      if (!videoFolder && newFiles.length > 0) {
+        const folder = getParentFolder(newFiles[0].path);
+        setVideoFolder(folder);
+      }
+    } else {
+      if (mode === "movie") {
+        setAudioFiles([newFiles[0]]);
+        setAudioSource("file");
+        if (newFiles.length > 1) {
+          toast.info("Movie mode uses a single audio file. Using the first file.");
+        }
+      } else {
+        setAudioFiles(prev => [...prev, ...newFiles]);
+        setAudioSource("folder");
+      }
+      if (!audioFolder && newFiles.length > 0) {
+        const folder = getParentFolder(newFiles[0].path);
+        setAudioFolder(folder);
+      }
+    }
+    
+    toast.success(`Added ${items.length} ${type} file${items.length > 1 ? 's' : ''}`);
+  }, [audioFolder, mode, videoFolder]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleSelectFolder = async (type: "video" | "audio") => {
+    if (!isTauri) {
+      toast.error("File picker is only available in the desktop app.");
+      return;
+    }
+    try {
+      if (type === "video") {
+        const response = await invoke<PickResponse>("pick_video_files", { mode });
+        setVideoFiles(response.files);
+        setVideoFolder(response.folder);
+        setVideoSource(response.folder ? "folder" : null);
+        if (response.files.length > 0) {
+          toast.success(`Added ${response.files.length} video files`);
+        }
+      } else {
+        const response = await invoke<PickResponse>("pick_audio_files", { mode });
+        setAudioFiles(response.files);
+        setAudioFolder(response.folder);
+        setAudioSource(mode === "movie" ? "file" : response.folder ? "folder" : null);
+        if (response.files.length > 0) {
+          toast.success(`Added ${response.files.length} audio file${response.files.length > 1 ? 's' : ''}`);
+        }
+      }
+    } catch (error) {
+      toast.error("Failed to open file picker");
+    }
+  };
+
+  const removeFile = (id: string, type: "video" | "audio") => {
+    if (type === "video") {
+      setVideoFiles(prev => prev.filter(f => f.id !== id));
+    } else {
+      setAudioFiles(prev => prev.filter(f => f.id !== id));
+    }
+  };
+
+  const handleProcess = async () => {
+    if (videoFiles.length === 0 || audioFiles.length === 0) return;
+    if (!isTauri) {
+      toast.error("Processing is only available in the desktop app.");
+      return;
+    }
+
+    const derivedVideoFolder = videoFolder || getUniqueParent(videoFiles);
+    const derivedAudioFolder = audioFolder || getUniqueParent(audioFiles);
+
+    if (mode === "movie") {
+      if (!derivedVideoFolder) {
+        toast.error("Select a video folder or drop videos from one folder.");
+        return;
+      }
+      if (audioFiles.length === 0) {
+        toast.error("Select an audio file.");
+        return;
+      }
+    } else {
+      if (!derivedVideoFolder || !derivedAudioFolder) {
+        toast.error("Select both video and audio folders for series mode.");
+        return;
+      }
+    }
+
+    setStatus("processing");
+    setProgress({ current: 0, total: videoFiles.length, percent: 0 });
+    setResults([]);
+    setLogs([]);
+    setCurrentFile(null);
+    setFileProgress(0);
+    currentFileRef.current = null;
+    processStartRef.current = Date.now();
+    toast.info("Starting analysis...");
+
+    const request = {
+      mode,
+      video_folder: derivedVideoFolder,
+      audio_folder: mode === "series" ? derivedAudioFolder : null,
+      audio_file: mode === "movie" ? audioFiles[0]?.path : null,
+      video_files: mode === "movie" && videoSource === "files" ? videoFiles.map(file => file.path) : null,
+      segment_duration: segmentDuration,
+      match_pattern: mode === "series" ? matchPattern : null,
+    };
+
+    try {
+      const finalResults = await invoke<BridgeResult[]>("start_sync", { request });
+      const normalized = finalResults.map(result => ({
+        ...result,
+        confidence: computeConfidence(result.startDelay, result.endDelay),
+      }));
+      setResults(normalized);
+      setStatus("complete");
+
+      const entry: HistoryEntry = {
+        id: `history-${Date.now()}`,
+        date: new Date(),
+        mode,
+        results: normalized,
+        fileCount: videoFiles.length,
+      };
+      setHistory(prev => [entry, ...prev].slice(0, 20));
+
+      toast.success(`Analysis complete! ${normalized.length} files processed.`, {
+        description: `${normalized.filter(r => r.confidence === 'high').length} high confidence matches`,
+      });
+    } catch (error) {
+      setStatus("idle");
+      processStartRef.current = null;
+      toast.error("Analysis failed. Check logs for details.");
+    }
+  };
+
+  const clearAll = (showToast = true) => {
+    setVideoFiles([]);
+    setAudioFiles([]);
+    setResults([]);
+    setStatus("idle");
+    setProgress({ current: 0, total: 0, percent: 0 });
+    setVideoFolder(null);
+    setAudioFolder(null);
+    setVideoSource(null);
+    setAudioSource(null);
+    setCurrentFile(null);
+    setFileProgress(0);
+    setEta("--");
+    setLogs([]);
+    currentFileRef.current = null;
+    processStartRef.current = null;
+    if (showToast && (videoFiles.length > 0 || audioFiles.length > 0)) {
+      toast.info("Cleared all files");
+    }
+  };
+
+  const loadFromHistory = (entry: HistoryEntry) => {
+    setResults(entry.results);
+    setMode(entry.mode);
+    setStatus("complete");
+    setShowHistory(false);
+    toast.success("Loaded results from history");
+  };
+
+  const deleteHistoryEntry = (id: string) => {
+    setHistory(prev => prev.filter(e => e.id !== id));
+    toast.info("Removed from history");
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    toast.info("History cleared");
+  };
+
+  const exportResults = async (resultsToExport: SyncResult[]) => {
+    if (!isTauri) {
+      toast.error("Export is only available in the desktop app.");
+      return;
+    }
+    try {
+      await invoke("export_csv", { results: resultsToExport });
+      toast.success("Exported to CSV");
+    } catch (error) {
+      toast.error("Export canceled or failed");
+    }
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      if (e.key === "Enter" && videoFiles.length > 0 && audioFiles.length > 0 && status !== "processing") {
+        e.preventDefault();
+        handleProcess();
+      }
+
+      if (e.key === "Escape" && status !== "processing") {
+        e.preventDefault();
+        clearAll(true);
+      }
+
+      if (e.key === "h" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setShowHistory(prev => !prev);
+        toast.info(showHistory ? "History closed" : "History opened");
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [videoFiles, audioFiles, status, showHistory]);
+
+  useEffect(() => {
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenResult: (() => void) | undefined;
+    let unlistenDone: (() => void) | undefined;
+    let unlistenFileStart: (() => void) | undefined;
+    let unlistenFileEnd: (() => void) | undefined;
+    let unlistenFileProgress: (() => void) | undefined;
+    let unlistenLog: (() => void) | undefined;
+
+    const setup = async () => {
+      if (!(window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__) {
+        return;
+      }
+      unlistenProgress = await listen<{ processed: number; total: number }>("sync-progress", (event) => {
+        const percent = event.payload.total > 0 ? Math.round((event.payload.processed / event.payload.total) * 100) : 0;
+        setProgress({ current: event.payload.processed, total: event.payload.total, percent });
+        if (processStartRef.current && event.payload.processed > 0) {
+          const elapsedMs = Date.now() - processStartRef.current;
+          const avgMs = elapsedMs / event.payload.processed;
+          const remaining = avgMs * (event.payload.total - event.payload.processed);
+          setEta(formatEta(remaining));
+        }
+      });
+
+      unlistenResult = await listen<BridgeResult>("sync-result", (event) => {
+        const payload = event.payload;
+        setResults(prev => [
+          ...prev,
+          { ...payload, confidence: computeConfidence(payload.startDelay, payload.endDelay) },
+        ]);
+      });
+
+      unlistenDone = await listen<BridgeResult[]>("sync-done", (event) => {
+        const normalized = event.payload.map(result => ({
+          ...result,
+          confidence: computeConfidence(result.startDelay, result.endDelay),
+        }));
+        setResults(normalized);
+        setFileProgress(100);
+        setEta("--");
+        currentFileRef.current = null;
+        processStartRef.current = null;
+      });
+
+      unlistenFileStart = await listen<{ file: string }>("sync-file-start", (event) => {
+        setCurrentFile(event.payload.file);
+        currentFileRef.current = event.payload.file;
+        setFileProgress(0);
+        setLogs(prev => [...prev, `Starting: ${event.payload.file}`].slice(-200));
+      });
+
+      unlistenFileEnd = await listen<{ file: string; elapsed_ms: number }>("sync-file-end", (event) => {
+        const seconds = (event.payload.elapsed_ms / 1000).toFixed(1);
+        setLogs(prev => [...prev, `Finished: ${event.payload.file} (${seconds}s)`].slice(-200));
+      });
+
+      unlistenFileProgress = await listen<{ file: string; percent: number }>("sync-file-progress", (event) => {
+        if (currentFileRef.current === event.payload.file) {
+          setFileProgress(event.payload.percent);
+        }
+      });
+
+      unlistenLog = await listen<string>("sync-log", (event) => {
+        setLogs(prev => [...prev, event.payload].slice(-200));
+      });
+    };
+
+    setup();
+
+    return () => {
+      unlistenProgress?.();
+      unlistenResult?.();
+      unlistenDone?.();
+      unlistenFileStart?.();
+      unlistenFileEnd?.();
+      unlistenFileProgress?.();
+      unlistenLog?.();
+    };
+  }, [computeConfidence]);
+
+  const formatDate = (date: Date) => {
+    const d = new Date(date);
+    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  return (
+    <div className="h-screen flex flex-col bg-background">
+      {/* Header */}
+      <header className="h-12 px-4 flex items-center justify-between bg-card">
+        <div className="flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-primary-foreground">
+              <path d="M9 18V5l12-2v13" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <circle cx="6" cy="18" r="3" stroke="currentColor" strokeWidth="2.5"/>
+              <circle cx="18" cy="16" r="3" stroke="currentColor" strokeWidth="2.5"/>
+            </svg>
+          </div>
+          <span className="text-sm font-semibold text-foreground">SyncMaster</span>
+          <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">v2.0</span>
+        </div>
+        
+        <div className="flex items-center gap-1 bg-secondary p-0.5 rounded-md">
+          <button
+            onClick={() => { setMode("movie"); clearAll(false); }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+              mode === "movie" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Film className="w-3.5 h-3.5" />
+            Movies
+          </button>
+          <button
+            onClick={() => { setMode("series"); clearAll(false); }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+              mode === "series" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Tv className="w-3.5 h-3.5" />
+            Series
+          </button>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className={`p-1.5 rounded transition-colors ${
+              showHistory ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+            }`}
+            title="History (Ctrl+H)"
+          >
+            <History className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className={`p-1.5 rounded transition-colors ${
+              showAdvanced ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+            }`}
+          >
+            <Settings2 className="w-4 h-4" />
+          </button>
+        </div>
+      </header>
+
+      {/* Main */}
+      <main className="flex-1 flex overflow-hidden">
+        {/* Content Area */}
+        <div className="flex-1 p-4 overflow-auto">
+          <div className="max-w-3xl mx-auto space-y-4">
+            
+            {/* Advanced Settings */}
+            {showAdvanced && (
+              <div className="p-3 rounded-lg bg-card flex items-center gap-4">
+                <div className="flex-1">
+                  <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">Segment Duration</label>
+                  <input
+                    type="number"
+                    value={segmentDuration}
+                    onChange={(e) => setSegmentDuration(Number(e.target.value))}
+                    className="w-full bg-input rounded px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
+                {mode === "series" && (
+                  <div className="flex-1">
+                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">Match Pattern</label>
+                    <input
+                      type="text"
+                      value={matchPattern}
+                      onChange={(e) => setMatchPattern(e.target.value)}
+                      className="w-full bg-input rounded px-3 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Drop Zones */}
+            <div className="grid grid-cols-2 gap-3">
+              {/* Video Drop Zone */}
+              <div
+                onDrop={(e) => handleDrop(e, "video")}
+                onDragOver={handleDragOver}
+                onDragEnter={() => setDragOver("video")}
+                onDragLeave={() => setDragOver(null)}
+                className={`rounded-lg bg-card p-4 transition-all ${
+                  dragOver === "video" ? "ring-2 ring-primary bg-accent/20" : ""
+                }`}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-warning" />
+                    <span className="text-sm font-medium text-foreground">Video Files</span>
+                  </div>
+                  <button
+                    onClick={() => handleSelectFolder("video")}
+                    className="text-[10px] text-primary hover:underline"
+                  >
+                    Browse
+                  </button>
+                </div>
+                
+                {videoFiles.length === 0 ? (
+                  <div className="py-6 text-center">
+                    <p className="text-xs text-muted-foreground">Drop video files here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-32 overflow-auto">
+                    {videoFiles.map(file => (
+                      <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
+                        <FileVideo className="w-3.5 h-3.5 text-warning shrink-0" />
+                        <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <button
+                          onClick={() => removeFile(file.id, "video")}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-destructive/20 rounded transition-opacity"
+                        >
+                          <X className="w-3 h-3 text-muted-foreground hover:text-destructive" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Audio Drop Zone */}
+              <div
+                onDrop={(e) => handleDrop(e, "audio")}
+                onDragOver={handleDragOver}
+                onDragEnter={() => setDragOver("audio")}
+                onDragLeave={() => setDragOver(null)}
+                className={`rounded-lg bg-card p-4 transition-all ${
+                  dragOver === "audio" ? "ring-2 ring-primary bg-accent/20" : ""
+                }`}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <Music className="w-4 h-4 text-success" />
+                    <span className="text-sm font-medium text-foreground">
+                      {mode === "movie" ? "Audio File" : "Audio Files"}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => handleSelectFolder("audio")}
+                    className="text-[10px] text-primary hover:underline"
+                  >
+                    Browse
+                  </button>
+                </div>
+                
+                {audioFiles.length === 0 ? (
+                  <div className="py-6 text-center">
+                    <p className="text-xs text-muted-foreground">Drop audio files here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-32 overflow-auto">
+                    {audioFiles.map(file => (
+                      <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
+                        <FileAudio className="w-3.5 h-3.5 text-success shrink-0" />
+                        <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <button
+                          onClick={() => removeFile(file.id, "audio")}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-destructive/20 rounded transition-opacity"
+                        >
+                          <X className="w-3 h-3 text-muted-foreground hover:text-destructive" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Progress Bar */}
+            {status === "processing" && (
+              <div className="p-3 rounded-lg bg-card">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-foreground font-medium">Processing...</span>
+                    {currentFile && (
+                      <span className="text-[10px] text-muted-foreground truncate max-w-[200px]">
+                        {currentFile}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {progress.current} / {progress.total} files
+                  </span>
+                </div>
+                <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-primary rounded-full transition-all duration-300"
+                    style={{ width: `${progress.percent}%`, animation: 'progress-pulse 1.5s ease-in-out infinite' }}
+                  />
+                </div>
+                <div className="text-right mt-1">
+                  <span className="text-[10px] text-primary font-medium">{progress.percent}%</span>
+                </div>
+                <div className="mt-3">
+                  <div className="flex items-center justify-between text-[10px] text-muted-foreground mb-1">
+                    <span>Current file</span>
+                    <span>{eta !== "--" ? `ETA ${eta}` : "ETA --"}</span>
+                  </div>
+                  <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-success rounded-full transition-all duration-300"
+                      style={{ width: `${fileProgress}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Action Button */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleProcess}
+                disabled={videoFiles.length === 0 || audioFiles.length === 0 || status === "processing"}
+                className="flex items-center gap-2 bg-primary hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed text-primary-foreground px-5 py-2 rounded-md text-sm font-medium transition-colors"
+              >
+                <Play className="w-4 h-4" />
+                Start Analysis
+              </button>
+              
+              {(videoFiles.length > 0 || audioFiles.length > 0) && status !== "processing" && (
+                <button
+                  onClick={() => clearAll(true)}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Clear All
+                </button>
+              )}
+              
+              {status === "complete" && (
+                <div className="flex items-center gap-1.5 text-success text-xs">
+                  <Check className="w-3.5 h-3.5" />
+                  Complete
+                </div>
+              )}
+              {logs.length > 0 && (
+                <button
+                  onClick={() => setShowConsole(prev => !prev)}
+                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showConsole ? "Hide Console" : "Show Console"}
+                </button>
+              )}
+            </div>
+
+            {/* Results */}
+            {results.length > 0 && (
+              <div className="rounded-lg bg-card overflow-hidden">
+                <div className="px-4 py-3 flex items-center justify-between">
+                  <span className="text-sm font-medium text-foreground">Results</span>
+                  <button 
+                    onClick={() => exportResults(results)}
+                    className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Export
+                  </button>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-secondary/50">
+                      <th className="text-left font-medium text-muted-foreground px-4 py-2">Video</th>
+                      <th className="text-left font-medium text-muted-foreground px-4 py-2">Audio</th>
+                      <th className="text-right font-medium text-muted-foreground px-4 py-2">Start</th>
+                      <th className="text-right font-medium text-muted-foreground px-4 py-2">End</th>
+                      <th className="text-center font-medium text-muted-foreground px-4 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.map((result, index) => (
+                      <tr key={index} className="border-t border-border/50">
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <FileVideo className="w-3.5 h-3.5 text-warning" />
+                            <span className="text-foreground truncate max-w-[140px]">{result.videoFile}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <FileAudio className="w-3.5 h-3.5 text-success" />
+                            <span className="text-muted-foreground truncate max-w-[100px]">{result.audioFile}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-foreground">
+                          {result.startDelay !== null ? `${result.startDelay > 0 ? "+" : ""}${result.startDelay.toFixed(1)}ms` : "--"}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono text-foreground">
+                          {result.endDelay !== null ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms` : "--"}
+                        </td>
+                        <td className="px-4 py-2.5 text-center">
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
+                            result.confidence === "high" 
+                              ? "bg-success/15 text-success" 
+                              : result.confidence === "medium"
+                              ? "bg-warning/15 text-warning"
+                              : "bg-destructive/15 text-destructive"
+                          }`}>
+                            {result.confidence === "high" && <Check className="w-2.5 h-2.5" />}
+                            {result.confidence === "low" && <AlertCircle className="w-2.5 h-2.5" />}
+                            {result.confidence.charAt(0).toUpperCase() + result.confidence.slice(1)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {showConsole && logs.length > 0 && (
+              <div className="rounded-lg bg-card p-3">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
+                  Console
+                </div>
+                <div className="max-h-40 overflow-auto text-[11px] font-mono text-muted-foreground space-y-1">
+                  {logs.map((line, index) => (
+                    <div key={index} className="whitespace-pre-wrap">{line}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* History Panel */}
+        {showHistory && (
+          <div className="w-72 border-l border-border bg-card/50 flex flex-col">
+            <div className="p-3 flex items-center justify-between border-b border-border">
+              <span className="text-sm font-medium text-foreground">History</span>
+              {history.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="text-[10px] text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  Clear All
+                </button>
+              )}
+            </div>
+            <div className="flex-1 overflow-auto">
+              {history.length === 0 ? (
+                <div className="p-4 text-center">
+                  <History className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
+                  <p className="text-xs text-muted-foreground">No history yet</p>
+                </div>
+              ) : (
+                <div className="p-2 space-y-1">
+                  {history.map(entry => (
+                    <div
+                      key={entry.id}
+                      className="p-2.5 rounded-lg bg-secondary/30 hover:bg-secondary/50 transition-colors group"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-muted-foreground">{formatDate(entry.date)}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          entry.mode === "movie" ? "bg-warning/15 text-warning" : "bg-primary/15 text-primary"
+                        }`}>
+                          {entry.mode === "movie" ? "Movie" : "Series"}
+                        </span>
+                      </div>
+                      <p className="text-xs text-foreground mb-2">
+                        {entry.fileCount} files • {entry.results.filter(r => r.confidence === 'high').length} high confidence
+                      </p>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => loadFromHistory(entry)}
+                          className="flex-1 flex items-center justify-center gap-1 text-[10px] text-primary hover:bg-primary/10 py-1 rounded transition-colors"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          Load
+                        </button>
+                        <button
+                          onClick={() => exportResults(entry.results)}
+                          className="flex-1 flex items-center justify-center gap-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary py-1 rounded transition-colors"
+                        >
+                          <Download className="w-3 h-3" />
+                          Export
+                        </button>
+                        <button
+                          onClick={() => deleteHistoryEntry(entry.id)}
+                          className="p-1 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded transition-colors opacity-0 group-hover:opacity-100"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="h-7 px-4 flex items-center justify-between text-[10px] text-muted-foreground bg-card/50">
+        <span>{mode === "movie" ? "Movie" : "Series"} Mode</span>
+        <div className="flex items-center gap-3">
+          <span className="opacity-60">Enter: Start • Esc: Clear • Ctrl+H: History</span>
+          <span>Segment: {segmentDuration}s</span>
+        </div>
+      </footer>
+    </div>
+  );
+}
