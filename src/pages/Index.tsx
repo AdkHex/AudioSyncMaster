@@ -64,7 +64,7 @@ export default function Index() {
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [segmentDuration, setSegmentDuration] = useState(300);
+  const [segmentDuration, setSegmentDuration] = useState(600);
   const [matchPattern, setMatchPattern] = useState("S(\\d+)E(\\d+)");
   const [results, setResults] = useState<SyncResult[]>([]);
   const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0 });
@@ -710,6 +710,11 @@ export default function Index() {
                     Export
                   </button>
                 </div>
+                {results.some(result => result.confidence === "low" || result.startDelay === null || result.endDelay === null) && (
+                  <div className="px-4 pb-2 text-[11px] text-warning">
+                    Some results have low confidence or missing end delay. Consider increasing segment duration and re-running.
+                  </div>
+                )}
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-secondary/50">
