@@ -15,6 +15,7 @@ import {
   History,
   Trash2,
   RotateCcw,
+  Copy,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { toast } from "sonner";
@@ -113,6 +114,11 @@ export default function Index() {
     return "low";
   }, []);
 
+  const isOutlier = (startDelay: number | null, endDelay: number | null) => {
+    if (startDelay === null || endDelay === null) return true;
+    return Math.abs(startDelay - endDelay) > 500;
+  };
+
   const getParentFolder = (filePath: string) => {
     const normalized = filePath.replace(/\\/g, "/");
     const index = normalized.lastIndexOf("/");
@@ -175,6 +181,71 @@ export default function Index() {
       setProbeByPath(prev => ({ ...prev, [file.path]: probe }));
     } catch {
       setProbeByPath(prev => ({ ...prev, [file.path]: { has_audio: false, has_video: false, duration: null } }));
+    }
+  };
+
+  const getMatchKey = (name: string) => {
+    try {
+      const regex = new RegExp(matchPattern, "i");
+      const match = name.match(regex);
+      if (!match || match.length < 3) return null;
+      const season = match[1]?.padStart(2, "0");
+      const episode = match[2]?.padStart(2, "0");
+      if (!season || !episode) return null;
+      return `${season}-${episode}`;
+    } catch {
+      return null;
+    }
+  };
+
+  const isPatternValid = () => {
+    try {
+      const regex = new RegExp(matchPattern, "i");
+      const match = "S01E02".match(regex);
+      return !!(match && match.length >= 3);
+    } catch {
+      return false;
+    }
+  };
+
+  const pairingPreview = () => {
+    if (mode === "movie") {
+      const audioName = audioFiles[0]?.name ?? "No audio selected";
+      return videoFiles.map(file => ({
+        video: file.name,
+        audio: audioName,
+        status: audioFiles.length > 0 ? "matched" : "missing",
+      }));
+    }
+
+    const audioByKey = new Map<string, string>();
+    for (const audio of audioFiles) {
+      const key = getMatchKey(audio.name);
+      if (key && !audioByKey.has(key)) {
+        audioByKey.set(key, audio.name);
+      }
+    }
+
+    return videoFiles.map(file => {
+      const key = getMatchKey(file.name);
+      const matched = key ? audioByKey.get(key) : null;
+      return {
+        video: file.name,
+        audio: matched ?? "No match",
+        status: matched ? "matched" : "missing",
+      };
+    });
+  };
+
+  const handleCopyDelay = async (result: SyncResult) => {
+    const start = result.startDelay !== null ? `${result.startDelay.toFixed(1)}ms` : "--";
+    const end = result.endDelay !== null ? `${result.endDelay.toFixed(1)}ms` : "--";
+    const text = `${result.videoFile} | Start ${start} | End ${end}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Delay copied");
+    } catch {
+      toast.error("Failed to copy delay");
     }
   };
 
@@ -745,7 +816,7 @@ export default function Index() {
                           className="h-3 w-3 accent-primary"
                         />
                         <FileVideo className="w-3.5 h-3.5 text-warning shrink-0" />
-                        <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <span className="text-xs text-foreground flex-1 break-all">{file.name}</span>
                         <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
                         {probeByPath[file.path] && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -844,7 +915,7 @@ export default function Index() {
                           className="h-3 w-3 accent-primary"
                         />
                         <FileAudio className="w-3.5 h-3.5 text-success shrink-0" />
-                        <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <span className="text-xs text-foreground flex-1 break-all">{file.name}</span>
                         <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
                         {probeByPath[file.path] && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -870,6 +941,42 @@ export default function Index() {
                 )}
               </div>
             </div>
+
+            {(videoFiles.length > 0 || audioFiles.length > 0) && (
+              <div className="rounded-lg bg-card border border-border px-4 py-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-foreground">Pairing Preview</span>
+                  {mode === "series" && (
+                    <span className="text-[10px] text-muted-foreground">
+                      Pattern: {matchPattern}
+                    </span>
+                  )}
+                </div>
+                {mode === "series" && !isPatternValid() && (
+                  <div className="text-[10px] text-warning mb-2">
+                    The match pattern does not appear to capture season/episode groups.
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  {pairingPreview().map((pair, index) => (
+                    <div key={`${pair.video}-${index}`} className="flex items-start gap-2 text-xs">
+                      <span className="text-foreground break-all flex-1">{pair.video}</span>
+                      <span className="text-muted-foreground">→</span>
+                      <span
+                        className={`break-all flex-1 ${
+                          pair.status === "matched" ? "text-muted-foreground" : "text-destructive"
+                        }`}
+                      >
+                        {pair.audio}
+                      </span>
+                      {pair.status === "missing" && (
+                        <span className="text-[10px] text-destructive">Missing</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Progress Bar */}
             {status === "processing" && (
@@ -1007,13 +1114,13 @@ export default function Index() {
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-2">
                             <FileVideo className="w-3.5 h-3.5 text-warning" />
-                            <span className="text-foreground truncate max-w-[140px]">{result.videoFile}</span>
+                            <span className="text-foreground break-all">{result.videoFile}</span>
                           </div>
                         </td>
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-2">
                             <FileAudio className="w-3.5 h-3.5 text-success" />
-                            <span className="text-muted-foreground truncate max-w-[100px]">{result.audioFile}</span>
+                            <span className="text-muted-foreground break-all">{result.audioFile}</span>
                           </div>
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-foreground">
@@ -1023,20 +1130,34 @@ export default function Index() {
                           {result.endDelay !== null ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms` : "--"}
                         </td>
                         <td className="px-4 py-2.5 text-center">
-                          <span
-                            title={`Confidence: ${result.confidence}`}
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
-                            result.confidence === "high" 
-                              ? "bg-success/15 text-success" 
-                              : result.confidence === "medium"
-                              ? "bg-warning/15 text-warning"
-                              : "bg-destructive/15 text-destructive"
-                          }`}
-                          >
-                            {result.confidence === "high" && <Check className="w-2.5 h-2.5" />}
-                            {result.confidence === "low" && <AlertCircle className="w-2.5 h-2.5" />}
-                            {result.confidence.charAt(0).toUpperCase() + result.confidence.slice(1)}
-                          </span>
+                          <div className="flex items-center justify-center gap-2">
+                            <span
+                              title={`Confidence: ${result.confidence}`}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
+                              result.confidence === "high" 
+                                ? "bg-success/15 text-success" 
+                                : result.confidence === "medium"
+                                ? "bg-warning/15 text-warning"
+                                : "bg-destructive/15 text-destructive"
+                            }`}
+                            >
+                              {result.confidence === "high" && <Check className="w-2.5 h-2.5" />}
+                              {result.confidence === "low" && <AlertCircle className="w-2.5 h-2.5" />}
+                              {result.confidence.charAt(0).toUpperCase() + result.confidence.slice(1)}
+                            </span>
+                            {isOutlier(result.startDelay, result.endDelay) && (
+                              <span className="text-[10px] px-2 py-0.5 rounded bg-warning/15 text-warning">
+                                Outlier
+                              </span>
+                            )}
+                            <button
+                              onClick={() => handleCopyDelay(result)}
+                              className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
+                              title="Copy delay"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
