@@ -12,8 +12,6 @@ dist
 dist-ssr
 *.local
 src-tauri/bin/audiosync-cli*
-resources/ffmpeg/ffmpeg.exe
-resources/ffmpeg/ffprobe.exe
 
 # Editor directories and files
 .vscode/*
