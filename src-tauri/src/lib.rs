@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Window};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri::path::BaseDirectory;
 use tauri_plugin_dialog::DialogExt;
 
@@ -41,6 +42,7 @@ struct SyncResult {
   startDelay: Option<f64>,
   endDelay: Option<f64>,
   error: Option<String>,
+  elapsedMs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,9 +69,23 @@ enum BridgeMessage {
     startDelay: Option<f64>,
     endDelay: Option<f64>,
     error: Option<String>,
+    elapsed_ms: Option<u64>,
   },
   #[serde(rename = "done")]
   Done { results: Vec<SyncResult> },
+}
+
+#[derive(Clone)]
+struct SyncState {
+  cancel: Arc<AtomicBool>,
+}
+
+impl SyncState {
+  fn new() -> Self {
+    Self {
+      cancel: Arc::new(AtomicBool::new(false)),
+    }
+  }
 }
 
 async fn pick_folder_async(window: Window) -> Option<PathBuf> {
@@ -199,9 +215,15 @@ async fn pick_audio_files(window: Window, mode: String) -> Result<PickResponse, 
 }
 
 #[tauri::command]
-async fn start_sync(app: AppHandle, request: SyncRequest) -> Result<Vec<SyncResult>, String> {
+async fn start_sync(
+  app: AppHandle,
+  state: State<'_, SyncState>,
+  request: SyncRequest,
+) -> Result<Vec<SyncResult>, String> {
+  state.cancel.store(false, Ordering::SeqCst);
   let handle = app.clone();
-  tauri::async_runtime::spawn_blocking(move || run_bridge(handle, request))
+  let cancel = state.cancel.clone();
+  tauri::async_runtime::spawn_blocking(move || run_bridge(handle, request, cancel))
     .await
     .map_err(|err| err.to_string())?
 }
@@ -213,14 +235,15 @@ async fn export_csv(window: Window, results: Vec<SyncResult>) -> Result<String, 
     return Err("Export canceled".to_string());
   };
 
-  let mut csv = String::from("Video,Audio,Start Delay (ms),End Delay (ms),Error\n");
+  let mut csv = String::from("Video,Audio,Start Delay (ms),End Delay (ms),Elapsed (ms),Error\n");
   for result in results {
     let start = result.startDelay.map(|v| v.to_string()).unwrap_or_default();
     let end = result.endDelay.map(|v| v.to_string()).unwrap_or_default();
+    let elapsed = result.elapsedMs.map(|v| v.to_string()).unwrap_or_default();
     let err = result.error.unwrap_or_default();
     csv.push_str(&format!(
-      "\"{}\",\"{}\",{},{},\"{}\"\n",
-      result.videoFile, result.audioFile, start, end, err
+      "\"{}\",\"{}\",{},{},{},\"{}\"\n",
+      result.videoFile, result.audioFile, start, end, elapsed, err
     ));
   }
 
@@ -346,7 +369,100 @@ fn find_bridge_path() -> Option<PathBuf> {
   None
 }
 
-fn run_bridge(app: AppHandle, request: SyncRequest) -> Result<Vec<SyncResult>, String> {
+#[tauri::command]
+fn cancel_sync(state: State<'_, SyncState>) -> Result<(), String> {
+  state.cancel.store(true, Ordering::SeqCst);
+  Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct MediaProbe {
+  has_audio: bool,
+  has_video: bool,
+  duration: Option<f64>,
+}
+
+#[tauri::command]
+fn probe_media(path: String) -> Result<MediaProbe, String> {
+  let output = Command::new("ffprobe")
+    .args([
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-show_streams",
+      "-of",
+      "json",
+      &path,
+    ])
+    .output()
+    .map_err(|err| err.to_string())?;
+
+  if !output.status.success() {
+    return Err("ffprobe failed".to_string());
+  }
+
+  let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+  let streams = value.get("streams").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+  let mut has_audio = false;
+  let mut has_video = false;
+  for stream in streams {
+    if let Some(kind) = stream.get("codec_type").and_then(|v| v.as_str()) {
+      if kind == "audio" {
+        has_audio = true;
+      } else if kind == "video" {
+        has_video = true;
+      }
+    }
+  }
+
+  let duration = value
+    .get("format")
+    .and_then(|v| v.get("duration"))
+    .and_then(|v| v.as_str())
+    .and_then(|v| v.parse::<f64>().ok());
+
+  Ok(MediaProbe {
+    has_audio,
+    has_video,
+    duration,
+  })
+}
+
+#[tauri::command]
+fn open_output_folder(path: String) -> Result<(), String> {
+  let path = PathBuf::from(path);
+  if !path.exists() {
+    return Err("Path not found".to_string());
+  }
+
+  #[cfg(target_os = "windows")]
+  {
+    Command::new("explorer")
+      .arg("/select,")
+      .arg(path)
+      .spawn()
+      .map_err(|err| err.to_string())?;
+  }
+
+  #[cfg(not(target_os = "windows"))]
+  {
+    let folder = path.parent().unwrap_or(Path::new("."));
+    Command::new("open")
+      .arg(folder)
+      .spawn()
+      .or_else(|_| Command::new("xdg-open").arg(folder).spawn())
+      .map_err(|err| err.to_string())?;
+  }
+
+  Ok(())
+}
+
+fn run_bridge(
+  app: AppHandle,
+  request: SyncRequest,
+  cancel: Arc<AtomicBool>,
+) -> Result<Vec<SyncResult>, String> {
   let payload = serde_json::to_string(&request).map_err(|err| err.to_string())?;
 
   let mut command = if let Some(sidecar_path) = find_sidecar_path(&app) {
@@ -397,6 +513,11 @@ fn run_bridge(app: AppHandle, request: SyncRequest) -> Result<Vec<SyncResult>, S
   let mut results: Vec<SyncResult> = Vec::new();
   let reader = BufReader::new(stdout);
   for line in reader.lines().flatten() {
+    if cancel.load(Ordering::SeqCst) {
+      let _ = app.emit("sync-log", "Sync canceled by user.");
+      let _ = child.kill();
+      return Err("Canceled".to_string());
+    }
     let line = line.trim();
     if line.is_empty() {
       continue;
@@ -433,6 +554,7 @@ fn run_bridge(app: AppHandle, request: SyncRequest) -> Result<Vec<SyncResult>, S
         startDelay,
         endDelay,
         error,
+        elapsed_ms,
       }) => {
         let result = SyncResult {
           videoFile,
@@ -440,6 +562,7 @@ fn run_bridge(app: AppHandle, request: SyncRequest) -> Result<Vec<SyncResult>, S
           startDelay,
           endDelay,
           error,
+          elapsedMs: elapsed_ms,
         };
         results.push(result.clone());
         let _ = app.emit("sync-result", result);
@@ -471,8 +594,12 @@ pub fn run() {
       pick_video_files,
       pick_audio_files,
       start_sync,
+      cancel_sync,
+      probe_media,
+      open_output_folder,
       export_csv
     ])
+    .manage(SyncState::new())
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

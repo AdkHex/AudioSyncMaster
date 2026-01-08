@@ -89,13 +89,14 @@ def run_movie(request):
             elapsed_ms = int((time.time() - start_time) * 1000)
             emit({"type": "file_progress", "file": os.path.basename(video_path), "percent": 100})
             emit({"type": "file_end", "file": os.path.basename(video_path), "elapsed_ms": elapsed_ms})
-            return result
+            return result, elapsed_ms
 
         futures = {executor.submit(worker, video_path): video_path for video_path in video_files}
         for future in as_completed(futures):
             processed += 1
-            result = future.result()
+            result, elapsed_ms = future.result()
             normalized = normalize_result(result)
+            normalized["elapsed_ms"] = elapsed_ms
             results.append(normalized)
             emit(
                 {
@@ -145,13 +146,14 @@ def run_series(request):
             elapsed_ms = int((time.time() - start_time) * 1000)
             emit({"type": "file_progress", "file": os.path.basename(primary), "percent": 100})
             emit({"type": "file_end", "file": os.path.basename(primary), "elapsed_ms": elapsed_ms})
-            return result
+            return result, elapsed_ms
 
         futures = {executor.submit(worker, p, s): (p, s) for p, s in matched_pairs}
         for future in as_completed(futures):
             processed += 1
-            result = future.result()
+            result, elapsed_ms = future.result()
             normalized = normalize_result(result)
+            normalized["elapsed_ms"] = elapsed_ms
             results.append(normalized)
             emit(
                 {

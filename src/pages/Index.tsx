@@ -37,11 +37,18 @@ interface BridgeResult {
   audioFile: string;
   startDelay: number | null;
   endDelay: number | null;
+  elapsedMs?: number | null;
   error?: string | null;
 }
 
 interface SyncResult extends BridgeResult {
   confidence: "high" | "medium" | "low";
+}
+
+interface MediaProbe {
+  has_audio: boolean;
+  has_video: boolean;
+  duration?: number | null;
 }
 
 interface HistoryEntry {
@@ -83,6 +90,11 @@ export default function Index() {
   const [showConsole, setShowConsole] = useState(false);
   const processStartRef = useRef<number | null>(null);
   const currentFileRef = useRef<string | null>(null);
+  const [probeByPath, setProbeByPath] = useState<Record<string, MediaProbe>>({});
+  const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set());
+  const [selectedAudioIds, setSelectedAudioIds] = useState<Set<string>>(new Set());
+  const [lastVideoFolder, setLastVideoFolder] = useState<string | null>(null);
+  const [lastAudioFolder, setLastAudioFolder] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>(() => {
     const saved = localStorage.getItem("syncmaster-history");
     return saved ? JSON.parse(saved) : [];
@@ -135,6 +147,61 @@ export default function Index() {
   const getTotalSize = (files: FileItem[]) =>
     files.reduce((total, file) => total + (file.size || 0), 0);
 
+  useEffect(() => {
+    const savedVideo = localStorage.getItem("audiosync-last-video-folder");
+    const savedAudio = localStorage.getItem("audiosync-last-audio-folder");
+    setLastVideoFolder(savedVideo);
+    setLastAudioFolder(savedAudio);
+  }, []);
+
+  useEffect(() => {
+    if (videoFolder) {
+      localStorage.setItem("audiosync-last-video-folder", videoFolder);
+      setLastVideoFolder(videoFolder);
+    }
+  }, [videoFolder]);
+
+  useEffect(() => {
+    if (audioFolder) {
+      localStorage.setItem("audiosync-last-audio-folder", audioFolder);
+      setLastAudioFolder(audioFolder);
+    }
+  }, [audioFolder]);
+
+  const runProbe = async (file: FileItem) => {
+    if (!isTauri) return;
+    try {
+      const probe = await invoke<MediaProbe>("probe_media", { path: file.path });
+      setProbeByPath(prev => ({ ...prev, [file.path]: probe }));
+    } catch {
+      setProbeByPath(prev => ({ ...prev, [file.path]: { has_audio: false, has_video: false, duration: null } }));
+    }
+  };
+
+  const toggleSelection = (id: string, type: "video" | "audio") => {
+    if (type === "video") {
+      setSelectedVideoIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        return next;
+      });
+    } else {
+      setSelectedAudioIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        return next;
+      });
+    }
+  };
+
   const handleDrop = useCallback((e: React.DragEvent, type: "video" | "audio") => {
     e.preventDefault();
     setDragOver(null);
@@ -151,6 +218,8 @@ export default function Index() {
     if (type === "video") {
       setVideoFiles(prev => [...prev, ...newFiles]);
       setVideoSource("files");
+      newFiles.forEach(runProbe);
+      setSelectedVideoIds(new Set());
       if (!videoFolder && newFiles.length > 0) {
         const folder = getParentFolder(newFiles[0].path);
         setVideoFolder(folder);
@@ -166,6 +235,8 @@ export default function Index() {
         setAudioFiles(prev => [...prev, ...newFiles]);
         setAudioSource("folder");
       }
+      newFiles.forEach(runProbe);
+      setSelectedAudioIds(new Set());
       if (!audioFolder && newFiles.length > 0) {
         const folder = getParentFolder(newFiles[0].path);
         setAudioFolder(folder);
@@ -187,13 +258,14 @@ export default function Index() {
     try {
       if (type === "video") {
         const response = await invoke<PickResponse>("pick_video_files", { mode });
-        setVideoFiles(
-          response.files.map((file, index) => ({
-            ...file,
-            id: `video-${Date.now()}-${index}`,
-            type: "video",
-          }))
-        );
+        const mapped = response.files.map((file, index) => ({
+          ...file,
+          id: `video-${Date.now()}-${index}`,
+          type: "video",
+        }));
+        setVideoFiles(mapped);
+        mapped.forEach(runProbe);
+        setSelectedVideoIds(new Set());
         setVideoFolder(response.folder);
         setVideoSource(response.folder ? "folder" : null);
         if (response.files.length > 0) {
@@ -201,13 +273,14 @@ export default function Index() {
         }
       } else {
         const response = await invoke<PickResponse>("pick_audio_files", { mode });
-        setAudioFiles(
-          response.files.map((file, index) => ({
-            ...file,
-            id: `audio-${Date.now()}-${index}`,
-            type: "audio",
-          }))
-        );
+        const mapped = response.files.map((file, index) => ({
+          ...file,
+          id: `audio-${Date.now()}-${index}`,
+          type: "audio",
+        }));
+        setAudioFiles(mapped);
+        mapped.forEach(runProbe);
+        setSelectedAudioIds(new Set());
         setAudioFolder(response.folder);
         setAudioSource(mode === "movie" ? "file" : response.folder ? "folder" : null);
         if (response.files.length > 0) {
@@ -222,8 +295,28 @@ export default function Index() {
   const removeFile = (id: string, type: "video" | "audio") => {
     if (type === "video") {
       setVideoFiles(prev => prev.filter(f => f.id !== id));
+      setSelectedVideoIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     } else {
       setAudioFiles(prev => prev.filter(f => f.id !== id));
+      setSelectedAudioIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const removeSelected = (type: "video" | "audio") => {
+    if (type === "video") {
+      setVideoFiles(prev => prev.filter(file => !selectedVideoIds.has(file.id)));
+      setSelectedVideoIds(new Set());
+    } else {
+      setAudioFiles(prev => prev.filter(file => !selectedAudioIds.has(file.id)));
+      setSelectedAudioIds(new Set());
     }
   };
 
@@ -301,6 +394,16 @@ export default function Index() {
     }
   };
 
+  const handleCancel = async () => {
+    if (!isTauri) return;
+    try {
+      await invoke("cancel_sync");
+      toast.info("Canceling current run...");
+    } catch {
+      toast.error("Failed to cancel");
+    }
+  };
+
   const clearAll = (showToast = true) => {
     setVideoFiles([]);
     setAudioFiles([]);
@@ -315,6 +418,9 @@ export default function Index() {
     setFileProgress(0);
     setEta("--");
     setLogs([]);
+    setProbeByPath({});
+    setSelectedVideoIds(new Set());
+    setSelectedAudioIds(new Set());
     currentFileRef.current = null;
     processStartRef.current = null;
     if (showToast && (videoFiles.length > 0 || audioFiles.length > 0)) {
@@ -352,7 +458,8 @@ export default function Index() {
       return;
     }
     try {
-      await invoke("export_csv", { results: resultsToExport });
+      const savedPath = await invoke<string>("export_csv", { results: resultsToExport });
+      await invoke("open_output_folder", { path: savedPath });
       toast.success("Exported to CSV");
     } catch (error) {
       toast.error("Export canceled or failed");
@@ -479,6 +586,12 @@ export default function Index() {
   const visibleHistory = showAllHistory ? history : history.slice(0, 10);
   const statusLabel =
     status === "processing" ? "Processing" : status === "complete" ? "Complete" : "Ready";
+  const resultCounts = {
+    high: results.filter(result => result.confidence === "high").length,
+    medium: results.filter(result => result.confidence === "medium").length,
+    low: results.filter(result => result.confidence === "low").length,
+    error: results.filter(result => !!result.error).length,
+  };
 
   return (
     <div className="h-screen flex flex-col bg-background">
@@ -577,9 +690,21 @@ export default function Index() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    {selectedVideoIds.size > 0 && (
+                      <button
+                        onClick={() => removeSelected("video")}
+                        className="text-[10px] text-muted-foreground hover:text-destructive"
+                        title="Remove selected"
+                      >
+                        Remove
+                      </button>
+                    )}
                     {videoFiles.length > 0 && (
                       <button
-                        onClick={() => setVideoFiles([])}
+                        onClick={() => {
+                          setVideoFiles([]);
+                          setSelectedVideoIds(new Set());
+                        }}
                         className="text-[10px] text-muted-foreground hover:text-destructive"
                         title="Clear video files"
                       >
@@ -598,13 +723,32 @@ export default function Index() {
                 {videoFiles.length === 0 ? (
                   <div className="py-6 text-center">
                     <p className="text-xs text-muted-foreground">Drop video files here • Click Browse</p>
+                    {lastVideoFolder && (
+                      <p className="text-[10px] text-muted-foreground mt-2">
+                        Last used: {lastVideoFolder}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-1.5 max-h-32 overflow-auto">
                     {videoFiles.map(file => (
                       <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
+                        <input
+                          type="checkbox"
+                          checked={selectedVideoIds.has(file.id)}
+                          onChange={() => toggleSelection(file.id, "video")}
+                          className="h-3 w-3 accent-primary"
+                        />
                         <FileVideo className="w-3.5 h-3.5 text-warning shrink-0" />
                         <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
+                        {probeByPath[file.path] && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            probeByPath[file.path].has_video ? "bg-success/15 text-success" : "bg-destructive/15 text-destructive"
+                          }`}>
+                            {probeByPath[file.path].has_video ? "Video OK" : "No video stream"}
+                          </span>
+                        )}
                         <button
                           onClick={() => removeFile(file.id, "video")}
                           className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-destructive/20 rounded transition-opacity"
@@ -642,11 +786,23 @@ export default function Index() {
                   <div className="flex items-center gap-2">
                     {audioFiles.length > 0 && (
                       <button
-                        onClick={() => setAudioFiles([])}
+                        onClick={() => {
+                          setAudioFiles([]);
+                          setSelectedAudioIds(new Set());
+                        }}
                         className="text-[10px] text-muted-foreground hover:text-destructive"
                         title="Clear audio files"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    {selectedAudioIds.size > 0 && (
+                      <button
+                        onClick={() => removeSelected("audio")}
+                        className="text-[10px] text-muted-foreground hover:text-destructive"
+                        title="Remove selected"
+                      >
+                        Remove
                       </button>
                     )}
                     <button
@@ -661,13 +817,32 @@ export default function Index() {
                 {audioFiles.length === 0 ? (
                   <div className="py-6 text-center">
                     <p className="text-xs text-muted-foreground">Drop audio files here • Click Browse</p>
+                    {lastAudioFolder && (
+                      <p className="text-[10px] text-muted-foreground mt-2">
+                        Last used: {lastAudioFolder}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-1.5 max-h-32 overflow-auto">
                     {audioFiles.map(file => (
                       <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
+                        <input
+                          type="checkbox"
+                          checked={selectedAudioIds.has(file.id)}
+                          onChange={() => toggleSelection(file.id, "audio")}
+                          className="h-3 w-3 accent-primary"
+                        />
                         <FileAudio className="w-3.5 h-3.5 text-success shrink-0" />
                         <span className="text-xs text-foreground truncate flex-1">{file.name}</span>
+                        <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
+                        {probeByPath[file.path] && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            probeByPath[file.path].has_audio ? "bg-success/15 text-success" : "bg-destructive/15 text-destructive"
+                          }`}>
+                            {probeByPath[file.path].has_audio ? "Audio OK" : "No audio stream"}
+                          </span>
+                        )}
                         <button
                           onClick={() => removeFile(file.id, "audio")}
                           className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-destructive/20 rounded transition-opacity"
@@ -725,6 +900,14 @@ export default function Index() {
                 <Play className="w-4 h-4" />
                 Start Analysis
               </button>
+              {status === "processing" && (
+                <button
+                  onClick={handleCancel}
+                  className="flex items-center gap-2 border border-border text-muted-foreground hover:text-foreground hover:bg-secondary px-4 py-2 rounded-md text-sm font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
               
               {(videoFiles.length > 0 || audioFiles.length > 0) && status !== "processing" && (
                 <button
@@ -781,6 +964,12 @@ export default function Index() {
                       Export
                     </button>
                   </div>
+                </div>
+                <div className="px-4 pb-2 text-[10px] text-muted-foreground flex items-center gap-3">
+                  <span>High: {resultCounts.high}</span>
+                  <span>Medium: {resultCounts.medium}</span>
+                  <span>Low: {resultCounts.low}</span>
+                  <span>Errors: {resultCounts.error}</span>
                 </div>
                 {results.some(result => result.confidence === "low" || result.startDelay === null || result.endDelay === null) && (
                   <div className="px-4 pb-2 text-[11px] text-warning">
