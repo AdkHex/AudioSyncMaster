@@ -1,5 +1,5 @@
 [package]
-name = "audiosyncmaster by Ionicboy"
+name = "audiosyncmaster"
 version = "1.0.0"
 description = "Audio Sync App made by Ionicboy"
 authors = ["Ionicboy"]
