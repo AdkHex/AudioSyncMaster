@@ -29,6 +29,7 @@ interface FileItem {
   name: string;
   path: string;
   type: "video" | "audio";
+  size?: number;
 }
 
 interface BridgeResult {
@@ -64,6 +65,8 @@ export default function Index() {
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const [resultFilter, setResultFilter] = useState<"all" | "high" | "medium" | "low">("all");
   const [segmentDuration, setSegmentDuration] = useState(600);
   const [matchPattern, setMatchPattern] = useState("S(\\d+)E(\\d+)");
   const [results, setResults] = useState<SyncResult[]>([]);
@@ -117,6 +120,21 @@ export default function Index() {
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   };
 
+  const formatSize = (bytes?: number) => {
+    if (!bytes || bytes <= 0) return "--";
+    const units = ["B", "KB", "MB", "GB"];
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex += 1;
+    }
+    return `${size.toFixed(unitIndex === 0 ? 0 : 1)}${units[unitIndex]}`;
+  };
+
+  const getTotalSize = (files: FileItem[]) =>
+    files.reduce((total, file) => total + (file.size || 0), 0);
+
   const handleDrop = useCallback((e: React.DragEvent, type: "video" | "audio") => {
     e.preventDefault();
     setDragOver(null);
@@ -127,6 +145,7 @@ export default function Index() {
       name: file.name,
       path: (file as unknown as { path?: string }).path || file.name,
       type,
+      size: file.size,
     }));
 
     if (type === "video") {
@@ -168,7 +187,13 @@ export default function Index() {
     try {
       if (type === "video") {
         const response = await invoke<PickResponse>("pick_video_files", { mode });
-        setVideoFiles(response.files);
+        setVideoFiles(
+          response.files.map((file, index) => ({
+            ...file,
+            id: `video-${Date.now()}-${index}`,
+            type: "video",
+          }))
+        );
         setVideoFolder(response.folder);
         setVideoSource(response.folder ? "folder" : null);
         if (response.files.length > 0) {
@@ -176,7 +201,13 @@ export default function Index() {
         }
       } else {
         const response = await invoke<PickResponse>("pick_audio_files", { mode });
-        setAudioFiles(response.files);
+        setAudioFiles(
+          response.files.map((file, index) => ({
+            ...file,
+            id: `audio-${Date.now()}-${index}`,
+            type: "audio",
+          }))
+        );
         setAudioFolder(response.folder);
         setAudioSource(mode === "movie" ? "file" : response.folder ? "folder" : null);
         if (response.files.length > 0) {
@@ -309,6 +340,12 @@ export default function Index() {
     toast.info("History cleared");
   };
 
+  const exportHistoryAll = () => {
+    if (history.length === 0) return;
+    const merged = history.flatMap(entry => entry.results);
+    exportResults(merged);
+  };
+
   const exportResults = async (resultsToExport: SyncResult[]) => {
     if (!isTauri) {
       toast.error("Export is only available in the desktop app.");
@@ -435,10 +472,18 @@ export default function Index() {
     return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  const filteredResults = resultFilter === "all"
+    ? results
+    : results.filter(result => result.confidence === resultFilter);
+
+  const visibleHistory = showAllHistory ? history : history.slice(0, 10);
+  const statusLabel =
+    status === "processing" ? "Processing" : status === "complete" ? "Complete" : "Ready";
+
   return (
     <div className="h-screen flex flex-col bg-background">
       {/* Header */}
-      <header className="h-12 px-4 flex items-center justify-between bg-card">
+      <header className="h-12 px-4 flex items-center justify-between bg-card border-b border-border">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-primary-foreground">
@@ -447,10 +492,10 @@ export default function Index() {
               <circle cx="18" cy="16" r="3" stroke="currentColor" strokeWidth="2.5"/>
             </svg>
           </div>
-          <span className="text-sm font-semibold text-foreground">SyncMaster</span>
+          <span className="text-sm font-semibold text-foreground">AudioSyncMaster</span>
           <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">v2.0</span>
         </div>
-        
+
         <div className="flex items-center gap-1 bg-secondary p-0.5 rounded-md">
           <button
             onClick={() => { setMode("movie"); clearAll(false); }}
@@ -472,7 +517,16 @@ export default function Index() {
           </button>
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] px-2 py-1 rounded border ${
+            status === "processing"
+              ? "bg-warning/10 text-warning border-warning/20"
+              : status === "complete"
+              ? "bg-success/10 text-success border-success/20"
+              : "bg-secondary text-muted-foreground border-border"
+          }`}>
+            {statusLabel}
+          </span>
           <ThemeToggle />
           <button
             onClick={() => setShowHistory(!showHistory)}
@@ -500,32 +554,6 @@ export default function Index() {
         <div className="flex-1 p-4 overflow-auto">
           <div className="max-w-3xl mx-auto space-y-4">
             
-            {/* Advanced Settings */}
-            {showAdvanced && (
-              <div className="p-3 rounded-lg bg-card flex items-center gap-4">
-                <div className="flex-1">
-                  <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">Segment Duration</label>
-                  <input
-                    type="number"
-                    value={segmentDuration}
-                    onChange={(e) => setSegmentDuration(Number(e.target.value))}
-                    className="w-full bg-input rounded px-3 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                  />
-                </div>
-                {mode === "series" && (
-                  <div className="flex-1">
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">Match Pattern</label>
-                    <input
-                      type="text"
-                      value={matchPattern}
-                      onChange={(e) => setMatchPattern(e.target.value)}
-                      className="w-full bg-input rounded px-3 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Drop Zones */}
             <div className="grid grid-cols-2 gap-3">
               {/* Video Drop Zone */}
@@ -541,19 +569,35 @@ export default function Index() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <FolderOpen className="w-4 h-4 text-warning" />
-                    <span className="text-sm font-medium text-foreground">Video Files</span>
+                    <div>
+                      <span className="text-sm font-medium text-foreground">Video Files</span>
+                      <div className="text-[10px] text-muted-foreground">
+                        {videoFiles.length} files • {formatSize(getTotalSize(videoFiles))}
+                      </div>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => handleSelectFolder("video")}
-                    className="text-[10px] text-primary hover:underline"
-                  >
-                    Browse
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {videoFiles.length > 0 && (
+                      <button
+                        onClick={() => setVideoFiles([])}
+                        className="text-[10px] text-muted-foreground hover:text-destructive"
+                        title="Clear video files"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleSelectFolder("video")}
+                      className="text-[10px] text-primary hover:underline"
+                    >
+                      Browse
+                    </button>
+                  </div>
                 </div>
                 
                 {videoFiles.length === 0 ? (
                   <div className="py-6 text-center">
-                    <p className="text-xs text-muted-foreground">Drop video files here</p>
+                    <p className="text-xs text-muted-foreground">Drop video files here • Click Browse</p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 max-h-32 overflow-auto">
@@ -586,21 +630,37 @@ export default function Index() {
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <Music className="w-4 h-4 text-success" />
-                    <span className="text-sm font-medium text-foreground">
-                      {mode === "movie" ? "Audio File" : "Audio Files"}
-                    </span>
+                    <div>
+                      <span className="text-sm font-medium text-foreground">
+                        {mode === "movie" ? "Audio File" : "Audio Files"}
+                      </span>
+                      <div className="text-[10px] text-muted-foreground">
+                        {audioFiles.length} files • {formatSize(getTotalSize(audioFiles))}
+                      </div>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => handleSelectFolder("audio")}
-                    className="text-[10px] text-primary hover:underline"
-                  >
-                    Browse
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {audioFiles.length > 0 && (
+                      <button
+                        onClick={() => setAudioFiles([])}
+                        className="text-[10px] text-muted-foreground hover:text-destructive"
+                        title="Clear audio files"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleSelectFolder("audio")}
+                      className="text-[10px] text-primary hover:underline"
+                    >
+                      Browse
+                    </button>
+                  </div>
                 </div>
                 
                 {audioFiles.length === 0 ? (
                   <div className="py-6 text-center">
-                    <p className="text-xs text-muted-foreground">Drop audio files here</p>
+                    <p className="text-xs text-muted-foreground">Drop audio files here • Click Browse</p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 max-h-32 overflow-auto">
@@ -623,40 +683,34 @@ export default function Index() {
 
             {/* Progress Bar */}
             {status === "processing" && (
-              <div className="p-3 rounded-lg bg-card">
-                <div className="flex items-center justify-between mb-2">
+              <div className="rounded-lg bg-card border border-border px-4 py-3">
+                <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-2">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-foreground font-medium">Processing...</span>
+                    <span className="text-foreground font-medium">Processing</span>
                     {currentFile && (
-                      <span className="text-[10px] text-muted-foreground truncate max-w-[200px]">
-                        {currentFile}
-                      </span>
+                      <span className="truncate max-w-[260px]">{currentFile}</span>
                     )}
                   </div>
-                  <span className="text-xs text-muted-foreground">
-                    {progress.current} / {progress.total} files
-                  </span>
-                </div>
-                <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-primary rounded-full transition-all duration-300"
-                    style={{ width: `${progress.percent}%`, animation: 'progress-pulse 1.5s ease-in-out infinite' }}
-                  />
-                </div>
-                <div className="text-right mt-1">
-                  <span className="text-[10px] text-primary font-medium">{progress.percent}%</span>
-                </div>
-                <div className="mt-3">
-                  <div className="flex items-center justify-between text-[10px] text-muted-foreground mb-1">
-                    <span>Current file</span>
+                  <div className="flex items-center gap-3">
+                    <span>{progress.current}/{progress.total}</span>
                     <span>{eta !== "--" ? `ETA ${eta}` : "ETA --"}</span>
                   </div>
-                  <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-success rounded-full transition-all duration-300"
-                      style={{ width: `${fileProgress}%` }}
-                    />
-                  </div>
+                </div>
+                <div className="h-1 bg-secondary rounded-full overflow-hidden mb-2">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all duration-300"
+                    style={{ width: `${progress.percent}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                  <span>Overall {progress.percent}%</span>
+                  <span>Current file {fileProgress}%</span>
+                </div>
+                <div className="h-1 bg-secondary rounded-full overflow-hidden mt-2">
+                  <div
+                    className="h-full bg-success rounded-full transition-all duration-300"
+                    style={{ width: `${fileProgress}%` }}
+                  />
                 </div>
               </div>
             )}
@@ -675,9 +729,10 @@ export default function Index() {
               {(videoFiles.length > 0 || audioFiles.length > 0) && status !== "processing" && (
                 <button
                   onClick={() => clearAll(true)}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                  title="Clear all files"
                 >
-                  Clear All
+                  <Trash2 className="w-4 h-4" />
                 </button>
               )}
               
@@ -702,13 +757,30 @@ export default function Index() {
               <div className="rounded-lg bg-card overflow-hidden">
                 <div className="px-4 py-3 flex items-center justify-between">
                   <span className="text-sm font-medium text-foreground">Results</span>
-                  <button 
-                    onClick={() => exportResults(results)}
-                    className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Export
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1 bg-secondary rounded-md p-0.5">
+                      {(["all", "high", "medium", "low"] as const).map((level) => (
+                        <button
+                          key={level}
+                          onClick={() => setResultFilter(level)}
+                          className={`px-2 py-1 text-[10px] rounded ${
+                            resultFilter === level
+                              ? "bg-card text-foreground shadow-sm"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {level === "all" ? "All" : level.charAt(0).toUpperCase() + level.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                    <button 
+                      onClick={() => exportResults(results)}
+                      className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Export
+                    </button>
+                  </div>
                 </div>
                 {results.some(result => result.confidence === "low" || result.startDelay === null || result.endDelay === null) && (
                   <div className="px-4 pb-2 text-[11px] text-warning">
@@ -718,15 +790,15 @@ export default function Index() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-secondary/50">
-                      <th className="text-left font-medium text-muted-foreground px-4 py-2">Video</th>
-                      <th className="text-left font-medium text-muted-foreground px-4 py-2">Audio</th>
-                      <th className="text-right font-medium text-muted-foreground px-4 py-2">Start</th>
-                      <th className="text-right font-medium text-muted-foreground px-4 py-2">End</th>
-                      <th className="text-center font-medium text-muted-foreground px-4 py-2">Status</th>
+                      <th className="text-left font-medium text-muted-foreground px-4 py-2 sticky top-0 bg-secondary/50">Video</th>
+                      <th className="text-left font-medium text-muted-foreground px-4 py-2 sticky top-0 bg-secondary/50">Audio</th>
+                      <th className="text-right font-medium text-muted-foreground px-4 py-2 sticky top-0 bg-secondary/50">Start</th>
+                      <th className="text-right font-medium text-muted-foreground px-4 py-2 sticky top-0 bg-secondary/50">End</th>
+                      <th className="text-center font-medium text-muted-foreground px-4 py-2 sticky top-0 bg-secondary/50">Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {results.map((result, index) => (
+                    {filteredResults.map((result, index) => (
                       <tr key={index} className="border-t border-border/50">
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-2">
@@ -747,13 +819,16 @@ export default function Index() {
                           {result.endDelay !== null ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms` : "--"}
                         </td>
                         <td className="px-4 py-2.5 text-center">
-                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
+                          <span
+                            title={`Confidence: ${result.confidence}`}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
                             result.confidence === "high" 
                               ? "bg-success/15 text-success" 
                               : result.confidence === "medium"
                               ? "bg-warning/15 text-warning"
                               : "bg-destructive/15 text-destructive"
-                          }`}>
+                          }`}
+                          >
                             {result.confidence === "high" && <Check className="w-2.5 h-2.5" />}
                             {result.confidence === "low" && <AlertCircle className="w-2.5 h-2.5" />}
                             {result.confidence.charAt(0).toUpperCase() + result.confidence.slice(1)}
@@ -782,17 +857,30 @@ export default function Index() {
 
         {/* History Panel */}
         {showHistory && (
-          <div className="w-72 border-l border-border bg-card/50 flex flex-col">
+          <div className="w-80 border-l border-border bg-card/60 flex flex-col shadow-apple-md">
             <div className="p-3 flex items-center justify-between border-b border-border">
-              <span className="text-sm font-medium text-foreground">History</span>
-              {history.length > 0 && (
-                <button
-                  onClick={clearHistory}
-                  className="text-[10px] text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  Clear All
-                </button>
-              )}
+              <div>
+                <span className="text-sm font-medium text-foreground">History</span>
+                <div className="text-[10px] text-muted-foreground">{history.length} entries</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {history.length > 0 && (
+                  <button
+                    onClick={exportHistoryAll}
+                    className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    Export All
+                  </button>
+                )}
+                {history.length > 0 && (
+                  <button
+                    onClick={clearHistory}
+                    className="text-[10px] text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             </div>
             <div className="flex-1 overflow-auto">
               {history.length === 0 ? (
@@ -802,7 +890,7 @@ export default function Index() {
                 </div>
               ) : (
                 <div className="p-2 space-y-1">
-                  {history.map(entry => (
+                  {visibleHistory.map(entry => (
                     <div
                       key={entry.id}
                       className="p-2.5 rounded-lg bg-secondary/30 hover:bg-secondary/50 transition-colors group"
@@ -842,6 +930,14 @@ export default function Index() {
                       </div>
                     </div>
                   ))}
+                  {history.length > 10 && (
+                    <button
+                      onClick={() => setShowAllHistory(prev => !prev)}
+                      className="w-full text-[10px] text-muted-foreground hover:text-foreground py-2"
+                    >
+                      {showAllHistory ? "Show less" : "Show more"}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -857,6 +953,56 @@ export default function Index() {
           <span>Segment: {segmentDuration}s</span>
         </div>
       </footer>
+
+      {showAdvanced && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-lg bg-card border border-border shadow-apple-lg">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">Advanced Settings</span>
+              <button
+                onClick={() => setShowAdvanced(false)}
+                className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">
+                  Segment Duration (seconds)
+                </label>
+                <input
+                  type="number"
+                  value={segmentDuration}
+                  onChange={(e) => setSegmentDuration(Number(e.target.value))}
+                  className="w-full bg-input rounded px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+              {mode === "series" && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 block">
+                    Match Pattern
+                  </label>
+                  <input
+                    type="text"
+                    value={matchPattern}
+                    onChange={(e) => setMatchPattern(e.target.value)}
+                    className="w-full bg-input rounded px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowAdvanced(false)}
+                  className="px-3 py-1.5 text-xs rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

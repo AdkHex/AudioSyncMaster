@@ -14,6 +14,7 @@ struct FileItem {
   path: String,
   #[serde(rename = "type")]
   file_type: String,
+  size: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -160,12 +161,14 @@ async fn pick_audio_files(window: Window, mode: String) -> Result<PickResponse, 
       .file_name()
       .map(|s| s.to_string_lossy().to_string())
       .unwrap_or_default();
+    let size = fs::metadata(&file).map(|meta| meta.len()).ok();
     return Ok(PickResponse {
       folder: file.parent().map(|p| p.to_string_lossy().to_string()),
       files: vec![FileItem {
         name,
         path: file.to_string_lossy().to_string(),
         file_type: "audio".to_string(),
+        size,
       }],
     });
   }
@@ -234,6 +237,7 @@ fn list_movie_videos(folder: &Path) -> Vec<FileItem> {
       if !path.is_file() {
         continue;
       }
+      let size = fs::metadata(&path).map(|meta| meta.len()).ok();
       let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
       if !exts.contains(&ext.as_str()) {
         continue;
@@ -243,6 +247,7 @@ fn list_movie_videos(folder: &Path) -> Vec<FileItem> {
         name,
         path: path.to_string_lossy().to_string(),
         file_type: "video".to_string(),
+        size,
       });
     }
   }
@@ -257,11 +262,13 @@ fn list_folder_files(folder: &Path) -> Vec<FileItem> {
       if !path.is_file() {
         continue;
       }
+      let size = fs::metadata(&path).map(|meta| meta.len()).ok();
       let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
       items.push(FileItem {
         name,
         path: path.to_string_lossy().to_string(),
         file_type: "video".to_string(),
+        size,
       });
     }
   }
