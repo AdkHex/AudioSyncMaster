@@ -1,4 +1,4 @@
-# AudioSync
+# AudioSyncMaster
 
 Windows audio sync utility packaged with Tauri.
 
