@@ -462,6 +462,8 @@ export default function Index() {
         toast.info("Analysis canceled");
       } else {
         toast.error("Analysis failed. Check logs for details.");
+        setLogs(prev => [...prev, `Error: ${message}`].slice(-200));
+        setShowConsole(true);
       }
     }
   };
@@ -1055,14 +1057,12 @@ export default function Index() {
                   Complete
                 </div>
               )}
-              {logs.length > 0 && (
-                <button
-                  onClick={() => setShowConsole(prev => !prev)}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showConsole ? "Hide Console" : "Show Console"}
-                </button>
-              )}
+              <button
+                onClick={() => setShowConsole(prev => !prev)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {showConsole ? "Hide Console" : "Show Console"}
+              </button>
             </div>
 
             {/* Results */}
@@ -1202,16 +1202,22 @@ export default function Index() {
                 </table>
               </div>
             )}
-            {showConsole && logs.length > 0 && (
+            {showConsole && (
               <div className="rounded-lg bg-card p-3">
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
                   Console
                 </div>
-                <div className="max-h-40 overflow-auto text-[11px] font-mono text-muted-foreground space-y-1">
-                  {logs.map((line, index) => (
-                    <div key={index} className="whitespace-pre-wrap">{line}</div>
-                  ))}
-                </div>
+                {logs.length === 0 ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    No logs yet. Start an analysis to see output.
+                  </div>
+                ) : (
+                  <div className="max-h-40 overflow-auto text-[11px] font-mono text-muted-foreground space-y-1">
+                    {logs.map((line, index) => (
+                      <div key={index} className="whitespace-pre-wrap">{line}</div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
