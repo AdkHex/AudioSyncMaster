@@ -1,0 +1,96 @@
+name: Build Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Read app version
+        id: app_version
+        shell: pwsh
+        run: |
+          $config = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          "version=$($config.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r python/requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Python sidecar
+        shell: pwsh
+        run: |
+          pyinstaller --onefile --clean `
+            --add-data "Python Files;Python Files" `
+            --hidden-import numpy `
+            --hidden-import scipy `
+            --hidden-import librosa `
+            --hidden-import soundfile `
+            --hidden-import numba `
+            --hidden-import llvmlite `
+            --hidden-import rich `
+            --hidden-import pymediainfo `
+            --hidden-import packaging `
+            --collect-all numpy `
+            --collect-all scipy `
+            --collect-all librosa `
+            --collect-all soundfile `
+            --collect-all rich `
+            --collect-all pymediainfo `
+            python/bridge.py -n audiosync-cli
+          New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
+          Copy-Item dist/audiosync-cli.exe src-tauri/bin/audiosync-cli-x86_64-pc-windows-msvc.exe -Force
+
+      - name: Create tag if needed
+        shell: pwsh
+        run: |
+          git fetch --tags
+          $version = "${{ steps.app_version.outputs.version }}"
+          $tag = "v$version"
+          $exists = git tag -l $tag
+          if (-not $exists) {
+            git tag $tag
+            git push origin $tag
+          }
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v${{ steps.app_version.outputs.version }}
+          releaseName: AudioSyncMaster v${{ steps.app_version.outputs.version }}
+          releaseBody: |
+            Automated build for AudioSyncMaster.
+          releaseDraft: false
+          prerelease: false

@@ -15,7 +15,6 @@ import {
   History,
   Trash2,
   RotateCcw,
-  Copy,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { toast } from "sonner";
@@ -237,15 +236,12 @@ export default function Index() {
     });
   };
 
-  const handleCopyDelay = async (result: SyncResult) => {
-    const start = result.startDelay !== null ? `${result.startDelay.toFixed(1)}ms` : "--";
-    const end = result.endDelay !== null ? `${result.endDelay.toFixed(1)}ms` : "--";
-    const text = `${result.videoFile} | Start ${start} | End ${end}`;
+  const handleCopyText = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      toast.success("Delay copied");
+      toast.success("Copied");
     } catch {
-      toast.error("Failed to copy delay");
+      toast.error("Failed to copy");
     }
   };
 
@@ -816,7 +812,13 @@ export default function Index() {
                           className="h-3 w-3 accent-primary"
                         />
                         <FileVideo className="w-3.5 h-3.5 text-warning shrink-0" />
-                        <span className="text-xs text-foreground flex-1 break-all">{file.name}</span>
+                        <span
+                          className="text-xs text-foreground flex-1 break-all cursor-pointer select-text"
+                          onClick={() => handleCopyText(file.name)}
+                          title="Click to copy filename"
+                        >
+                          {file.name}
+                        </span>
                         <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
                         {probeByPath[file.path] && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -915,7 +917,13 @@ export default function Index() {
                           className="h-3 w-3 accent-primary"
                         />
                         <FileAudio className="w-3.5 h-3.5 text-success shrink-0" />
-                        <span className="text-xs text-foreground flex-1 break-all">{file.name}</span>
+                        <span
+                          className="text-xs text-foreground flex-1 break-all cursor-pointer select-text"
+                          onClick={() => handleCopyText(file.name)}
+                          title="Click to copy filename"
+                        >
+                          {file.name}
+                        </span>
                         <span className="text-[10px] text-muted-foreground">{formatSize(file.size)}</span>
                         {probeByPath[file.path] && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -1114,20 +1122,56 @@ export default function Index() {
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-2">
                             <FileVideo className="w-3.5 h-3.5 text-warning" />
-                            <span className="text-foreground break-all">{result.videoFile}</span>
+                            <span
+                              className="text-foreground break-all cursor-pointer select-text"
+                              onClick={() => handleCopyText(result.videoFile)}
+                              title="Click to copy video filename"
+                            >
+                              {result.videoFile}
+                            </span>
                           </div>
                         </td>
                         <td className="px-4 py-2.5">
                           <div className="flex items-center gap-2">
                             <FileAudio className="w-3.5 h-3.5 text-success" />
-                            <span className="text-muted-foreground break-all">{result.audioFile}</span>
+                            <span
+                              className="text-muted-foreground break-all cursor-pointer select-text"
+                              onClick={() => handleCopyText(result.audioFile)}
+                              title="Click to copy audio filename"
+                            >
+                              {result.audioFile}
+                            </span>
                           </div>
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-foreground">
-                          {result.startDelay !== null ? `${result.startDelay > 0 ? "+" : ""}${result.startDelay.toFixed(1)}ms` : "--"}
+                          <span
+                            className="cursor-pointer select-text"
+                            onClick={() =>
+                              handleCopyText(
+                                result.startDelay !== null
+                                  ? `${result.startDelay > 0 ? "+" : ""}${result.startDelay.toFixed(1)}ms`
+                                  : "--"
+                              )
+                            }
+                            title="Click to copy start delay"
+                          >
+                            {result.startDelay !== null ? `${result.startDelay > 0 ? "+" : ""}${result.startDelay.toFixed(1)}ms` : "--"}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5 text-right font-mono text-foreground">
-                          {result.endDelay !== null ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms` : "--"}
+                          <span
+                            className="cursor-pointer select-text"
+                            onClick={() =>
+                              handleCopyText(
+                                result.endDelay !== null
+                                  ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms`
+                                  : "--"
+                              )
+                            }
+                            title="Click to copy end delay"
+                          >
+                            {result.endDelay !== null ? `${result.endDelay > 0 ? "+" : ""}${result.endDelay.toFixed(1)}ms` : "--"}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5 text-center">
                           <div className="flex items-center justify-center gap-2">
@@ -1150,13 +1194,6 @@ export default function Index() {
                                 Outlier
                               </span>
                             )}
-                            <button
-                              onClick={() => handleCopyDelay(result)}
-                              className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
-                              title="Copy delay"
-                            >
-                              <Copy className="w-3 h-3" />
-                            </button>
                           </div>
                         </td>
                       </tr>

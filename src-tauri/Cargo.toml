@@ -1,11 +1,11 @@
 [package]
-name = "audiosyncmaster"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+name = "audiosyncmaster by Ionicboy"
+version = "1.0.0"
+description = "Audio Sync App made by Ionicboy"
+authors = ["Ionicboy"]
 license = ""
 repository = ""
-edition = "2021"
+edition = "2026"
 rust-version = "1.77.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
