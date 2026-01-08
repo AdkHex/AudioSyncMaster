@@ -244,7 +244,7 @@ export default function Index() {
     }
     
     toast.success(`Added ${items.length} ${type} file${items.length > 1 ? 's' : ''}`);
-  }, [audioFolder, mode, videoFolder]);
+  }, [audioFolder, mode, videoFolder, runProbe]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -390,7 +390,12 @@ export default function Index() {
     } catch (error) {
       setStatus("idle");
       processStartRef.current = null;
-      toast.error("Analysis failed. Check logs for details.");
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes("canceled")) {
+        toast.info("Analysis canceled");
+      } else {
+        toast.error("Analysis failed. Check logs for details.");
+      }
     }
   };
 
@@ -675,7 +680,7 @@ export default function Index() {
                 onDragOver={handleDragOver}
                 onDragEnter={() => setDragOver("video")}
                 onDragLeave={() => setDragOver(null)}
-                className={`rounded-lg bg-card p-4 transition-all ${
+                className={`relative rounded-lg bg-card p-4 transition-all ${
                   dragOver === "video" ? "ring-2 ring-primary bg-accent/20" : ""
                 }`}
               >
@@ -759,6 +764,11 @@ export default function Index() {
                     ))}
                   </div>
                 )}
+                {dragOver === "video" && (
+                  <div className="absolute inset-0 rounded-lg border border-primary/40 bg-primary/5 flex items-center justify-center text-xs text-primary pointer-events-none">
+                    Drop videos to add
+                  </div>
+                )}
               </div>
 
               {/* Audio Drop Zone */}
@@ -767,7 +777,7 @@ export default function Index() {
                 onDragOver={handleDragOver}
                 onDragEnter={() => setDragOver("audio")}
                 onDragLeave={() => setDragOver(null)}
-                className={`rounded-lg bg-card p-4 transition-all ${
+                className={`relative rounded-lg bg-card p-4 transition-all ${
                   dragOver === "audio" ? "ring-2 ring-primary bg-accent/20" : ""
                 }`}
               >
@@ -851,6 +861,11 @@ export default function Index() {
                         </button>
                       </div>
                     ))}
+                  </div>
+                )}
+                {dragOver === "audio" && (
+                  <div className="absolute inset-0 rounded-lg border border-primary/40 bg-primary/5 flex items-center justify-center text-xs text-primary pointer-events-none">
+                    Drop audio files to add
                   </div>
                 )}
               </div>
