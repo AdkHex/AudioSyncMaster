@@ -735,7 +735,7 @@ export default function Index() {
                     )}
                   </div>
                 ) : (
-                  <div className="space-y-1.5 max-h-32 overflow-auto">
+                  <div className="space-y-1.5">
                     {videoFiles.map(file => (
                       <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
                         <input
@@ -834,7 +834,7 @@ export default function Index() {
                     )}
                   </div>
                 ) : (
-                  <div className="space-y-1.5 max-h-32 overflow-auto">
+                  <div className="space-y-1.5">
                     {audioFiles.map(file => (
                       <div key={file.id} className="flex items-center gap-2 px-2 py-1.5 rounded bg-secondary/50 group">
                         <input
