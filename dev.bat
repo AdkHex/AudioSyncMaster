@@ -36,6 +36,7 @@ if not exist src-tauri\bin (
   mkdir src-tauri\bin
 )
 copy /Y dist\audiosync-cli.exe src-tauri\bin\audiosync-cli.exe
+copy /Y dist\audiosync-cli.exe src-tauri\bin\audiosync-cli-x86_64-pc-windows-msvc.exe
 
 echo [5/6] Installing npm deps...
 call npm install
