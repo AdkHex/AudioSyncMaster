@@ -472,7 +472,14 @@ fn run_bridge(
     );
     Command::new(sidecar_path)
   } else {
-    let bridge_path = find_bridge_path().ok_or_else(|| "bridge.py not found".to_string())?;
+    let _ = app.emit(
+      "sync-log",
+      "Sidecar not found. Attempting python fallback.",
+    );
+    let bridge_path = find_bridge_path().ok_or_else(|| {
+      "bridge.py not found. Build the sidecar (audiosync-cli) and ensure it exists in src-tauri/bin."
+        .to_string()
+    })?;
     let python_exe = find_python_exe().unwrap_or_else(|| PathBuf::from("python"));
     let _ = app.emit(
       "sync-log",
