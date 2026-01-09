@@ -69,7 +69,7 @@ jobs:
             --collect-all pymediainfo `
             python/bridge.py -n audiosync-cli
           New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
-          Copy-Item dist/audiosync-cli.exe src-tauri/bin/audiosync-cli-x86_64-pc-windows-msvc.exe -Force
+          Copy-Item dist/audiosync-cli.exe src-tauri/bin/audiosync-cli.exe -Force
 
       - name: Create tag if needed
         shell: pwsh

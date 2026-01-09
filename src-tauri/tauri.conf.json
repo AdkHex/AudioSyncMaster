@@ -27,9 +27,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "bin/audiosync-cli",
-      "bin/audiosync-cli.exe",
-      "bin/audiosync-cli-x86_64-pc-windows-msvc.exe"
+      "bin/audiosync-cli"
     ],
     "icon": [
       "icons/32x32.png",
