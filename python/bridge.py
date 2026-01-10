@@ -17,8 +17,8 @@ PYTHON_FILES_DIR = os.path.join(BASE_DIR, "Python Files")
 sys.path.insert(0, PYTHON_FILES_DIR)
 
 try:
-    import main as series_logic
-    import main2 as movie_logic
+    import series_sync as series_logic
+    import movie_sync as movie_logic
 except Exception as exc:
     sys.stderr.write(f"Failed to import Python scripts: {exc}\n")
     sys.exit(1)
@@ -84,8 +84,15 @@ def run_movie(request):
         def worker(video_path):
             emit({"type": "file_start", "file": os.path.basename(video_path)})
             emit({"type": "file_progress", "file": os.path.basename(video_path), "percent": 0})
+            
+            def progress_callback(percent):
+                emit({"type": "file_progress", "file": os.path.basename(video_path), "percent": percent})
+
             start_time = time.time()
-            result = movie_logic.process_pair(video_path, audio_file, segment, False)
+            result = movie_logic.process_pair(
+                video_path, audio_file, segment, False,
+                progress_callback=progress_callback
+            )
             elapsed_ms = int((time.time() - start_time) * 1000)
             emit({"type": "file_progress", "file": os.path.basename(video_path), "percent": 100})
             emit({"type": "file_end", "file": os.path.basename(video_path), "elapsed_ms": elapsed_ms})
@@ -141,8 +148,15 @@ def run_series(request):
         def worker(primary, secondary):
             emit({"type": "file_start", "file": os.path.basename(primary)})
             emit({"type": "file_progress", "file": os.path.basename(primary), "percent": 0})
+
+            def progress_callback(percent):
+                emit({"type": "file_progress", "file": os.path.basename(primary), "percent": percent})
+
             start_time = time.time()
-            result = series_logic.process_pair(primary, secondary, segment, False)
+            result = series_logic.process_pair(
+                primary, secondary, segment, False,
+                progress_callback=progress_callback
+            )
             elapsed_ms = int((time.time() - start_time) * 1000)
             emit({"type": "file_progress", "file": os.path.basename(primary), "percent": 100})
             emit({"type": "file_end", "file": os.path.basename(primary), "elapsed_ms": elapsed_ms})

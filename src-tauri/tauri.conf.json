@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:8081 tauri://localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost;"
     }
   },
   "bundle": {
@@ -28,6 +28,9 @@
     "targets": "all",
     "externalBin": [
       "bin/audiosync-cli"
+    ],
+    "resources": [
+      "resources/ffmpeg"
     ],
     "icon": [
       "icons/32x32.png",

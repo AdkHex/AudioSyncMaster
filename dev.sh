@@ -1,0 +1,44 @@
+#!/bin/bash
+set -e
+
+echo "[1/6] Creating venv..."
+if [ ! -d "python/.venv" ]; then
+  python3 -m venv python/.venv
+fi
+
+echo "[2/6] Installing Python deps..."
+python/.venv/bin/pip install --upgrade pip
+python/.venv/bin/pip install -r python/requirements.txt
+python/.venv/bin/pip install pyinstaller
+
+echo "[3/6] Building sidecar..."
+python/.venv/bin/pyinstaller --onefile --clean \
+  --add-data "Python Files:Python Files" \
+  --hidden-import numpy \
+  --hidden-import scipy \
+  --hidden-import librosa \
+  --hidden-import soundfile \
+  --hidden-import numba \
+  --hidden-import llvmlite \
+  --hidden-import rich \
+  --hidden-import pymediainfo \
+  --hidden-import packaging \
+  --collect-all numpy \
+  --collect-all scipy \
+  --collect-all librosa \
+  --collect-all soundfile \
+  --collect-all rich \
+  --collect-all pymediainfo \
+  python/bridge.py -n audiosync-cli
+
+echo "[4/6] Copying sidecar..."
+if [ ! -d "src-tauri/bin" ]; then
+  mkdir -p src-tauri/bin
+fi
+cp dist/audiosync-cli src-tauri/bin/audiosync-cli
+
+echo "[5/6] Installing npm deps..."
+npm install
+
+echo "[6/6] Starting Tauri dev..."
+npm run tauri:dev

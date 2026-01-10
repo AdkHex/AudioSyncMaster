@@ -299,74 +299,53 @@ fn list_folder_files(folder: &Path) -> Vec<FileItem> {
 }
 
 fn find_sidecar_path(app: &AppHandle) -> Option<PathBuf> {
-  let mut candidates = vec![
-    app.path().resolve("bin/audiosync-cli", BaseDirectory::Resource).ok(),
-    app.path().resolve("bin/audiosync-cli.exe", BaseDirectory::Resource).ok(),
-    app
-      .path()
-      .resolve("bin/audiosync-cli-x86_64-pc-windows-msvc.exe", BaseDirectory::Resource)
-      .ok(),
-    Some(PathBuf::from("bin/audiosync-cli.exe")),
-    Some(PathBuf::from("bin/audiosync-cli-x86_64-pc-windows-msvc.exe")),
-    Some(PathBuf::from("bin/audiosync-cli")),
-  ];
-
-  if let Ok(cwd) = std::env::current_dir() {
-    candidates.push(Some(cwd.join("bin/audiosync-cli.exe")));
-    candidates.push(Some(cwd.join("bin/audiosync-cli-x86_64-pc-windows-msvc.exe")));
-    candidates.push(Some(cwd.join("bin/audiosync-cli")));
-    if let Some(parent) = cwd.parent() {
-      candidates.push(Some(parent.join("src-tauri/bin/audiosync-cli.exe")));
-      candidates.push(Some(
-        parent.join("src-tauri/bin/audiosync-cli-x86_64-pc-windows-msvc.exe"),
-      ));
-      candidates.push(Some(parent.join("src-tauri/bin/audiosync-cli")));
+  let sidecar_name = if cfg!(windows) {
+    "audiosync-cli-x86_64-pc-windows-msvc.exe"
+  } else {
+    "audiosync-cli"
+  };
+  
+  // The primary and recommended way to get the sidecar is from the resource directory.
+  if let Some(path) = app.path().resolve(sidecar_name, BaseDirectory::Resource).ok() {
+    if path.exists() {
+      return Some(path);
     }
   }
 
-  for candidate in candidates.into_iter().flatten() {
-    if candidate.exists() {
-      return Some(candidate);
+  // Fallback for development, searching relative to the current executable.
+  if let Ok(current_exe) = std::env::current_exe() {
+    if let Some(parent) = current_exe.parent() {
+      let dev_path = parent.join("../../../src-tauri/bin").join(sidecar_name);
+      if dev_path.exists() {
+        return Some(dev_path);
+      }
     }
   }
+  
   None
 }
 
 fn find_python_exe() -> Option<PathBuf> {
-  let mut candidates = vec![
-    PathBuf::from("python/.venv/Scripts/python.exe"),
-    PathBuf::from("../python/.venv/Scripts/python.exe"),
-    PathBuf::from("python/.venv/bin/python"),
-    PathBuf::from("../python/.venv/bin/python"),
-  ];
+  let candidate = if cfg!(windows) {
+    PathBuf::from("python/.venv/Scripts/python.exe")
+  } else {
+    PathBuf::from("python/.venv/bin/python")
+  };
 
-  if let Ok(cwd) = std::env::current_dir() {
-    candidates.push(cwd.join("python/.venv/Scripts/python.exe"));
-    candidates.push(cwd.join("../python/.venv/Scripts/python.exe"));
-    candidates.push(cwd.join("python/.venv/bin/python"));
-    candidates.push(cwd.join("../python/.venv/bin/python"));
+  if candidate.exists() {
+    Some(candidate)
+  } else {
+    None
   }
-
-  for candidate in candidates {
-    if candidate.exists() {
-      return Some(candidate);
-    }
-  }
-  None
 }
 
 fn find_bridge_path() -> Option<PathBuf> {
-  let candidates = [
-    PathBuf::from("python/bridge.py"),
-    PathBuf::from("../python/bridge.py"),
-    PathBuf::from("../../python/bridge.py"),
-  ];
-  for candidate in candidates {
-    if candidate.exists() {
-      return Some(candidate);
-    }
+  let candidate = PathBuf::from("python/bridge.py");
+  if candidate.exists() {
+    Some(candidate)
+  } else {
+    None
   }
-  None
 }
 
 #[tauri::command]
@@ -383,8 +362,14 @@ struct MediaProbe {
 }
 
 #[tauri::command]
-fn probe_media(path: String) -> Result<MediaProbe, String> {
-  let output = Command::new("ffprobe")
+fn probe_media(app: AppHandle, path: String) -> Result<MediaProbe, String> {
+  let ffprobe_exe = if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" };
+  let ffprobe_path = app
+    .path()
+    .resolve(&format!("resources/ffmpeg/{}", ffprobe_exe), BaseDirectory::Resource)
+    .unwrap_or_else(|_| PathBuf::from(ffprobe_exe));
+
+  let output = Command::new(ffprobe_path)
     .args([
       "-v",
       "error",
