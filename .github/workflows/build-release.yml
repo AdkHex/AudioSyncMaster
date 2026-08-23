@@ -83,6 +83,17 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Stub the sidecar
+        run: |
+          # Tauri's build script fails if an externalBin is missing, so these
+          # checks cannot compile without one. A stub is enough: nothing here
+          # runs the sidecar. The build job creates the real one and smoke-tests
+          # it before packaging.
+          mkdir -p src-tauri/bin
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          printf '#!/bin/sh\nexit 0\n' > "src-tauri/bin/audiosync-cli-${triple}"
+          chmod +x "src-tauri/bin/audiosync-cli-${triple}"
+
       - name: Formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
