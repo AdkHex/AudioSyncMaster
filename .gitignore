@@ -36,3 +36,7 @@ src-tauri/gen/
 
 # TypeScript incremental build info
 *.tsbuildinfo
+
+# Updater signing keys - never commit these
+*.key
+*.key.pub

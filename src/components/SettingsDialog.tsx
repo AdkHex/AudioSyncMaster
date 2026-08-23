@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import type { AppSettings, SyncMode } from "@/lib/types";
@@ -9,6 +9,8 @@ interface SettingsDialogProps {
   mode: SyncMode;
   onChange: (settings: AppSettings) => void;
   onClose: () => void;
+  onCheckForUpdate?: () => void;
+  checkingUpdate?: boolean;
 }
 
 interface FieldProps {
@@ -36,6 +38,8 @@ export function SettingsDialog({
   mode,
   onChange,
   onClose,
+  onCheckForUpdate,
+  checkingUpdate = false,
 }: SettingsDialogProps) {
   const ids = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -232,6 +236,28 @@ export function SettingsDialog({
               className="w-full rounded border border-border bg-input px-3 py-2 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             />
           </Field>
+          {onCheckForUpdate && (
+            <div className="flex items-center justify-between border-t border-border pt-4">
+              <div>
+                <p className="text-xs font-medium text-foreground">Updates</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Checked automatically on launch.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCheckForUpdate}
+                disabled={checkingUpdate}
+                className="flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-secondary disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${checkingUpdate ? "animate-spin" : ""}`}
+                  aria-hidden
+                />
+                {checkingUpdate ? "Checking…" : "Check now"}
+              </button>
+            </div>
+          )}
         </div>
 
         <footer className="flex justify-end border-t border-border px-4 py-3">

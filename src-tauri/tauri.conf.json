@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AudioSyncMaster",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "identifier": "com.audiosyncmaster.app",
   "build": {
     "frontendDist": "../dist",
@@ -23,11 +23,25 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:8081 tauri://localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: https://asset.localhost; font-src 'self' data:;"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:8081 tauri://localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: https://asset.localhost; font-src 'self' data:;"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJERTFEMjcyMDFENjVBNDYKUldSR1d0WUJjdExoTGJzeE95OWdHYnRMVGFhdGR2UFV6WENXNFJINjZ2RUN5T1MyYllzemtaWksK",
+      "endpoints": [
+        "https://github.com/AdkHex/AudioSyncMaster/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "externalBin": [
       "bin/audiosync-cli"

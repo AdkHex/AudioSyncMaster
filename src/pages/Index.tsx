@@ -18,6 +18,7 @@ import { PairingPreview } from "@/components/PairingPreview";
 import { ProgressPanel } from "@/components/ProgressPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { UpdateDialog } from "@/components/UpdateDialog";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import * as api from "@/lib/api";
 import {
@@ -46,6 +47,7 @@ import type {
   SyncResult,
 } from "@/lib/types";
 import { resultKey } from "@/lib/types";
+import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
 
 export default function Index() {
   const desktop = api.isDesktop();
@@ -64,6 +66,8 @@ export default function Index() {
   const [pairingLoading, setPairingLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [remainingMs, setRemainingMs] = useState<number | null>(null);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   /** Mirrors state for callbacks that must not be re-created on every change.
    *  The original captured stale values here: the keyboard handler closed over
@@ -80,6 +84,34 @@ export default function Index() {
   const persistHistory = useCallback((entries: HistoryEntry[]) => {
     // saveHistory returns what actually fit within the storage quota.
     setHistory(saveHistory(entries));
+  }, []);
+
+  // Check for a newer release shortly after launch. Delayed so it never
+  // competes with first paint, and silent on failure so being offline or
+  // behind a proxy cannot stop the app from starting.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void checkForUpdate().then((found) => {
+        if (found) setUpdate(found);
+      });
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const handleCheckForUpdate = useCallback(async () => {
+    setCheckingUpdate(true);
+    try {
+      const found = await checkForUpdate(true);
+      if (found) {
+        setUpdate(found);
+      } else {
+        toast.success("You are on the latest version.");
+      }
+    } catch {
+      toast.error("Could not check for updates.");
+    } finally {
+      setCheckingUpdate(false);
+    }
   }, []);
 
   // ------------------------------------------------------------- engine events
@@ -769,7 +801,11 @@ export default function Index() {
         mode={state.mode}
         onChange={setSettings}
         onClose={() => setShowSettings(false)}
+        onCheckForUpdate={() => void handleCheckForUpdate()}
+        checkingUpdate={checkingUpdate}
       />
+
+      <UpdateDialog update={update} onDismiss={() => setUpdate(null)} />
     </div>
   );
 }
