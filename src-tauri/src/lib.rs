@@ -186,7 +186,10 @@ fn list_files(folder: &Path, extensions: Option<&[&str]>, kind: &str) -> Vec<Fil
 #[tauri::command]
 async fn pick_video_folder(window: Window) -> Result<PickResponse, String> {
     let Some(folder) = pick_folder(window).await else {
-        return Ok(PickResponse { folder: None, files: Vec::new() });
+        return Ok(PickResponse {
+            folder: None,
+            files: Vec::new(),
+        });
     };
     let files = list_files(&folder, Some(VIDEO_EXTENSIONS), "video");
     Ok(PickResponse {
@@ -198,7 +201,10 @@ async fn pick_video_folder(window: Window) -> Result<PickResponse, String> {
 #[tauri::command]
 async fn pick_audio_folder(window: Window) -> Result<PickResponse, String> {
     let Some(folder) = pick_folder(window).await else {
-        return Ok(PickResponse { folder: None, files: Vec::new() });
+        return Ok(PickResponse {
+            folder: None,
+            files: Vec::new(),
+        });
     };
     let mut files = list_files(&folder, Some(AUDIO_EXTENSIONS), "audio");
     if files.is_empty() {
@@ -214,7 +220,10 @@ async fn pick_audio_folder(window: Window) -> Result<PickResponse, String> {
 #[tauri::command]
 async fn pick_audio_file(window: Window) -> Result<PickResponse, String> {
     let Some(file) = pick_file(window).await else {
-        return Ok(PickResponse { folder: None, files: Vec::new() });
+        return Ok(PickResponse {
+            folder: None,
+            files: Vec::new(),
+        });
     };
     Ok(PickResponse {
         folder: file.parent().map(|p| p.to_string_lossy().to_string()),
@@ -295,7 +304,10 @@ fn drain_events(
             }
         };
 
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         match kind {
             "log" => {
                 if let Some(message) = event.get("message").and_then(Value::as_str) {
@@ -384,9 +396,12 @@ async fn start_sync(
                 object.insert("command".into(), Value::String("analyze".into()));
             }
             bridge.send(&payload)?;
-            let (results, summary, cancelled) =
-                drain_events(&app_for_task, bridge, "done")?;
-            let run = SyncRun { results, summary, cancelled };
+            let (results, summary, cancelled) = drain_events(&app_for_task, bridge, "done")?;
+            let run = SyncRun {
+                results,
+                summary,
+                cancelled,
+            };
             let _ = app_for_task.emit("sync-done", &run);
             Ok(run)
         })
@@ -553,8 +568,7 @@ async fn export_json(window: Window, results: Vec<SyncResult>) -> Result<String,
     let Some(path) = pick_save_path(window, "sync-results.json").await else {
         return Err("Export cancelled".into());
     };
-    let contents =
-        serde_json::to_string_pretty(&results).map_err(|err| err.to_string())?;
+    let contents = serde_json::to_string_pretty(&results).map_err(|err| err.to_string())?;
     fs::write(&path, contents.as_bytes()).map_err(|err| err.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }

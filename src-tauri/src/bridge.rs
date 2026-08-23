@@ -10,7 +10,7 @@
 //! subprocesses in an orderly way.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -108,7 +108,10 @@ impl Bridge {
 
     /// Send one command. Commands are newline-delimited JSON.
     pub fn send(&mut self, payload: &Value) -> Result<(), String> {
-        let line = format!("{}\n", serde_json::to_string(payload).map_err(|e| e.to_string())?);
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(payload).map_err(|e| e.to_string())?
+        );
         self.stdin
             .write_all(line.as_bytes())
             .map_err(|err| format!("Lost connection to the analysis engine: {err}"))?;
@@ -153,7 +156,10 @@ impl BridgeHandle {
         app: &AppHandle,
         action: impl FnOnce(&mut Bridge) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut guard = self.0.lock().map_err(|_| "Engine lock poisoned".to_string())?;
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "Engine lock poisoned".to_string())?;
         if guard.is_none() {
             *guard = Some(Bridge::spawn(app)?);
         }
@@ -173,7 +179,10 @@ impl BridgeHandle {
     /// Send a command without waiting for a reply. Used for cancellation, which
     /// must not queue behind the run it is trying to stop.
     pub fn send_now(&self, payload: &Value) -> Result<(), String> {
-        let mut guard = self.0.lock().map_err(|_| "Engine lock poisoned".to_string())?;
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "Engine lock poisoned".to_string())?;
         match guard.as_mut() {
             Some(bridge) => bridge.send(payload),
             None => Err("The analysis engine is not running".to_string()),
@@ -192,10 +201,7 @@ impl BridgeHandle {
 /// Locate the sidecar, falling back to a development Python interpreter.
 fn build_command(app: &AppHandle) -> Result<Command, String> {
     if let Some(sidecar) = find_sidecar(app) {
-        let _ = app.emit(
-            "sync-log",
-            format!("Engine: {}", sidecar.to_string_lossy()),
-        );
+        let _ = app.emit("sync-log", format!("Engine: {}", sidecar.to_string_lossy()));
         return Ok(Command::new(sidecar));
     }
 
@@ -233,7 +239,10 @@ fn find_sidecar(app: &AppHandle) -> Option<PathBuf> {
         "audiosync-cli"
     };
 
-    if let Ok(resource) = app.path().resolve(name, tauri::path::BaseDirectory::Resource) {
+    if let Ok(resource) = app
+        .path()
+        .resolve(name, tauri::path::BaseDirectory::Resource)
+    {
         if resource.is_file() {
             return Some(resource);
         }
@@ -311,9 +320,12 @@ fn project_root(app: &AppHandle) -> PathBuf {
     PathBuf::from(".")
 }
 
-fn find_python(root: &PathBuf) -> PathBuf {
+fn find_python(root: &Path) -> PathBuf {
     let venv = if cfg!(windows) {
-        root.join("python").join(".venv").join("Scripts").join("python.exe")
+        root.join("python")
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe")
     } else {
         root.join("python").join(".venv").join("bin").join("python")
     };

@@ -65,8 +65,14 @@ pub fn render(results: &[SyncResult]) -> String {
             number(result.total_drift_ms, 1),
             number(result.start_delay_ms, 1),
             number(result.end_delay_ms, 1),
-            result.windows_used.map(|v| v.to_string()).unwrap_or_default(),
-            result.windows_total.map(|v| v.to_string()).unwrap_or_default(),
+            result
+                .windows_used
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            result
+                .windows_total
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             result.elapsed_ms.map(|v| v.to_string()).unwrap_or_default(),
             escape(&status),
         ]
@@ -100,7 +106,11 @@ mod tests {
             "quote not escaped per RFC 4180: {rendered}"
         );
         // The row must still have exactly one line of data.
-        assert_eq!(rendered.lines().count(), 2, "escaping broke the row structure");
+        assert_eq!(
+            rendered.lines().count(),
+            2,
+            "escaping broke the row structure"
+        );
     }
 
     #[test]
