@@ -1,6 +1,5 @@
-numpy
-soundfile
-librosa
-scipy
-rich
-pymediainfo
+# The analysis engine needs only these. librosa, soundfile, rich and
+# pymediainfo were dropped: all decoding now goes through ffmpeg directly,
+# which removes three overlapping code paths that disagreed on seek semantics.
+numpy>=1.24
+scipy>=1.10

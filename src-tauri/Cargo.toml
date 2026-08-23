@@ -1,7 +1,7 @@
 [package]
 name = "audiosyncmaster"
-version = "1.0.0"
-description = "Audio Sync App made by Ionicboy"
+version = "2.0.0"
+description = "Measure and correct audio/video sync offsets"
 authors = ["Ionicboy"]
 license = ""
 repository = ""
@@ -24,3 +24,4 @@ log = "0.4"
 tauri = { version = "2.9.5" }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"

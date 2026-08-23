@@ -1,0 +1,4 @@
+# Test-only dependencies. soundfile is used to synthesize fixture audio;
+# the engine itself never reads files directly.
+-r requirements.txt
+soundfile>=0.12

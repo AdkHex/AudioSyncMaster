@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "AudioSyncMaster",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "identifier": "com.audiosyncmaster.app",
   "build": {
     "frontendDist": "../dist",
@@ -13,14 +13,17 @@
     "windows": [
       {
         "title": "AudioSyncMaster",
-        "width": 1100,
-        "height": 720,
+        "width": 1180,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:8081 tauri://localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost;"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:8081 tauri://localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: https://asset.localhost; font-src 'self' data:;"
     }
   },
   "bundle": {
