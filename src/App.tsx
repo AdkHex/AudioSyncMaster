@@ -1,29 +1,21 @@
-import { Toaster } from "@/components/ui/toaster";
-import { Toaster as Sonner } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { Toaster } from "sonner";
+
 import { ThemeProvider } from "@/components/ThemeProvider";
-import Index from "./pages/Index";
-import NotFound from "./pages/NotFound";
+import Index from "@/pages/Index";
 
-const queryClient = new QueryClient();
-
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <ThemeProvider defaultTheme="dark" storageKey="syncmaster-theme">
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </BrowserRouter>
-      </TooltipProvider>
+/** Single-window desktop app: no router, and one toast system.
+ *  The original mounted two competing toasters and a BrowserRouter whose 404
+ *  route was unreachable inside a Tauri window. */
+export default function App() {
+  return (
+    <ThemeProvider defaultTheme="dark" storageKey="audiosync.theme">
+      <Index />
+      <Toaster
+        position="bottom-right"
+        closeButton
+        richColors
+        toastOptions={{ duration: 4000 }}
+      />
     </ThemeProvider>
-  </QueryClientProvider>
-);
-
-export default App;
+  );
+}

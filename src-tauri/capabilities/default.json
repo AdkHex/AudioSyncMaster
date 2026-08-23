@@ -7,7 +7,10 @@
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:event:default",
     "dialog:default",
-    "log:default"
+    "log:default",
+    "opener:default"
   ]
 }

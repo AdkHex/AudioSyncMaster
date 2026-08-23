@@ -1,100 +1,212 @@
-name: Build Release
+name: Test and Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # Nothing is published unless this passes first. The original workflow tagged
+  # and released on every push with no verification at all.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Read app version
-        id: app_version
-        shell: pwsh
-        run: |
-          $config = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
-          "version=$($config.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
 
       - name: Install JS dependencies
         run: npm ci
 
       - name: Install Python dependencies
-        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r python/requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install -r python/requirements-dev.txt
 
-      - name: Build Python sidecar
-        shell: pwsh
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm run test
+
+      - name: Generate fixtures
+        run: python tests/make_fixtures.py
+
+      - name: Python tests
+        run: python tests/run_all.py
+
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Tauri system dependencies
         run: |
-          pyinstaller --onefile --clean `
-            --add-data "Python Files;Python Files" `
-            --hidden-import numpy `
-            --hidden-import scipy `
-            --hidden-import librosa `
-            --hidden-import soundfile `
-            --hidden-import numba `
-            --hidden-import llvmlite `
-            --hidden-import rich `
-            --hidden-import pymediainfo `
-            --hidden-import packaging `
-            --collect-all numpy `
-            --collect-all scipy `
-            --collect-all librosa `
-            --collect-all soundfile `
-            --collect-all rich `
-            --collect-all pymediainfo `
-            python/bridge.py -n audiosync-cli
-          New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
-          Copy-Item dist/audiosync-cli.exe src-tauri/bin/audiosync-cli.exe -Force
-          Copy-Item dist/audiosync-cli.exe src-tauri/bin/audiosync-cli-x86_64-pc-windows-msvc.exe -Force
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
 
-      - name: Create tag if needed
-        shell: pwsh
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stub the sidecar
         run: |
-          git fetch --tags
-          $version = "${{ steps.app_version.outputs.version }}"
-          $tag = "v$version"
-          $exists = git tag -l $tag
-          if (-not $exists) {
-            git tag $tag
-            git push origin $tag
-          }
+          # Tauri's build script fails if an externalBin is missing, so these
+          # checks cannot compile without one. A stub is enough: nothing here
+          # runs the sidecar. The build job creates the real one and smoke-tests
+          # it before packaging.
+          mkdir -p src-tauri/bin
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          printf '#!/bin/sh\nexit 0\n' > "src-tauri/bin/audiosync-cli-${triple}"
+          chmod +x "src-tauri/bin/audiosync-cli-${triple}"
 
-      - name: Build Tauri app
+      - name: Formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: [test, rust]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+            artifacts: |
+              src-tauri/target/release/bundle/msi/*.msi
+              src-tauri/target/release/bundle/nsis/*.exe
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            artifacts: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            artifacts: |
+              src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/deb/*.deb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install --upgrade pip
+          python -m pip install -r python/requirements.txt pyinstaller
+
+      - name: Build the sidecar
+        shell: bash
+        run: |
+          pyinstaller --onefile --clean --noconfirm \
+            --name audiosync-cli \
+            --paths . \
+            --hidden-import audiosync \
+            --hidden-import audiosync.analyze \
+            --hidden-import audiosync.batch \
+            --hidden-import audiosync.correlate \
+            --hidden-import audiosync.matching \
+            --hidden-import audiosync.media \
+            --hidden-import audiosync.mux \
+            --collect-all numpy \
+            --collect-all scipy \
+            python/bridge.py
+          mkdir -p src-tauri/bin
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/audiosync-cli.exe src-tauri/bin/audiosync-cli.exe
+            cp dist/audiosync-cli.exe "src-tauri/bin/audiosync-cli-${{ matrix.triple }}.exe"
+          else
+            cp dist/audiosync-cli src-tauri/bin/audiosync-cli
+            cp dist/audiosync-cli "src-tauri/bin/audiosync-cli-${{ matrix.triple }}"
+            chmod +x src-tauri/bin/audiosync-cli*
+          fi
+
+      - name: Verify the sidecar starts
+        shell: bash
+        run: |
+          # A sidecar that cannot import its own dependencies is the most common
+          # packaging failure, and it is invisible until a user runs the app.
+          echo '{"command":"ping"}' | ./src-tauri/bin/audiosync-cli* | grep -q pong
+          echo "sidecar responds correctly"
+
+      - name: Build the app
         run: npm run tauri:build
 
-      - name: Publish release
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.app_version.outputs.version }}
-          name: AudioSyncMaster v${{ steps.app_version.outputs.version }}
-          body: Automated build for AudioSyncMaster.
-          files: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+          tag_name: v${{ steps.version.outputs.value }}
+          name: AudioSyncMaster v${{ steps.version.outputs.value }}
+          body: |
+            Automated build of AudioSyncMaster v${{ steps.version.outputs.value }}.
+          files: ${{ matrix.artifacts }}
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
