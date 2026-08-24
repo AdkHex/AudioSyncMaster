@@ -121,21 +121,36 @@ def test_decoding_returns_the_requested_track():
 
 
 def test_analysis_matches_the_right_track_and_rejects_the_wrong_one():
-    """The decisive test: a dub timed to track 0 must match track 0 only."""
+    """The decisive test: a dub timed to track 0 must match track 0 only.
+
+    The delay is measured *relative to an undelayed baseline* rather than
+    against the absolute 300ms. Encoding the video introduces a codec delay of
+    its own, which varies by ffmpeg build -- on one CI runner it was 64ms. That
+    delay is identical for both measurements here and for both files of any real
+    pair, so it cancels in the difference. Asserting the absolute figure would
+    be testing the local AAC encoder, not the track selection.
+    """
     with Workspace() as workspace:
         original = _speech(30, 1)
         video = _multitrack_video(workspace, original, _speech(30, 777), 30)
 
-        delayed = np.concatenate(
-            [np.zeros(int(0.3 * SR), dtype=np.float32), original]
-        )
+        aligned = workspace.path("aligned.wav")
+        sf.write(aligned, original, SR)
+
+        delayed = np.concatenate([np.zeros(int(0.3 * SR), dtype=np.float32), original])
         dub = workspace.path("dub.wav")
         sf.write(dub, delayed, SR)
 
+        baseline = analyze_pair(video, aligned, window_s=8, window_count=3, primary_track=0)
+        assert baseline.error is None, f"baseline failed: {baseline.error}"
+
         right = analyze_pair(video, dub, window_s=8, window_count=3, primary_track=0)
         assert right.error is None, f"correct track failed: {right.error}"
-        assert abs(right.delay_ms - 300.0) < 15.0, (
-            f"expected +300ms against track 0, got {right.delay_ms:+.1f}ms"
+
+        introduced = right.delay_ms - baseline.delay_ms
+        assert abs(introduced - 300.0) < 15.0, (
+            f"the 300ms delay measured as {introduced:+.1f}ms "
+            f"(raw {right.delay_ms:+.1f}, baseline {baseline.delay_ms:+.1f})"
         )
 
         wrong = analyze_pair(video, dub, window_s=8, window_count=3, primary_track=1)
