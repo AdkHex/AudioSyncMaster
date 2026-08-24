@@ -142,6 +142,21 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The smoke test below decodes a real fixture, so this job needs ffmpeg
+      # too -- without it the packaged engine correctly refuses to work and the
+      # check cannot tell that apart from a broken build.
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
       - name: Install dependencies
         run: |
           npm ci
@@ -202,6 +217,7 @@ jobs:
           python - <<'CHECK'
           import json, sys
           delay = None
+          problems = []
           for line in open("engine-check.jsonl"):
               line = line.strip()
               if not line:
@@ -212,8 +228,13 @@ jobs:
                   continue
               if event.get("type") == "result":
                   delay = event.get("delayMs")
+              elif event.get("type") == "error":
+                  problems.append(event.get("message", "unknown error"))
           if delay is None:
-              sys.exit("packaged engine produced no result")
+              # Surface what the engine actually said; "no result" alone gives
+              # no clue whether the build is broken or the runner lacks ffmpeg.
+              detail = "; ".join(problems) or "engine emitted no result and no error"
+              sys.exit(f"packaged engine produced no result: {detail}")
           if abs(delay - 500.0) > 10.0:
               sys.exit(f"packaged engine measured {delay:+.1f}ms, expected +500ms")
           print(f"engine measured {delay:+.1f}ms on a known +500ms fixture")
