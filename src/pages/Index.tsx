@@ -762,11 +762,6 @@ export default function Index() {
               // Loading a past run leaves the selection empty, so the step is
               // not something the user has completed here.
               state={busy ? "active" : hasResults && selection.ok ? "done" : "todo"}
-              aside={
-                busy && settings.maxWorkers > 1
-                  ? `${settings.maxWorkers} workers`
-                  : undefined
-              }
             />
 
             {busy && (
@@ -777,7 +772,6 @@ export default function Index() {
                 fileProgress={state.fileProgress}
                 remainingMs={remainingMs}
                 results={state.results}
-                workers={settings.maxWorkers}
               />
             )}
 

@@ -174,6 +174,38 @@ describe("progress", () => {
     expect(estimateRemainingMs({ ...initialSyncState, status: "processing", startedAt: Date.now() }))
       .toBeNull();
   });
+
+  it("estimates from the first file's own progress, before it finishes", () => {
+    // Half of one file done in 10s => ~20s per file, 1 remaining after this
+    // one => roughly 30s left. Without partial credit this would be null for
+    // the whole first file, which on a movie is minutes of "estimating…".
+    const state: SyncState = {
+      ...initialSyncState,
+      status: "processing",
+      startedAt: Date.now() - 10_000,
+      progress: { processed: 0, total: 2 },
+      currentFile: "movie.mkv",
+      fileProgress: 50,
+    };
+
+    const remaining = estimateRemainingMs(state);
+    expect(remaining).not.toBeNull();
+    expect(remaining! / 1000).toBeGreaterThan(20);
+    expect(remaining! / 1000).toBeLessThan(40);
+  });
+
+  it("ignores a barely-started file, whose rate means nothing yet", () => {
+    const state: SyncState = {
+      ...initialSyncState,
+      status: "processing",
+      startedAt: Date.now() - 1_000,
+      progress: { processed: 0, total: 4 },
+      currentFile: "movie.mkv",
+      fileProgress: 3,
+    };
+
+    expect(estimateRemainingMs(state)).toBeNull();
+  });
 });
 
 describe("logs", () => {

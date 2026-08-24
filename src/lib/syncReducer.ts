@@ -283,12 +283,25 @@ export function validateSelection(state: SyncState): { ok: boolean; reason?: str
   return { ok: true };
 }
 
-/** Remaining time from observed throughput, or null while unknown. */
+/** Remaining time from observed throughput, or null while unknown.
+ *
+ *  Counts the in-flight file's own progress, not just completed ones. Waiting
+ *  for the first file to finish means no estimate at all for minutes on a
+ *  movie -- the case where the user most wants one. A partly-decoded file is
+ *  weak evidence, so it only counts once enough of it has been measured for
+ *  the rate to mean anything. */
 export function estimateRemainingMs(state: SyncState): number | null {
   if (state.status !== "processing" || !state.startedAt) return null;
   const { processed, total } = state.progress;
-  if (processed <= 0 || total <= 0) return null;
+  if (total <= 0) return null;
+
+  const partial = state.currentFile && state.fileProgress >= 10
+    ? state.fileProgress / 100
+    : 0;
+  const done = processed + partial;
+  if (done <= 0) return null;
+
   const elapsed = Date.now() - state.startedAt;
-  const perItem = elapsed / processed;
-  return Math.max(0, perItem * (total - processed));
+  const perItem = elapsed / done;
+  return Math.max(0, perItem * (total - done));
 }

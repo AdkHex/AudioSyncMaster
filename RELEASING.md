@@ -5,9 +5,17 @@ that works and what you have to do.
 
 ## Shipping an update
 
-1. Bump the version in **both** `package.json` and `src-tauri/tauri.conf.json`.
-   They must match — CI tags the release from `package.json`, and the app
-   compares its own version from `tauri.conf.json`.
+1. Bump the version in **all four** of:
+   - `package.json` — CI tags the release from this one
+   - `src-tauri/tauri.conf.json` — the app compares its own version from here
+   - `src-tauri/Cargo.toml` — the crate version
+   - `RELEASING.md` is not versioned, but the lockfiles are: run
+     `npm install --package-lock-only` and update the `audiosyncmaster` entry
+     in `src-tauri/Cargo.lock`, or `npm ci` and the Rust build will fail on a
+     lockfile mismatch.
+
+   The frontend reads its displayed version from `package.json` at build time
+   (see `define` in `vite.config.ts`), so Settings → About needs no edit.
 2. Push to `main`.
 
 That is the whole process. CI then:

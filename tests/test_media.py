@@ -88,6 +88,51 @@ def test_seek_is_sample_accurate():
         )
 
 
+def test_seek_stays_accurate_deep_into_a_compressed_file():
+    """The two-stage seek must not shift the window it returns.
+
+    load_audio jumps most of the way with a fast input seek and then decodes
+    accurately through the last SEEK_PREROLL_S seconds. A deep offset in a
+    compressed container is the case that distinguishes it from a plain input
+    seek: the coarse jump lands on a packet boundary, and only the accurate
+    second stage puts the window back where it was asked for.
+
+    WAV cannot catch this -- every frame is independently addressable, so any
+    seek strategy looks correct.
+    """
+    with Workspace() as workspace:
+        source = workspace.path("a.wav")
+        encoded = workspace.path("a.m4a")
+        signal = _tone(180.0, seed=11)
+        sf.write(source, signal, SR)
+
+        completed = subprocess.run(
+            [ffmpeg_path(), "-y", "-nostdin", "-i", source,
+             "-c:a", "aac", "-b:a", "128k", encoded, "-loglevel", "error"],
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            return  # no AAC encoder available; nothing to assert
+
+        # Well beyond SEEK_PREROLL_S, so the coarse stage really does jump.
+        offset, duration = 150.0, 4.0
+        reference = load_audio(encoded, SR)
+        segment = load_audio(encoded, SR, duration=duration, offset=offset)
+
+        start = int(offset * SR)
+        expected = reference[start : start + int(duration * SR)]
+        n = min(len(expected), len(segment))
+        assert n > SR, "decoded segment too short to compare"
+
+        # Correlate rather than subtract: lossy round-tripping changes sample
+        # values, so the question is whether the window sits at the right
+        # position, not whether the samples are bit-identical.
+        a = expected[:n] - expected[:n].mean()
+        b = segment[:n] - segment[:n].mean()
+        lag = int(np.argmax(np.correlate(a, b, mode="full"))) - (n - 1)
+        assert abs(lag) <= 16, f"window shifted by {lag} samples ({lag / SR * 1000:.2f} ms)"
+
+
 def test_decoded_length_matches_requested_duration():
     with Workspace() as workspace:
         path = workspace.path("a.wav")

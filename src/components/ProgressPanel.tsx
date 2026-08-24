@@ -11,13 +11,12 @@ interface ProgressPanelProps {
   currentFile: string | null;
   fileProgress: number;
   remainingMs: number | null;
-  /** Results that have already streamed in, shown as the completed queue. */
+  /** Results that have already streamed in, shown as the completed rows. */
   results: SyncResult[];
-  workers: number;
 }
 
-function formatRemaining(ms: number | null): string {
-  if (ms === null) return "estimating…";
+function formatRemaining(ms: number | null): string | null {
+  if (ms === null) return null;
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `about ${seconds}s left`;
   const minutes = Math.floor(seconds / 60);
@@ -31,46 +30,38 @@ export const ProgressPanel = memo(function ProgressPanel({
   fileProgress,
   remainingMs,
   results,
-  workers,
 }: ProgressPanelProps) {
-  const overall = total > 0 ? Math.round((processed / total) * 100) : 0;
+  // One number for the whole run. Counting only finished files leaves the bar
+  // pinned at 0% for the entire first file, which reads as a hang; folding in
+  // the active file's own progress makes it move continuously.
+  const overall =
+    total > 0
+      ? Math.min(100, ((processed + (currentFile ? fileProgress / 100 : 0)) / total) * 100)
+      : 0;
 
-  // The last few finished files, plus the one in flight. Older entries scroll
-  // out rather than growing the panel without bound on a long series run.
+  const eta = formatRemaining(remainingMs);
   const recent = results.slice(-4);
 
   return (
     <Card className="px-4 py-4" aria-label="Analysis progress">
-      <div className="mb-3.5 flex items-center gap-3">
-        <Spinner className="h-[15px] w-[15px]" />
-        <span
-          className="min-w-0 flex-1 truncate text-[13px] font-medium"
-          title={currentFile ?? undefined}
-        >
-          {currentFile ?? "Preparing…"}
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <span className="text-[13px] font-medium">
+          Analysing {total > 0 ? `${Math.min(processed + 1, total)} of ${total}` : "…"}
         </span>
         <span className="tabular shrink-0 font-mono text-[11.5px] text-muted-foreground">
-          {processed} of {total} · {formatRemaining(remainingMs)}
+          {/* Until there is a real estimate, show measured progress rather
+              than a placeholder that lingers for the whole first file. */}
+          {eta ?? `${Math.round(overall)}%`}
         </span>
       </div>
 
-      <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>Overall</span>
-        <span className="tabular font-mono">{overall}%</span>
-      </div>
       <ProgressBar percent={overall} label="Overall progress" />
 
-      <div className="mb-1.5 mt-3.5 flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>Current file</span>
-        <span className="tabular font-mono">{fileProgress}%</span>
-      </div>
-      <ProgressBar percent={fileProgress} thin label="Current file progress" />
-
       {(recent.length > 0 || currentFile) && (
-        <ul className="mt-4 flex flex-col gap-2 border-t border-border pt-3">
+        <ul className="mt-3.5 flex flex-col gap-2 border-t border-border pt-3">
           {recent.map((result) => (
             <li
-              key={`${result.primaryPath ?? result.videoFile}`}
+              key={result.primaryPath ?? result.videoFile}
               className="flex items-center gap-2.5 text-xs text-muted-foreground"
             >
               <span
@@ -101,6 +92,7 @@ export const ProgressPanel = memo(function ProgressPanel({
             </li>
           ))}
 
+          {/* The active file appears once, here -- not also in a header. */}
           {currentFile && (
             <li className="flex items-center gap-2.5 text-xs font-medium">
               <span className="grid h-[15px] w-[15px] shrink-0 place-items-center">
@@ -109,18 +101,12 @@ export const ProgressPanel = memo(function ProgressPanel({
               <span className="min-w-0 flex-1 truncate" title={currentFile}>
                 {currentFile}
               </span>
-              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                measuring…
+              <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
+                {fileProgress}%
               </span>
             </li>
           )}
         </ul>
-      )}
-
-      {workers > 1 && (
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          Analysing up to {workers} files at once.
-        </p>
       )}
     </Card>
   );
