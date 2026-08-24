@@ -94,6 +94,15 @@ pub struct SyncResult {
     pub primary_codec: Option<String>,
     #[serde(default)]
     pub secondary_codec: Option<String>,
+    /// The frame-rate explanation for any drift, passed through untouched.
+    ///
+    /// Kept as a raw value because the host never reads inside it: mirroring
+    /// the engine's shape here would be a third copy of the same schema, and
+    /// the whole struct exists because an undeclared field is dropped in
+    /// silence rather than erroring -- which is exactly how this one went
+    /// missing while Python emitted it and TypeScript expected it.
+    #[serde(default)]
+    pub rate_diagnosis: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -785,4 +794,62 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field the engine sends must survive the trip through SyncResult.
+    ///
+    /// Serde drops undeclared fields without complaining, so a field added to
+    /// the Python engine and to the TypeScript client can still go missing
+    /// here and the only symptom is a value that never renders. That is
+    /// exactly what happened to `rateDiagnosis`: the engine classified a
+    /// frame-rate conversion, the UI was ready to show it, and this struct
+    /// silently discarded it in between.
+    #[test]
+    fn rate_diagnosis_survives_deserialization() {
+        let payload = serde_json::json!({
+            "videoFile": "a.mkv",
+            "audioFile": "b.eac3",
+            "delayMs": -17606.245,
+            "driftMsPerS": -0.998,
+            "isRateMismatch": true,
+            "primaryFps": 23.976023976023978,
+            "secondaryFps": null,
+            "rateDiagnosis": {
+                "driftMsPerS": -0.998,
+                "speedRatio": 1.001001001001001,
+                "sourceFps": 23.976,
+                "targetFps": 24.0,
+                "isRateMismatch": true,
+                "isLikelyCut": false,
+                "explanation": "The drift matches a 23.976fps to 24fps conversion.",
+                "correctionRatio": 0.999
+            }
+        });
+
+        let result: SyncResult = serde_json::from_value(payload).expect("should deserialize");
+
+        let diagnosis = result
+            .rate_diagnosis
+            .as_ref()
+            .expect("rateDiagnosis must not be dropped");
+        assert_eq!(diagnosis["sourceFps"], 23.976);
+        assert_eq!(diagnosis["targetFps"], 24.0);
+        assert_eq!(diagnosis["isRateMismatch"], true);
+
+        // And it must still be there once re-serialized for the frontend.
+        let out = serde_json::to_value(&result).expect("should serialize");
+        assert_eq!(out["rateDiagnosis"]["sourceFps"], 23.976);
+    }
+
+    /// A result with no diagnosis is normal, not an error.
+    #[test]
+    fn missing_rate_diagnosis_is_none() {
+        let payload = serde_json::json!({ "videoFile": "a.mkv", "audioFile": "b.eac3" });
+        let result: SyncResult = serde_json::from_value(payload).expect("should deserialize");
+        assert!(result.rate_diagnosis.is_none());
+    }
 }
