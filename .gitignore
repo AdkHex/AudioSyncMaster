@@ -26,6 +26,9 @@ src-tauri/resources/ffmpeg/*
 src-tauri/target/
 src-tauri/gen/
 
+# Editor scratch space (session screenshots, transcript images)
+.nimbalyst/
+
 # Editors and OS
 .vscode/*
 !.vscode/extensions.json

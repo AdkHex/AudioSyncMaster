@@ -1,29 +1,41 @@
-import { Sun, Moon, Monitor } from "lucide-react";
+import { Monitor, Moon, Sun } from "lucide-react";
+
+import { cx } from "@/lib/cx";
 import { useTheme } from "./ThemeProvider";
 
+const OPTIONS = [
+  { value: "light", icon: Sun, label: "Light" },
+  { value: "dark", icon: Moon, label: "Dark" },
+  { value: "system", icon: Monitor, label: "Auto" },
+] as const;
+
+/** Segmented theme control. Lives in Settings rather than the header, so the
+ *  app chrome carries only actions people reach for during a run. */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
 
-  const options: { value: "light" | "dark" | "system"; icon: React.ReactNode; label: string }[] = [
-    { value: "light", icon: <Sun className="w-3.5 h-3.5" />, label: "Light" },
-    { value: "dark", icon: <Moon className="w-3.5 h-3.5" />, label: "Dark" },
-    { value: "system", icon: <Monitor className="w-3.5 h-3.5" />, label: "System" },
-  ];
-
   return (
-    <div className="flex items-center gap-0.5 bg-secondary p-0.5 rounded-md">
-      {options.map((option) => (
+    <div
+      className="flex items-center gap-0.5 rounded-lg border border-border bg-sunken p-0.5"
+      role="radiogroup"
+      aria-label="Theme"
+    >
+      {OPTIONS.map(({ value, icon: Icon, label }) => (
         <button
-          key={option.value}
-          onClick={() => setTheme(option.value)}
-          className={`p-1.5 rounded transition-colors ${
-            theme === option.value
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-          title={option.label}
+          key={value}
+          type="button"
+          role="radio"
+          aria-checked={theme === value}
+          onClick={() => setTheme(value)}
+          className={cx(
+            "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11.5px] transition-colors",
+            theme === value
+              ? "bg-card font-semibold text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
         >
-          {option.icon}
+          <Icon className="h-3 w-3" aria-hidden />
+          {label}
         </button>
       ))}
     </div>

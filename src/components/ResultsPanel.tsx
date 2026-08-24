@@ -1,14 +1,18 @@
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   Clipboard,
   Download,
+  TrendingDown,
   TrendingUp,
   Wand2,
   X,
 } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 
+import { Button, Card, CardHeader, Checkbox, Pill } from "@/components/ui";
+import { cx } from "@/lib/cx";
 import {
   confidenceLevel,
   ffmpegCommandFor,
@@ -34,13 +38,48 @@ interface ResultsPanelProps {
   onApply: () => void;
   onCopy: (text: string) => void;
   applying: boolean;
+  outputSuffix: string;
 }
 
-const CONFIDENCE_STYLES: Record<ConfidenceLevel, string> = {
-  high: "bg-success/15 text-success",
-  medium: "bg-warning/15 text-warning",
-  low: "bg-destructive/15 text-destructive",
-};
+const CONFIDENCE_TONE = {
+  high: "success",
+  medium: "warning",
+  low: "destructive",
+} as const;
+
+/** Summary tile. Reads at a glance before any row is examined. */
+function Stat({
+  label,
+  value,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: number;
+  tone: "success" | "warning" | "destructive" | "neutral";
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-card px-3.5 py-3 shadow-sm">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <span className="shrink-0" aria-hidden>
+          {icon}
+        </span>
+        <span className="truncate">{label}</span>
+      </div>
+      <div
+        className={cx(
+          "tabular mt-1.5 text-[22px] font-bold leading-tight tracking-tight",
+          tone === "success" && "text-success",
+          tone === "warning" && "text-warning",
+          tone === "destructive" && "text-destructive",
+        )}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
 
 export const ResultsPanel = memo(function ResultsPanel({
   results,
@@ -53,8 +92,21 @@ export const ResultsPanel = memo(function ResultsPanel({
   onApply,
   onCopy,
   applying,
+  outputSuffix,
 }: ResultsPanelProps) {
   const [filter, setFilter] = useState<Filter>("all");
+
+  const counts = useMemo(
+    () => ({
+      all: results.length,
+      high: results.filter((r) => !r.error && confidenceLevel(r) === "high").length,
+      medium: results.filter((r) => !r.error && confidenceLevel(r) === "medium").length,
+      low: results.filter((r) => !r.error && confidenceLevel(r) === "low").length,
+      drift: results.filter((r) => r.hasSignificantDrift).length,
+      failed: results.filter((r) => r.error || r.delayMs === null).length,
+    }),
+    [results],
+  );
 
   const filtered = useMemo(() => {
     switch (filter) {
@@ -69,7 +121,7 @@ export const ResultsPanel = memo(function ResultsPanel({
     }
   }, [results, filter]);
 
-  // Only results with a measurement can be applied.
+  // Only measured results can be written.
   const applicableKeys = useMemo(
     () =>
       filtered
@@ -78,23 +130,12 @@ export const ResultsPanel = memo(function ResultsPanel({
     [filtered],
   );
 
-  const counts = useMemo(
-    () => ({
-      all: results.length,
-      high: results.filter((r) => !r.error && confidenceLevel(r) === "high").length,
-      medium: results.filter((r) => !r.error && confidenceLevel(r) === "medium").length,
-      low: results.filter((r) => !r.error && confidenceLevel(r) === "low").length,
-      drift: results.filter((r) => r.hasSignificantDrift).length,
-      failed: results.filter((r) => r.error || r.delayMs === null).length,
-    }),
-    [results],
-  );
-
   if (results.length === 0) return null;
 
+  const selectedCount = selectedKeys.size;
   const allSelected =
     applicableKeys.length > 0 && applicableKeys.every((key) => selectedKeys.has(key));
-  const selectedCount = selectedKeys.size;
+  const someSelected = applicableKeys.some((key) => selectedKeys.has(key));
 
   const filters: { id: Filter; label: string; count: number }[] = [
     { id: "all", label: "All", count: counts.all },
@@ -105,196 +146,280 @@ export const ResultsPanel = memo(function ResultsPanel({
     { id: "failed", label: "Failed", count: counts.failed },
   ];
 
+  const needsLook = counts.medium + counts.low;
+
   return (
-    <section className="rounded-lg border border-border bg-card" aria-label="Results">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="flex items-center gap-2">
-          <h2 className="text-sm font-medium text-foreground">Results</h2>
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+        <Stat
+          label="High confidence"
+          value={counts.high}
+          tone="success"
+          icon={<Check className="h-3 w-3" />}
+        />
+        <Stat
+          label="Needs a look"
+          value={needsLook}
+          tone={needsLook > 0 ? "warning" : "neutral"}
+          icon={<AlertTriangle className="h-3 w-3" />}
+        />
+        <Stat
+          label="Drifting"
+          value={counts.drift}
+          tone={counts.drift > 0 ? "warning" : "neutral"}
+          icon={<TrendingUp className="h-3 w-3" />}
+        />
+        <Stat
+          label="Failed"
+          value={counts.failed}
+          tone={counts.failed > 0 ? "destructive" : "neutral"}
+          icon={<X className="h-3 w-3" />}
+        />
+      </div>
+
+      <Card aria-label="Results">
+        <CardHeader>
+          <h2 className="text-[13px] font-semibold">Results</h2>
           {summary && (
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-[11.5px] text-muted-foreground">
               {summary.matched} matched · {summary.failed} failed
-              {summary.drifting > 0 && ` · ${summary.drifting} drifting`}
             </span>
           )}
+          <span className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={onExportCsv}>
+            <Download className="h-3.5 w-3.5" aria-hidden />
+            CSV
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onExportJson}>
+            JSON
+          </Button>
+        </CardHeader>
+
+        <div
+          className="flex items-center gap-1 overflow-x-auto border-b border-border px-3 py-2"
+          role="tablist"
+          aria-label="Filter results"
+        >
+          {filters.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              role="tab"
+              aria-selected={filter === entry.id}
+              onClick={() => setFilter(entry.id)}
+              disabled={entry.count === 0 && entry.id !== "all"}
+              className={cx(
+                "flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors disabled:opacity-35",
+                filter === entry.id
+                  ? "bg-sunken font-semibold text-foreground"
+                  : "text-muted-foreground hover:bg-sunken hover:text-foreground",
+              )}
+            >
+              {entry.label}
+              {entry.count > 0 && (
+                <span className="tabular font-mono text-[10.5px] text-muted-foreground">
+                  {entry.count}
+                </span>
+              )}
+            </button>
+          ))}
         </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
+
+        <div className="overflow-x-auto">
+          <table className="w-full table-fixed text-xs">
+            <caption className="sr-only">Measured sync offsets</caption>
+            <colgroup>
+              <col className="w-[38px]" />
+              <col />
+              <col className="w-[118px]" />
+              <col className="w-[126px]" />
+              <col className="w-[132px]" />
+              <col className="w-[64px]" />
+              <col className="w-[38px]" />
+            </colgroup>
+            <thead>
+              <tr className="bg-elevated text-[10.5px] uppercase tracking-[0.05em] text-muted-foreground">
+                <th scope="col" className="px-3 py-2.5 text-center font-semibold">
+                  <Checkbox
+                    checked={allSelected}
+                    indeterminate={someSelected && !allSelected}
+                    onChange={() => onToggleAll(applicableKeys)}
+                    disabled={applicableKeys.length === 0}
+                    label="Select all applicable results"
+                  />
+                </th>
+                <th scope="col" className="px-3 py-2.5 text-left font-semibold">Pair</th>
+                <th scope="col" className="px-3 py-2.5 text-right font-semibold">Delay</th>
+                <th scope="col" className="px-3 py-2.5 text-right font-semibold">Drift</th>
+                <th scope="col" className="px-3 py-2.5 text-center font-semibold">Confidence</th>
+                <th scope="col" className="px-3 py-2.5 text-right font-semibold">Time</th>
+                <th scope="col" className="px-3 py-2.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((result) => {
+                const key = resultKey(result);
+                const level = confidenceLevel(result);
+                const applicable =
+                  result.delayMs !== null && !result.error && !!result.primaryPath;
+                const command = ffmpegCommandFor(result);
+                const selected = selectedKeys.has(key);
+                const drifting = result.hasSignificantDrift;
+                const DriftIcon = (result.driftMsPerS ?? 0) < 0 ? TrendingDown : TrendingUp;
+
+                return (
+                  <tr
+                    key={key}
+                    className={cx(
+                      "group border-b border-border last:border-0",
+                      selected ? "bg-accent" : "hover:bg-elevated",
+                    )}
+                  >
+                    <td className="px-3 py-2.5 text-center">
+                      <Checkbox
+                        checked={selected}
+                        onChange={() => onToggleSelection(key)}
+                        disabled={!applicable}
+                        label={`Select ${result.videoFile}`}
+                      />
+                    </td>
+
+                    {/* Video and audio share one cell so the numbers get the width. */}
+                    <td className="overflow-hidden px-3 py-2.5">
+                      <span className="block truncate" title={result.videoFile}>
+                        {result.videoFile}
+                      </span>
+                      {result.error ? (
+                        <span
+                          className="mt-0.5 block truncate text-[11px] text-destructive"
+                          title={result.error}
+                        >
+                          {result.error}
+                        </span>
+                      ) : (
+                        <span
+                          className="mt-0.5 flex items-center gap-1 truncate text-[11px] text-muted-foreground"
+                          title={result.audioFile}
+                        >
+                          <ArrowRight className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                          <span className="truncate">{result.audioFile}</span>
+                        </span>
+                      )}
+                    </td>
+
+                    <td className="tabular whitespace-nowrap px-3 py-2.5 text-right font-mono text-[13px] font-semibold">
+                      {result.error ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        formatDelay(result.delayMs)
+                      )}
+                    </td>
+
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right">
+                      {drifting ? (
+                        <Pill
+                          tone="warning"
+                          className="tabular font-mono"
+                          title={`Total drift across the file: ${formatDelay(result.totalDriftMs)}`}
+                        >
+                          <DriftIcon className="h-2.5 w-2.5" aria-hidden />
+                          {formatDrift(result.driftMsPerS)}
+                        </Pill>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </td>
+
+                    <td className="px-3 py-2.5 text-center">
+                      {result.error ? (
+                        <Pill tone="destructive" title={result.error}>
+                          <X className="h-2.5 w-2.5" aria-hidden />
+                          Failed
+                        </Pill>
+                      ) : (
+                        <Pill
+                          tone={CONFIDENCE_TONE[level]}
+                          title={
+                            result.confidence !== null
+                              ? `Matched ${result.windowsUsed}/${result.windowsTotal} windows`
+                              : undefined
+                          }
+                        >
+                          {level === "high" && <Check className="h-2.5 w-2.5" aria-hidden />}
+                          {level === "low" && <AlertTriangle className="h-2.5 w-2.5" aria-hidden />}
+                          {level[0].toUpperCase() + level.slice(1)}
+                          {result.confidence !== null && (
+                            <span className="tabular font-mono">
+                              · {(result.confidence * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </Pill>
+                      )}
+                    </td>
+
+                    <td className="tabular whitespace-nowrap px-3 py-2.5 text-right font-mono text-[11px] text-muted-foreground">
+                      {formatElapsed(result.elapsedMs)}
+                    </td>
+
+                    <td className="px-3 py-2.5">
+                      {command && (
+                        <button
+                          type="button"
+                          onClick={() => onCopy(command)}
+                          title="Copy the equivalent ffmpeg command"
+                          className="rounded p-1 text-muted-foreground opacity-0 transition hover:bg-sunken hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                        >
+                          <Clipboard className="h-3 w-3" aria-hidden />
+                          <span className="sr-only">
+                            Copy ffmpeg command for {result.videoFile}
+                          </span>
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {filtered.length === 0 && (
+          <p className="px-4 py-8 text-center text-xs text-muted-foreground">
+            No results match this filter.
+          </p>
+        )}
+
+        {/* The payoff action, given the weight it deserves. */}
+        <div className="flex flex-wrap items-center gap-3 rounded-b-xl border-t border-border bg-elevated px-4 py-3">
+          <p className="min-w-0 flex-1 text-[12.5px] text-muted-foreground">
+            {selectedCount > 0 ? (
+              <>
+                <span className="font-semibold text-foreground">
+                  {selectedCount} selected
+                </span>{" "}
+                — corrected copies are written alongside the originals with{" "}
+                <span className="font-mono">{outputSuffix}</span>. Source files are never
+                modified.
+              </>
+            ) : (
+              "Select the results you want to write corrected files for."
+            )}
+          </p>
+          <Button
+            variant="primary"
             onClick={onApply}
             disabled={selectedCount === 0 || applying}
-            className="flex items-center gap-1.5 rounded bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
             title="Write corrected files for the selected results"
           >
             <Wand2 className="h-3.5 w-3.5" aria-hidden />
-            {applying ? "Writing…" : `Fix ${selectedCount || ""}`.trim()}
-          </button>
-          <button
-            type="button"
-            onClick={onExportCsv}
-            className="flex items-center gap-1.5 rounded px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
-            <Download className="h-3.5 w-3.5" aria-hidden />
-            CSV
-          </button>
-          <button
-            type="button"
-            onClick={onExportJson}
-            className="rounded px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
-            JSON
-          </button>
+            {applying
+              ? "Writing…"
+              : selectedCount > 0
+                ? `Fix ${selectedCount} file${selectedCount === 1 ? "" : "s"}`
+                : "Fix"}
+          </Button>
         </div>
-      </header>
-
-      <div className="flex flex-wrap items-center gap-1 border-b border-border px-4 py-2">
-        {filters.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            onClick={() => setFilter(entry.id)}
-            disabled={entry.count === 0 && entry.id !== "all"}
-            className={`rounded px-2 py-1 text-[11px] transition-colors disabled:opacity-30 ${
-              filter === entry.id
-                ? "bg-secondary font-medium text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {entry.label} {entry.count > 0 && <span className="opacity-60">{entry.count}</span>}
-          </button>
-        ))}
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <caption className="sr-only">Measured sync offsets</caption>
-          <thead>
-            <tr className="border-b border-border bg-secondary/40 text-muted-foreground">
-              <th scope="col" className="w-8 px-3 py-2">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={() => onToggleAll(applicableKeys)}
-                  disabled={applicableKeys.length === 0}
-                  className="h-3 w-3 accent-primary"
-                  aria-label="Select all applicable results"
-                />
-              </th>
-              <th scope="col" className="px-3 py-2 text-left font-medium">Video</th>
-              <th scope="col" className="px-3 py-2 text-left font-medium">Audio</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Delay</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Drift</th>
-              <th scope="col" className="px-3 py-2 text-center font-medium">Confidence</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Time</th>
-              <th scope="col" className="w-8 px-3 py-2" />
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((result) => {
-              const key = resultKey(result);
-              const level = confidenceLevel(result);
-              const applicable =
-                result.delayMs !== null && !result.error && !!result.primaryPath;
-              const command = ffmpegCommandFor(result);
-
-              return (
-                <tr key={key} className="border-b border-border/50 last:border-0">
-                  <td className="px-3 py-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedKeys.has(key)}
-                      onChange={() => onToggleSelection(key)}
-                      disabled={!applicable}
-                      className="h-3 w-3 accent-primary"
-                      aria-label={`Select ${result.videoFile}`}
-                    />
-                  </td>
-                  <td className="max-w-[220px] px-3 py-2">
-                    <span className="block truncate text-foreground" title={result.videoFile}>
-                      {result.videoFile}
-                    </span>
-                  </td>
-                  <td className="max-w-[200px] px-3 py-2">
-                    <span
-                      className="block truncate text-muted-foreground"
-                      title={result.audioFile}
-                    >
-                      {result.audioFile}
-                    </span>
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-foreground">
-                    {result.error ? (
-                      <span className="text-destructive" title={result.error}>
-                        --
-                      </span>
-                    ) : (
-                      formatDelay(result.delayMs)
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right font-mono">
-                    {result.hasSignificantDrift ? (
-                      <span
-                        className="inline-flex items-center gap-1 text-warning"
-                        title={`Total drift across the file: ${formatDelay(result.totalDriftMs)}`}
-                      >
-                        <TrendingUp className="h-3 w-3" aria-hidden />
-                        {formatDrift(result.driftMsPerS)}
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">--</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    {result.error ? (
-                      <span
-                        className="inline-flex items-center gap-1 rounded bg-destructive/15 px-2 py-0.5 text-[10px] text-destructive"
-                        title={result.error}
-                      >
-                        <X className="h-2.5 w-2.5" aria-hidden />
-                        Failed
-                      </span>
-                    ) : (
-                      <span
-                        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium ${CONFIDENCE_STYLES[level]}`}
-                        title={
-                          result.confidence !== null
-                            ? `Match confidence ${(result.confidence * 100).toFixed(0)}% from ${result.windowsUsed}/${result.windowsTotal} windows`
-                            : undefined
-                        }
-                      >
-                        {level === "high" && <Check className="h-2.5 w-2.5" aria-hidden />}
-                        {level === "low" && <AlertTriangle className="h-2.5 w-2.5" aria-hidden />}
-                        {level[0].toUpperCase() + level.slice(1)}
-                      </span>
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-[10px] text-muted-foreground">
-                    {formatElapsed(result.elapsedMs)}
-                  </td>
-                  <td className="px-3 py-2">
-                    {command && (
-                      <button
-                        type="button"
-                        onClick={() => onCopy(command)}
-                        className="rounded p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                        title="Copy the equivalent ffmpeg command"
-                      >
-                        <Clipboard className="h-3 w-3" aria-hidden />
-                        <span className="sr-only">Copy ffmpeg command for {result.videoFile}</span>
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {filtered.length === 0 && (
-        <p className="px-4 py-6 text-center text-xs text-muted-foreground">
-          No results match this filter.
-        </p>
-      )}
-    </section>
+      </Card>
+    </div>
   );
 });

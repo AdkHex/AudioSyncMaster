@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Film,
   History as HistoryIcon,
   Play,
@@ -11,6 +12,7 @@ import {
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { ApplyProgressDialog, type ApplyState } from "@/components/ApplyProgressDialog";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { FilePanel } from "@/components/FilePanel";
 import { HistoryPanel } from "@/components/HistoryPanel";
@@ -19,7 +21,8 @@ import { ProgressPanel } from "@/components/ProgressPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { UpdateDialog } from "@/components/UpdateDialog";
-import { ThemeToggle } from "@/components/ThemeToggle";
+import { Button, IconButton, Notice, StepHeader } from "@/components/ui";
+import { cx } from "@/lib/cx";
 import * as api from "@/lib/api";
 import {
   createHistoryEntry,
@@ -46,8 +49,12 @@ import type {
   SyncMode,
   SyncResult,
 } from "@/lib/types";
-import { resultKey } from "@/lib/types";
+import { formatSize, resultKey } from "@/lib/types";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
+
+/** Injected from package.json at build time, so Settings always reports the
+ *  version CI actually tagged the release with. */
+const APP_VERSION = __APP_VERSION__;
 
 export default function Index() {
   const desktop = api.isDesktop();
@@ -65,6 +72,8 @@ export default function Index() {
   const [dragTarget, setDragTarget] = useState<"video" | "audio" | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [applyState, setApplyState] = useState<ApplyState | null>(null);
+  const [cancellingApply, setCancellingApply] = useState(false);
   const [remainingMs, setRemainingMs] = useState<number | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -139,6 +148,23 @@ export default function Index() {
           if (event.file) {
             dispatch({ type: "log", message: `Writing ${event.file}` });
           }
+          // applyStart names the file about to be written; applyProgress
+          // confirms one finished and carries the running totals.
+          setApplyState((prev) => {
+            const base: ApplyState = prev ?? {
+              written: [],
+              current: null,
+              done: 0,
+              total: 0,
+            };
+            const finished = typeof event.done === "number";
+            return {
+              written: finished && event.output ? [...base.written, event.output] : base.written,
+              current: finished ? null : (event.file ?? base.current),
+              done: event.done ?? base.done,
+              total: event.total ?? base.total,
+            };
+          });
         },
       })
       .then((unlisten) => {
@@ -432,6 +458,8 @@ export default function Index() {
     }
 
     setApplying(true);
+    setCancellingApply(false);
+    setApplyState({ written: [], current: null, done: 0, total: items.length });
     try {
       const outcome = await api.applyCorrections(items, {
         suffix: settingsRef.current.outputSuffix,
@@ -458,8 +486,20 @@ export default function Index() {
       toast.error(error instanceof Error ? error.message : "Could not write files");
     } finally {
       setApplying(false);
+      setApplyState(null);
+      setCancellingApply(false);
     }
   }, [selectedKeys]);
+
+  const handleCancelApply = useCallback(async () => {
+    setCancellingApply(true);
+    try {
+      await api.cancelSync();
+    } catch {
+      toast.error("Could not stop writing.");
+      setCancellingApply(false);
+    }
+  }, []);
 
   const handleExport = useCallback(
     async (results: SyncResult[], format: "csv" | "json") => {
@@ -527,6 +567,21 @@ export default function Index() {
 
   const selection = useMemo(() => validateSelection(state), [state]);
   const busy = state.status === "processing";
+  const hasResults = state.results.length > 0;
+  const hasFiles = state.videoFiles.length > 0 || state.audioFiles.length > 0;
+
+  // Step 1 collapses once satisfied, so attention moves down the column.
+  const selectionSummary = useMemo(() => {
+    if (!hasFiles) return null;
+    const count = state.videoFiles.length + state.audioFiles.length;
+    const bytes = [...state.videoFiles, ...state.audioFiles].reduce(
+      (sum, file) => sum + (file.size ?? 0),
+      0,
+    );
+    return `${count} file${count === 1 ? "" : "s"}${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
+  }, [hasFiles, state.videoFiles, state.audioFiles]);
+
+  const pairCount = state.pairing?.pairs.length ?? 0;
 
   const toggleSelection = useCallback((key: string) => {
     setSelectedKeys((prev) => {
@@ -550,31 +605,31 @@ export default function Index() {
     setProbes({});
   }, []);
 
+  const modes = [
+    { id: "movie" as const, label: "Movies", Icon: Film },
+    { id: "series" as const, label: "Series", Icon: Tv },
+  ];
+
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-4">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-primary-foreground">
-              <path d="M9 18V5l12-2v13" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-              <circle cx="6" cy="18" r="3" stroke="currentColor" strokeWidth="2.5" />
-              <circle cx="18" cy="16" r="3" stroke="currentColor" strokeWidth="2.5" />
+      <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-border bg-card px-4">
+        <div className="flex min-w-[150px] items-center gap-2.5">
+          <span className="grid h-[26px] w-[26px] place-items-center rounded-[7px] bg-foreground text-card">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M9 18V5l12-2v13" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="6" cy="18" r="3" stroke="currentColor" strokeWidth="2.2" />
+              <circle cx="18" cy="16" r="3" stroke="currentColor" strokeWidth="2.2" />
             </svg>
           </span>
-          <h1 className="text-sm font-semibold text-foreground">AudioSyncMaster</h1>
+          <h1 className="text-[13.5px] font-semibold tracking-tight">AudioSyncMaster</h1>
         </div>
 
         <div
-          className="flex items-center gap-0.5 rounded-md bg-secondary p-0.5"
+          className="mx-auto flex items-center gap-0.5 rounded-[9px] border border-border bg-sunken p-[3px]"
           role="tablist"
           aria-label="Sync mode"
         >
-          {(
-            [
-              { id: "movie" as const, label: "Movies", Icon: Film },
-              { id: "series" as const, label: "Series", Icon: Tv },
-            ]
-          ).map(({ id, label, Icon }) => (
+          {modes.map(({ id, label, Icon }) => (
             <button
               key={id}
               type="button"
@@ -582,11 +637,12 @@ export default function Index() {
               aria-selected={state.mode === id}
               onClick={() => setMode(id)}
               disabled={busy}
-              className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 ${
+              className={cx(
+                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[12.5px] transition-colors disabled:opacity-40",
                 state.mode === id
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
+                  ? "bg-card font-semibold text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
             >
               <Icon className="h-3.5 w-3.5" aria-hidden />
               {label}
@@ -594,60 +650,60 @@ export default function Index() {
           ))}
         </div>
 
-        <div className="flex items-center gap-1">
-          <ThemeToggle />
-          <button
-            type="button"
+        <div className="flex min-w-[150px] items-center justify-end gap-0.5">
+          <IconButton
+            label="Console"
+            active={showConsole}
             onClick={() => setShowConsole((open) => !open)}
-            className={`rounded p-1.5 transition-colors ${
-              showConsole ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-secondary"
-            }`}
-            title="Console"
           >
             <Terminal className="h-4 w-4" aria-hidden />
-            <span className="sr-only">Toggle console</span>
-          </button>
-          <button
-            type="button"
+          </IconButton>
+          <IconButton
+            label="History (Ctrl+H)"
+            active={showHistory}
             onClick={() => setShowHistory((open) => !open)}
-            className={`rounded p-1.5 transition-colors ${
-              showHistory ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-secondary"
-            }`}
-            title="History (Ctrl+H)"
           >
             <HistoryIcon className="h-4 w-4" aria-hidden />
-            <span className="sr-only">Toggle history</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowSettings(true)}
-            className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-secondary"
-            title="Settings (Ctrl+,)"
-          >
+          </IconButton>
+          <span className="mx-1.5 h-[18px] w-px bg-border" />
+          <IconButton label="Settings (Ctrl+,)" onClick={() => setShowSettings(true)}>
             <Settings2 className="h-4 w-4" aria-hidden />
-            <span className="sr-only">Open settings</span>
-          </button>
+          </IconButton>
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 overflow-y-auto p-4">
-          <div className="mx-auto max-w-4xl space-y-3">
+      <main className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-7">
+          <div className="mx-auto flex max-w-[760px] flex-col gap-[22px]">
             {!desktop && (
-              <p className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning">
-                Running in a browser. File selection and analysis need the desktop app.
-              </p>
+              <Notice icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
+                <b className="font-semibold">Running in a browser.</b> File selection and
+                analysis need the desktop app.
+              </Notice>
             )}
 
+            {/* -------------------------------------------------- step 1 */}
+            <StepHeader
+              index={1}
+              title="Select files"
+              state={hasFiles && selection.ok ? "done" : "active"}
+              aside={
+                selectionSummary ??
+                (state.mode === "movie"
+                  ? "Movie mode · many videos, one audio track"
+                  : "Series mode · one track per episode")
+              }
+            />
+
             <div
-              className="grid gap-3 md:grid-cols-2"
+              className="grid gap-3.5 md:grid-cols-2"
               onDragOver={(event) => event.preventDefault()}
             >
               <div onDragEnter={() => setDragTarget("video")}>
                 <FilePanel
                   kind="video"
                   title="Video files"
-                  hint="The files whose timing is correct"
+                  hint="The files whose timing is already correct. Drop a folder, or browse."
                   files={state.videoFiles}
                   folder={state.videoFolder}
                   recentFolder={recentFolders.video}
@@ -665,8 +721,8 @@ export default function Index() {
                   title={state.mode === "movie" ? "Audio track" : "Audio files"}
                   hint={
                     state.mode === "movie"
-                      ? "The track to align against the videos"
-                      : "One track per episode"
+                      ? "The track to align against the videos. One file in movie mode."
+                      : "One track per episode. Drop the folder, or browse."
                   }
                   files={state.audioFiles}
                   folder={state.audioFolder}
@@ -681,9 +737,37 @@ export default function Index() {
               </div>
             </div>
 
-            {state.status !== "processing" && (
-              <PairingPreview pairing={state.pairing} loading={pairingLoading} />
+            {/* -------------------------------------------------- step 2 */}
+            {!busy && (state.pairing || pairingLoading) && (
+              <>
+                <StepHeader
+                  index={2}
+                  title="Review pairing"
+                  state={pairCount > 0 ? "active" : "todo"}
+                  aside={
+                    state.pairing
+                      ? `${pairCount} pair${pairCount === 1 ? "" : "s"} · matched by ${state.pairing.method}`
+                      : undefined
+                  }
+                />
+                <PairingPreview pairing={state.pairing} loading={pairingLoading} />
+              </>
             )}
+
+            {/* -------------------------------------------------- step 3 */}
+            <StepHeader
+              index={3}
+              title={busy ? "Analysing" : "Analyse"}
+              // Only "done" when this selection actually produced the results.
+              // Loading a past run leaves the selection empty, so the step is
+              // not something the user has completed here.
+              state={busy ? "active" : hasResults && selection.ok ? "done" : "todo"}
+              aside={
+                busy && settings.maxWorkers > 1
+                  ? `${settings.maxWorkers} workers`
+                  : undefined
+              }
+            />
 
             {busy && (
               <ProgressPanel
@@ -692,77 +776,85 @@ export default function Index() {
                 currentFile={state.currentFile}
                 fileProgress={state.fileProgress}
                 remainingMs={remainingMs}
+                results={state.results}
+                workers={settings.maxWorkers}
               />
             )}
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-3">
               {busy ? (
-                <button
-                  type="button"
-                  onClick={() => void handleCancel()}
-                  className="flex items-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-secondary"
-                >
-                  <Square className="h-3.5 w-3.5" aria-hidden />
-                  Stop
-                </button>
+                <>
+                  <Button size="lg" onClick={() => void handleCancel()}>
+                    <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
+                    Stop
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    Stops after the current file finishes.
+                  </span>
+                </>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => void handleStart()}
-                  disabled={!selection.ok}
-                  title={selection.reason}
-                  className="flex items-center gap-2 rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Play className="h-4 w-4" aria-hidden />
-                  Analyse
-                </button>
-              )}
+                <>
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    onClick={() => void handleStart()}
+                    disabled={!selection.ok}
+                  >
+                    <Play className="h-4 w-4 fill-current" aria-hidden />
+                    {pairCount > 0
+                      ? `Analyse ${pairCount} pair${pairCount === 1 ? "" : "s"}`
+                      : "Analyse"}
+                  </Button>
 
-              {(state.videoFiles.length > 0 || state.results.length > 0) && !busy && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    dispatch({ type: "clearAll" });
-                    setSelectedKeys(new Set());
-                    setProbes({});
-                  }}
-                  className="rounded p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                  title="Clear everything"
-                >
-                  <Trash2 className="h-4 w-4" aria-hidden />
-                  <span className="sr-only">Clear everything</span>
-                </button>
-              )}
+                  {(hasFiles || hasResults) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        dispatch({ type: "clearAll" });
+                        setSelectedKeys(new Set());
+                        setProbes({});
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                      Clear all
+                    </Button>
+                  )}
 
-              {!selection.ok && state.videoFiles.length > 0 && (
-                <span className="text-xs text-muted-foreground">{selection.reason}</span>
+                  {/* A disabled button that explains itself, rather than one
+                      that simply sits there dead. Suppressed while nothing is
+                      selected at all, where the empty drop zones already say it. */}
+                  {!selection.ok && hasFiles && (
+                    <span className="text-xs text-muted-foreground">{selection.reason}</span>
+                  )}
+                </>
               )}
             </div>
 
             {state.error && (
-              <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
-                {state.error}
-              </p>
+              <Notice tone="destructive" icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
+                <b className="font-semibold">The analysis could not finish.</b> {state.error}
+              </Notice>
             )}
 
-            <ResultsPanel
-              results={state.results}
-              summary={state.summary}
-              selectedKeys={selectedKeys}
-              onToggleSelection={toggleSelection}
-              onToggleAll={toggleAll}
-              onExportCsv={() => void handleExport(state.results, "csv")}
-              onExportJson={() => void handleExport(state.results, "json")}
-              onApply={() => void handleApply()}
-              onCopy={(text) => void handleCopy(text)}
-              applying={applying}
-            />
-
-            {showConsole && (
-              <ConsolePanel
-                logs={state.logs}
-                onClear={() => dispatch({ type: "clearLogs" })}
-              />
+            {/* -------------------------------------------------- step 4 */}
+            {hasResults && (
+              <>
+                <StepHeader index={4} title="Review &amp; fix" state="active" />
+                <ResultsPanel
+                  results={state.results}
+                  summary={state.summary}
+                  selectedKeys={selectedKeys}
+                  onToggleSelection={toggleSelection}
+                  onToggleAll={toggleAll}
+                  onExportCsv={() => void handleExport(state.results, "csv")}
+                  onExportJson={() => void handleExport(state.results, "json")}
+                  onApply={() => void handleApply()}
+                  onCopy={(text) => void handleCopy(text)}
+                  applying={applying}
+                  outputSuffix={settings.outputSuffix}
+                />
+              </>
             )}
           </div>
         </div>
@@ -770,6 +862,7 @@ export default function Index() {
         {showHistory && (
           <HistoryPanel
             entries={history}
+            onClose={() => setShowHistory(false)}
             onLoad={(entry) => {
               dispatch({
                 type: "loadResults",
@@ -788,10 +881,25 @@ export default function Index() {
         )}
       </main>
 
-      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-card/50 px-4 text-[10px] text-muted-foreground">
-        <span>{state.mode === "movie" ? "Movie" : "Series"} mode</span>
-        <span className="opacity-70">
-          Enter analyse · Esc stop · Ctrl+H history · Ctrl+, settings
+      {showConsole && (
+        <ConsolePanel
+          logs={state.logs}
+          onClear={() => dispatch({ type: "clearLogs" })}
+          onClose={() => setShowConsole(false)}
+          onCopy={(text) => void handleCopy(text)}
+        />
+      )}
+
+      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
+        <span>
+          {state.mode === "movie" ? "Movie" : "Series"} mode
+          {hasResults && ` · ${state.results.length} result${state.results.length === 1 ? "" : "s"}`}
+        </span>
+        <span className="flex gap-3.5">
+          <Shortcut keys="↵" label="analyse" />
+          <Shortcut keys="esc" label="stop" />
+          <Shortcut keys="⌃H" label="history" />
+          <Shortcut keys="⌃," label="settings" />
         </span>
       </footer>
 
@@ -799,13 +907,31 @@ export default function Index() {
         open={showSettings}
         settings={settings}
         mode={state.mode}
+        version={APP_VERSION}
         onChange={setSettings}
         onClose={() => setShowSettings(false)}
         onCheckForUpdate={() => void handleCheckForUpdate()}
         checkingUpdate={checkingUpdate}
       />
 
+      <ApplyProgressDialog
+        state={applying ? applyState : null}
+        onCancel={() => void handleCancelApply()}
+        cancelling={cancellingApply}
+      />
+
       <UpdateDialog update={update} onDismiss={() => setUpdate(null)} />
     </div>
+  );
+}
+
+function Shortcut({ keys, label }: { keys: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <kbd className="rounded border border-border-strong border-b-2 bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        {keys}
+      </kbd>
+      {label}
+    </span>
   );
 }

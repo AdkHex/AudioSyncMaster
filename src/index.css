@@ -5,97 +5,98 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens.
+ *
+ * A calm neutral ramp with a single accent. Colour is reserved for meaning:
+ * the accent marks the one next action, and success/warning/destructive appear
+ * only on confidence, drift and failure -- the three things needing judgement.
+ *
+ * Values are raw HSL triplets because Tailwind composes them as
+ * `hsl(var(--token) / <alpha>)`, which is what makes `bg-primary/10` work. */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 220 16% 10%;
-    
-    --card: 0 0% 98%;
-    --card-foreground: 220 16% 10%;
-    
+    --background: 220 16% 99%;
+    --foreground: 218 22% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 218 22% 11%;
+
     --popover: 0 0% 100%;
-    --popover-foreground: 220 16% 10%;
-    
-    --primary: 210 100% 50%;
+    --popover-foreground: 218 22% 11%;
+
+    /* The single accent. Used once per screen, on the primary action. */
+    --primary: 221 92% 57%;
     --primary-foreground: 0 0% 100%;
-    
-    --secondary: 220 14% 94%;
-    --secondary-foreground: 220 14% 30%;
-    
-    --muted: 220 12% 92%;
-    --muted-foreground: 220 10% 45%;
-    
-    --accent: 210 80% 92%;
-    --accent-foreground: 210 100% 40%;
-    
-    --destructive: 0 70% 50%;
+
+    --secondary: 216 20% 96%;
+    --secondary-foreground: 218 14% 35%;
+
+    --muted: 216 20% 94%;
+    --muted-foreground: 216 10% 45%;
+
+    --accent: 221 92% 96%;
+    --accent-foreground: 221 82% 47%;
+
+    --destructive: 5 63% 46%;
     --destructive-foreground: 0 0% 100%;
-    
-    --success: 145 65% 42%;
+
+    --success: 154 68% 28%;
     --success-foreground: 0 0% 100%;
-    
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 8%;
-    
-    --border: 220 12% 90%;
-    --input: 220 14% 95%;
-    --ring: 210 100% 50%;
-    
-    --radius: 0.5rem;
-    
-    --sidebar-background: 0 0% 98%;
-    --sidebar-foreground: 220 10% 40%;
-    --sidebar-primary: 210 100% 50%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 14% 94%;
-    --sidebar-accent-foreground: 220 16% 10%;
-    --sidebar-border: 220 12% 90%;
-    --sidebar-ring: 210 100% 50%;
+
+    --warning: 35 100% 30%;
+    --warning-foreground: 0 0% 100%;
+
+    /* Surfaces that sit below the card plane: table headers, inputs, wells. */
+    --sunken: 216 20% 95%;
+    --elevated: 220 20% 98%;
+
+    --border: 214 18% 91%;
+    --border-strong: 214 16% 85%;
+    --input: 216 20% 95%;
+    --ring: 221 92% 57%;
+
+    --radius: 0.5625rem;
   }
 
   .dark {
-    --background: 220 16% 6%;
-    --foreground: 0 0% 96%;
-    
-    --card: 220 14% 9%;
-    --card-foreground: 0 0% 96%;
-    
-    --popover: 220 14% 10%;
-    --popover-foreground: 0 0% 96%;
-    
-    --primary: 210 100% 52%;
-    --primary-foreground: 0 0% 100%;
-    
-    --secondary: 220 14% 12%;
-    --secondary-foreground: 0 0% 70%;
-    
-    --muted: 220 12% 16%;
-    --muted-foreground: 0 0% 50%;
-    
-    --accent: 210 80% 15%;
-    --accent-foreground: 210 100% 65%;
-    
-    --destructive: 0 70% 50%;
-    --destructive-foreground: 0 0% 100%;
-    
-    --success: 145 65% 42%;
-    --success-foreground: 0 0% 100%;
-    
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 8%;
-    
-    --border: 220 12% 14%;
-    --input: 220 14% 11%;
-    --ring: 210 100% 52%;
-    
-    --sidebar-background: 220 16% 7%;
-    --sidebar-foreground: 0 0% 70%;
-    --sidebar-primary: 210 100% 52%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 14% 12%;
-    --sidebar-accent-foreground: 0 0% 96%;
-    --sidebar-border: 220 12% 12%;
-    --sidebar-ring: 210 100% 52%;
+    --background: 213 18% 6%;
+    --foreground: 213 25% 95%;
+
+    --card: 214 16% 10%;
+    --card-foreground: 213 25% 95%;
+
+    --popover: 214 16% 11%;
+    --popover-foreground: 213 25% 95%;
+
+    --primary: 220 100% 65%;
+    --primary-foreground: 214 60% 8%;
+
+    --secondary: 214 15% 15%;
+    --secondary-foreground: 213 14% 70%;
+
+    --muted: 214 14% 18%;
+    --muted-foreground: 213 10% 55%;
+
+    --accent: 219 45% 16%;
+    --accent-foreground: 220 100% 72%;
+
+    --destructive: 6 82% 68%;
+    --destructive-foreground: 214 60% 8%;
+
+    --success: 152 52% 55%;
+    --success-foreground: 214 60% 8%;
+
+    --warning: 36 71% 59%;
+    --warning-foreground: 214 60% 8%;
+
+    --sunken: 214 18% 8%;
+    --elevated: 214 16% 12%;
+
+    --border: 215 14% 17%;
+    --border-strong: 215 13% 22%;
+    --input: 214 18% 9%;
+    --ring: 220 100% 65%;
   }
 }
 
@@ -115,11 +116,17 @@
     min-height: 100vh;
     overflow: hidden;
   }
+
+  /* Tabular figures everywhere a measurement is shown, so digits line up in
+     columns and a changing delay does not shift the layout. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
 }
 
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -127,8 +134,8 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--muted));
-  border-radius: 3px;
+  background: hsl(var(--border-strong));
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -140,7 +147,57 @@
   outline-offset: 2px;
 }
 
-@keyframes progress-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
+/* Range inputs. Styled explicitly because the native control ignores most
+   inherited styling and looks foreign in both themes. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: hsl(var(--sunken));
+  border: 1px solid hsl(var(--border));
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: hsl(var(--card));
+  border: 1.5px solid hsl(var(--primary));
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgb(16 20 26 / 0.15);
+}
+
+input[type="range"]:disabled::-webkit-slider-thumb {
+  border-color: hsl(var(--border-strong));
+  cursor: not-allowed;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sheet-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.99); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes drawer-in {
+  from { transform: translateX(100%); }
+  to { transform: none; }
+}
+
+.animate-fade-in { animation: fade-in 0.14s ease-out }
+.animate-sheet-in { animation: sheet-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) }
+.animate-drawer-in { animation: drawer-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-sheet-in,
+  .animate-drawer-in {
+    animation: none;
+  }
 }
