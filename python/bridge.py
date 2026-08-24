@@ -127,7 +127,12 @@ def handle_analyze(request: dict) -> None:
             emit({"type": "done", "results": [], "summary": summarize([])})
             return
 
-        pairs = pair_movie_mode(video_files, audio_file)
+        pairs = pair_movie_mode(
+            video_files,
+            audio_file,
+            primary_track=int(request.get("videoTrack", 0) or 0),
+            secondary_track=int(request.get("audioTrack", 0) or 0),
+        )
         emit(
             {
                 "type": "pairs",
@@ -156,6 +161,12 @@ def handle_analyze(request: dict) -> None:
                 return
 
         report = match_folders(video_folder, audio_folder, pattern)
+        video_track = int(request.get("videoTrack", 0) or 0)
+        audio_track = int(request.get("audioTrack", 0) or 0)
+        if video_track or audio_track:
+            for pair in report.pairs:
+                pair.primary_track = video_track
+                pair.secondary_track = audio_track
         emit({"type": "pairs", **report.to_dict()})
         if report.warning:
             emit_log(report.warning)
@@ -239,10 +250,34 @@ def handle_probe(request: dict) -> None:
                 "audioCodec": info.audio_codec,
                 "sampleRate": info.sample_rate,
                 "channels": info.channels,
+                "fps": info.fps,
+                "audioTracks": [t.to_dict() for t in info.audio_tracks],
             }
         )
     except MediaError as exc:
         emit({"type": "probe", "path": path, "error": str(exc)})
+
+
+def handle_list_tracks(request: dict) -> None:
+    """List the selectable audio streams of each requested file.
+
+    A container often carries an original language, a dub and a commentary.
+    Without this the UI cannot offer a choice and every comparison silently
+    uses the first stream.
+    """
+    results = []
+    for path in request.get("paths") or []:
+        entry = {"path": path, "name": os.path.basename(path)}
+        try:
+            info = probe(path)
+            entry["tracks"] = [t.to_dict() for t in info.audio_tracks]
+            entry["fps"] = info.fps
+            entry["duration"] = info.duration
+        except MediaError as exc:
+            entry["tracks"] = []
+            entry["error"] = str(exc)
+        results.append(entry)
+    emit({"type": "tracks", "files": results})
 
 
 def handle_apply(request: dict) -> None:
@@ -315,6 +350,7 @@ HANDLERS = {
     "analyze": handle_analyze,
     "previewPairs": handle_preview_pairs,
     "probe": handle_probe,
+    "listTracks": handle_list_tracks,
     "apply": handle_apply,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),

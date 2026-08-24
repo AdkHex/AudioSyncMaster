@@ -20,11 +20,45 @@ export interface PickResponse {
   files: Omit<FileItem, "id">[];
 }
 
+export interface AudioTrackInfo {
+  index: number;
+  codec: string | null;
+  language: string | null;
+  title: string | null;
+  channels: number | null;
+  sampleRate: number | null;
+  isDefault: boolean;
+  label: string;
+}
+
+/** Why a file drifts: a frame-rate conversion, or a different cut. */
+export interface RateDiagnosis {
+  driftMsPerS: number;
+  speedRatio: number;
+  sourceFps: number | null;
+  targetFps: number | null;
+  isRateMismatch: boolean;
+  isLikelyCut: boolean;
+  explanation: string;
+  correctionRatio: number | null;
+}
+
+export interface TrackListing {
+  path: string;
+  name: string;
+  tracks: AudioTrackInfo[];
+  fps: number | null;
+  duration: number | null;
+  error?: string | null;
+}
+
 export interface MediaProbe {
   hasAudio: boolean;
   hasVideo: boolean;
   duration: number | null;
   audioCodec: string | null;
+  fps?: number | null;
+  audioTracks?: AudioTrackInfo[];
   error?: string | null;
 }
 
@@ -50,6 +84,13 @@ export interface SyncResult {
   elapsedMs: number | null;
   primaryDurationS?: number | null;
   secondaryDurationS?: number | null;
+  primaryTrack?: number | null;
+  secondaryTrack?: number | null;
+  primaryFps?: number | null;
+  secondaryFps?: number | null;
+  isLikelyCut?: boolean | null;
+  isRateMismatch?: boolean | null;
+  rateDiagnosis?: RateDiagnosis | null;
 }
 
 export interface RunSummary {
@@ -57,6 +98,8 @@ export interface RunSummary {
   matched: number;
   failed: number;
   drifting: number;
+  cuts: number;
+  rateMismatches: number;
   high: number;
   medium: number;
   low: number;
@@ -94,6 +137,8 @@ export interface AnalyzeRequest {
   audioFile: string | null;
   videoFiles: string[] | null;
   matchPattern: string | null;
+  videoTrack: number;
+  audioTrack: number;
   windowSeconds: number;
   windowCount: number;
   maxOffsetMs: number;
@@ -143,6 +188,30 @@ export const DEFAULT_SETTINGS: AppSettings = {
   matchPattern: "",
   outputSuffix: ".synced",
   theme: "dark",
+};
+
+export type ResultStatus = "ok" | "drift" | "rate-mismatch" | "cut" | "failed";
+
+/** Classify a result for display.
+ *
+ *  A cut is reported separately from drift because it is the one outcome no
+ *  correction can fix: the two files contain different material, so there is no
+ *  single delay or speed ratio that aligns them.
+ */
+export function resultStatus(result: SyncResult): ResultStatus {
+  if (result.error || result.delayMs === null) return "failed";
+  if (result.isLikelyCut) return "cut";
+  if (result.isRateMismatch) return "rate-mismatch";
+  if (result.hasSignificantDrift) return "drift";
+  return "ok";
+}
+
+export const STATUS_LABELS: Record<ResultStatus, string> = {
+  ok: "OK",
+  drift: "Drift",
+  "rate-mismatch": "Frame rate",
+  cut: "Different cut",
+  failed: "Failed",
 };
 
 /** Map a 0-1 engine confidence onto the three bands the UI displays. */

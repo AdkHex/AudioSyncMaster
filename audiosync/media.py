@@ -24,8 +24,8 @@ import signal
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import numpy as np
 
@@ -177,6 +177,58 @@ def has_ffmpeg() -> bool:
 
 
 @dataclass
+class AudioTrack:
+    """One selectable audio stream inside a container.
+
+    A file often carries several: the original language, a dub, a commentary.
+    Comparing against the wrong one produces a confident measurement of two
+    tracks that were never meant to align.
+    """
+
+    index: int
+    """Position among audio streams, i.e. the N in ffmpeg's ``-map 0:a:N``."""
+    codec: Optional[str] = None
+    language: Optional[str] = None
+    title: Optional[str] = None
+    channels: Optional[int] = None
+    sample_rate: Optional[int] = None
+    is_default: bool = False
+
+    @property
+    def label(self) -> str:
+        """Human-readable description for a track picker."""
+        parts = [f"Track {self.index + 1}"]
+        if self.language and self.language.lower() not in ("und", "unknown"):
+            parts.append(self.language.upper())
+        if self.title:
+            parts.append(self.title)
+        details = []
+        if self.codec:
+            details.append(self.codec.upper())
+        if self.channels:
+            details.append(
+                {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}.get(
+                    self.channels, f"{self.channels}ch"
+                )
+            )
+        if details:
+            parts.append(f"({', '.join(details)})")
+        return " · ".join(parts)
+
+    def to_dict(self) -> dict:
+        return {
+            "index": self.index,
+            "codec": self.codec,
+            "language": self.language,
+            "title": self.title,
+            "channels": self.channels,
+            "sampleRate": self.sample_rate,
+            "isDefault": self.is_default,
+            "label": self.label,
+        }
+
+
+@dataclass
 class MediaInfo:
     duration: Optional[float]
     has_audio: bool
@@ -184,6 +236,33 @@ class MediaInfo:
     audio_codec: Optional[str] = None
     sample_rate: Optional[int] = None
     channels: Optional[int] = None
+    audio_tracks: List["AudioTrack"] = field(default_factory=list)
+    fps: Optional[float] = None
+    """Video frame rate, when the file has a video stream. A dub timed against
+    a 25fps PAL master drifts steadily against a 23.976fps source, and naming
+    that cause is far more actionable than reporting the drift alone."""
+
+
+def _parse_frame_rate(raw: Optional[str]) -> Optional[float]:
+    """Parse ffprobe's ``num/den`` frame rate.
+
+    Parsed rather than eval'd: this string comes straight out of a media file's
+    metadata, and eval on untrusted input is arbitrary code execution.
+    """
+    if not raw or raw in ("0/0", "N/A"):
+        return None
+    try:
+        if "/" in raw:
+            numerator, denominator = raw.split("/", 1)
+            den = float(denominator)
+            if den == 0:
+                return None
+            value = float(numerator) / den
+        else:
+            value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value < 1000 else None
 
 
 def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
@@ -205,22 +284,44 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
 
     has_audio = has_video = False
     codec = sample_rate = channels = None
+    fps: Optional[float] = None
+    tracks: List[AudioTrack] = []
+
     for stream in payload.get("streams", []) or []:
         kind = stream.get("codec_type")
         if kind == "audio":
             has_audio = True
-            codec = codec or stream.get("codec_name")
+            tags = stream.get("tags") or {}
+            disposition = stream.get("disposition") or {}
+
+            stream_rate = None
             if stream.get("sample_rate"):
                 try:
-                    sample_rate = sample_rate or int(stream["sample_rate"])
+                    stream_rate = int(stream["sample_rate"])
                 except (TypeError, ValueError):
-                    pass
+                    stream_rate = None
+
+            tracks.append(
+                AudioTrack(
+                    index=len(tracks),
+                    codec=stream.get("codec_name"),
+                    language=tags.get("language") or tags.get("LANGUAGE"),
+                    title=tags.get("title") or tags.get("TITLE"),
+                    channels=stream.get("channels"),
+                    sample_rate=stream_rate,
+                    is_default=bool(disposition.get("default")),
+                )
+            )
+
+            codec = codec or stream.get("codec_name")
+            sample_rate = sample_rate or stream_rate
             channels = channels or stream.get("channels")
         elif kind == "video":
             # Cover art is a video stream by codec type but is not real video.
             if stream.get("disposition", {}).get("attached_pic"):
                 continue
             has_video = True
+            fps = fps or _parse_frame_rate(stream.get("r_frame_rate"))
 
     duration = None
     raw_duration = (payload.get("format") or {}).get("duration")
@@ -241,7 +342,16 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
                 except (TypeError, ValueError):
                     continue
 
-    return MediaInfo(duration, has_audio, has_video, codec, sample_rate, channels)
+    return MediaInfo(
+        duration,
+        has_audio,
+        has_video,
+        codec,
+        sample_rate,
+        channels,
+        audio_tracks=tracks,
+        fps=fps,
+    )
 
 
 def get_duration(path: str, token: Optional[CancellationToken] = None) -> Optional[float]:
@@ -257,12 +367,18 @@ def load_audio(
     duration: Optional[float] = None,
     offset: float = 0.0,
     token: Optional[CancellationToken] = None,
+    track: int = 0,
 ) -> np.ndarray:
     """Decode a mono float32 segment at the requested sample rate.
 
     Uses ffmpeg for every format. The original code had three overlapping
     loaders (soundfile, librosa, ffmpeg) whose fallbacks silently disagreed
     about seek semantics; one decoder means one behaviour to reason about.
+
+    Args:
+        track: which audio stream to decode, as the N in ``-map 0:a:N``. Files
+            frequently carry several (original language, dub, commentary), and
+            without this every comparison silently used the first one.
     """
     if not os.path.isfile(path):
         raise MediaError(f"File not found: {path}")
@@ -297,14 +413,16 @@ def load_audio(
     if duration is not None:
         command.extend(["-t", f"{duration:.6f}"])
     command.extend([
+        "-map", f"0:a:{max(0, track)}",
         "-vn", "-sn", "-dn",
         "-f", "f32le", "-acodec", "pcm_f32le",
         "-ar", str(sr), "-ac", "1", "-",
     ])
 
-    stdout = _run(
-        command, DECODE_TIMEOUT_S, token, what=f"decode {os.path.basename(path)}"
-    )
+    what = os.path.basename(path)
+    if track:
+        what = f"{what} (track {track + 1})"
+    stdout = _run(command, DECODE_TIMEOUT_S, token, what=f"decode {what}")
     if not stdout:
         raise MediaError(f"No audio decoded from {os.path.basename(path)}")
 

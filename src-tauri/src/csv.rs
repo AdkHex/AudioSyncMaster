@@ -40,14 +40,19 @@ fn number(value: Option<f64>, decimals: usize) -> String {
 pub fn render(results: &[SyncResult]) -> String {
     let mut out = String::from(
         "Video,Audio,Delay (ms),Confidence,Drift (ms/s),Total Drift (ms),\
-         Start Delay (ms),End Delay (ms),Windows Used,Windows Total,Elapsed (ms),Status\n",
+         Start Delay (ms),End Delay (ms),Video FPS,Audio Track,Windows Used,Windows Total,\
+         Elapsed (ms),Status\n",
     );
 
     for result in results {
         let status = match (&result.error, result.delay_ms) {
             (Some(error), _) => error.clone(),
             (None, Some(_)) => {
-                if result.has_significant_drift.unwrap_or(false) {
+                if result.is_likely_cut.unwrap_or(false) {
+                    "DIFFERENT CUT".to_string()
+                } else if result.is_rate_mismatch.unwrap_or(false) {
+                    "FRAME RATE MISMATCH".to_string()
+                } else if result.has_significant_drift.unwrap_or(false) {
                     "OK (drift detected)".to_string()
                 } else {
                     "OK".to_string()
@@ -65,6 +70,11 @@ pub fn render(results: &[SyncResult]) -> String {
             number(result.total_drift_ms, 1),
             number(result.start_delay_ms, 1),
             number(result.end_delay_ms, 1),
+            number(result.primary_fps, 3),
+            result
+                .secondary_track
+                .map(|v| (v + 1).to_string())
+                .unwrap_or_default(),
             result
                 .windows_used
                 .map(|v| v.to_string())

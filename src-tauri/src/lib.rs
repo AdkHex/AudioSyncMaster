@@ -76,6 +76,18 @@ pub struct SyncResult {
     pub primary_duration_s: Option<f64>,
     #[serde(default)]
     pub secondary_duration_s: Option<f64>,
+    #[serde(default)]
+    pub primary_track: Option<u32>,
+    #[serde(default)]
+    pub secondary_track: Option<u32>,
+    #[serde(default)]
+    pub primary_fps: Option<f64>,
+    #[serde(default)]
+    pub secondary_fps: Option<f64>,
+    #[serde(default)]
+    pub is_likely_cut: Option<bool>,
+    #[serde(default)]
+    pub is_rate_mismatch: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -410,6 +422,53 @@ async fn start_sync(
     .map_err(|err| err.to_string())?
 }
 
+/// List the selectable audio streams of each file.
+///
+/// A container often carries an original language, a dub and a commentary;
+/// without this the UI cannot offer a choice and every comparison silently
+/// uses the first stream.
+#[tauri::command]
+async fn list_audio_tracks(
+    app: AppHandle,
+    handle: State<'_, BridgeHandle>,
+    paths: Vec<String>,
+) -> Result<Value, String> {
+    let handle = handle.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            bridge.send(&serde_json::json!({
+                "command": "listTracks",
+                "paths": paths,
+            }))?;
+            loop {
+                match bridge.events().recv_timeout(Duration::from_secs(180)) {
+                    Ok(event) => match event.get("type").and_then(Value::as_str) {
+                        Some("tracks") => {
+                            return Ok(event
+                                .get("files")
+                                .cloned()
+                                .unwrap_or_else(|| Value::Array(Vec::new())));
+                        }
+                        Some("error") => {
+                            return Err(event
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Could not read audio tracks")
+                                .to_string());
+                        }
+                        _ => {}
+                    },
+                    Err(_) => return Err("Timed out reading audio tracks.".into()),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 #[tauri::command]
 async fn preview_pairs(
     app: AppHandle,
@@ -644,6 +703,7 @@ pub fn run() {
             cancel_sync,
             apply_corrections,
             probe_media,
+            list_audio_tracks,
             export_csv,
             export_json,
             reveal_path,

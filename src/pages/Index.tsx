@@ -20,6 +20,7 @@ import { PairingPreview } from "@/components/PairingPreview";
 import { ProgressPanel } from "@/components/ProgressPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { TrackSelector } from "@/components/TrackSelector";
 import { UpdateDialog } from "@/components/UpdateDialog";
 import { Button, IconButton, Notice, StepHeader } from "@/components/ui";
 import { cx } from "@/lib/cx";
@@ -47,6 +48,7 @@ import type {
   HistoryEntry,
   MediaProbe,
   SyncMode,
+  TrackListing,
   SyncResult,
 } from "@/lib/types";
 import { formatSize, resultKey } from "@/lib/types";
@@ -64,6 +66,13 @@ export default function Index() {
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [recentFolders, setRecentFolders] = useState(() => loadRecentFolders());
   const [probes, setProbes] = useState<Record<string, MediaProbe>>({});
+  // Audio streams of the currently selected files, and which one to compare.
+  // Files routinely carry several; without a choice every run silently used
+  // the first, which on a disc rip is often a commentary track.
+  const [videoTracks, setVideoTracks] = useState<TrackListing | null>(null);
+  const [audioTracks, setAudioTracks] = useState<TrackListing | null>(null);
+  const [videoTrack, setVideoTrack] = useState(0);
+  const [audioTrack, setAudioTrack] = useState(0);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
   const [showSettings, setShowSettings] = useState(false);
@@ -86,6 +95,12 @@ export default function Index() {
   stateRef.current = state;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  // Read through refs: buildRequest must not be re-created on every track
+  // change, or the pairing-preview effect that depends on it re-runs endlessly.
+  const videoTrackRef = useRef(videoTrack);
+  videoTrackRef.current = videoTrack;
+  const audioTrackRef = useRef(audioTrack);
+  audioTrackRef.current = audioTrack;
 
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveRecentFolders(recentFolders), [recentFolders]);
@@ -203,6 +218,46 @@ export default function Index() {
       }
     }
   }, []);
+
+  // Read the audio streams of the first file on each side. The first is
+  // representative: a season folder is encoded consistently, and probing every
+  // episode to populate one dropdown would be wasteful.
+  useEffect(() => {
+    const videoPath = state.videoFiles[0]?.path;
+    const audioPath = state.audioFiles[0]?.path;
+    const paths = [videoPath, audioPath].filter(Boolean) as string[];
+    if (paths.length === 0) {
+      setVideoTracks(null);
+      setAudioTracks(null);
+      setVideoTrack(0);
+      setAudioTrack(0);
+      return;
+    }
+
+    let active = true;
+    void api
+      .listAudioTracks(paths)
+      .then((listings) => {
+        if (!active) return;
+        const byPath = new Map(listings.map((entry) => [entry.path, entry]));
+        const video = videoPath ? byPath.get(videoPath) ?? null : null;
+        const audio = audioPath ? byPath.get(audioPath) ?? null : null;
+        setVideoTracks(video);
+        setAudioTracks(audio);
+        // Reset any selection the previous file made valid.
+        setVideoTrack((current) =>
+          current < (video?.tracks.length ?? 1) ? current : 0,
+        );
+        setAudioTrack((current) =>
+          current < (audio?.tracks.length ?? 1) ? current : 0,
+        );
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+    };
+  }, [state.videoFiles, state.audioFiles]);
 
   // ---------------------------------------------------------------- selection
 
@@ -324,6 +379,8 @@ export default function Index() {
         current.mode === "series" && config.matchPattern.trim()
           ? config.matchPattern
           : null,
+      videoTrack: videoTrackRef.current,
+      audioTrack: audioTrackRef.current,
       windowSeconds: config.windowSeconds,
       windowCount: config.windowCount,
       maxOffsetMs: config.maxOffsetMs,
@@ -736,6 +793,31 @@ export default function Index() {
                 />
               </div>
             </div>
+
+            {(videoTracks || audioTracks) && (
+              <div className="grid gap-2 md:grid-cols-2">
+                {videoTracks && (
+                  <TrackSelector
+                    label="Video audio"
+                    tracks={videoTracks.tracks}
+                    value={videoTrack}
+                    onChange={setVideoTrack}
+                    disabled={busy}
+                    fps={videoTracks.fps}
+                  />
+                )}
+                {audioTracks && (
+                  <TrackSelector
+                    label="Dub track"
+                    tracks={audioTracks.tracks}
+                    value={audioTrack}
+                    onChange={setAudioTrack}
+                    disabled={busy}
+                    fps={audioTracks.fps}
+                  />
+                )}
+              </div>
+            )}
 
             {/* -------------------------------------------------- step 2 */}
             {!busy && (state.pairing || pairingLoading) && (

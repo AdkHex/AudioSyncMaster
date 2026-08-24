@@ -43,6 +43,8 @@ class MatchPair:
     key: str
     method: str
     score: float
+    primary_track: int = 0
+    secondary_track: int = 0
 
     @property
     def primary_name(self) -> str:
@@ -61,6 +63,8 @@ class MatchPair:
             "key": self.key,
             "method": self.method,
             "score": self.score,
+            "primaryTrack": self.primary_track,
+            "secondaryTrack": self.secondary_track,
         }
 
 
@@ -335,9 +339,22 @@ def _match_by_similarity(
     )
 
 
-def pair_movie_mode(video_paths: Sequence[str], audio_path: str) -> List[MatchPair]:
+def pair_movie_mode(
+    video_paths: Sequence[str],
+    audio_path: str,
+    primary_track: int = 0,
+    secondary_track: int = 0,
+) -> List[MatchPair]:
     """Every video against a single audio file."""
     return [
-        MatchPair(video_path, audio_path, os.path.basename(video_path), "movie mode", 1.0)
+        MatchPair(
+            video_path,
+            audio_path,
+            os.path.basename(video_path),
+            "movie mode",
+            1.0,
+            primary_track=primary_track,
+            secondary_track=secondary_track,
+        )
         for video_path in video_paths
     ]

@@ -18,6 +18,7 @@ import type {
   PickResponse,
   SyncResult,
   SyncRun,
+  TrackListing,
 } from "./types";
 
 export function isDesktop(): boolean {
@@ -81,6 +82,12 @@ export async function resolveDroppedPaths(
 export async function probeMedia(path: string): Promise<MediaProbe> {
   requireDesktop("Reading media information");
   return invoke<MediaProbe>("probe_media", { path });
+}
+
+/** List the selectable audio streams of each file, so the user can choose. */
+export async function listAudioTracks(paths: string[]): Promise<TrackListing[]> {
+  if (!isDesktop() || paths.length === 0) return [];
+  return invoke<TrackListing[]>("list_audio_tracks", { paths });
 }
 
 export async function previewPairs(request: Partial<AnalyzeRequest>): Promise<PairingReport> {

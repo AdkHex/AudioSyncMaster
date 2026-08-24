@@ -92,6 +92,8 @@ def run_batch(
                 window_count=options.window_count,
                 max_offset_ms=options.max_offset_ms,
                 token=token,
+                primary_track=pair.primary_track,
+                secondary_track=pair.secondary_track,
                 progress=(
                     (lambda percent: events.on_pair_progress(name, percent))
                     if events.on_pair_progress
@@ -161,6 +163,8 @@ def summarize(results: Sequence[PairResult]) -> dict:
     matched = [r for r in results if r.error is None and r.delay_ms is not None]
     failed = [r for r in results if r.error is not None]
     drifting = [r for r in matched if r.has_significant_drift]
+    cuts = [r for r in results if r.is_likely_cut]
+    rate_mismatches = [r for r in matched if r.is_rate_mismatch]
     high = [r for r in matched if r.confidence >= 0.75]
     medium = [r for r in matched if 0.5 <= r.confidence < 0.75]
     low = [r for r in matched if r.confidence < 0.5]
@@ -169,6 +173,8 @@ def summarize(results: Sequence[PairResult]) -> dict:
         "matched": len(matched),
         "failed": len(failed),
         "drifting": len(drifting),
+        "cuts": len(cuts),
+        "rateMismatches": len(rate_mismatches),
         "high": len(high),
         "medium": len(medium),
         "low": len(low),

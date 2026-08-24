@@ -19,6 +19,8 @@ MODULES = [
     "test_media",
     "test_analyze",
     "test_matching",
+    "test_framerate",
+    "test_tracks",
     "test_mux",
     "test_bridge",
 ]

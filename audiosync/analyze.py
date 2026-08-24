@@ -27,7 +27,8 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from .correlate import OffsetEstimate, estimate_offset
-from .media import CancellationToken, MediaError, get_duration, load_audio
+from .framerate import RateDiagnosis, diagnose
+from .media import CancellationToken, MediaError, load_audio, probe
 
 ANALYSIS_SR = 16000
 
@@ -69,6 +70,20 @@ class PairResult:
     elapsed_ms: Optional[int] = None
     primary_duration_s: Optional[float] = None
     secondary_duration_s: Optional[float] = None
+    primary_track: int = 0
+    secondary_track: int = 0
+    primary_fps: Optional[float] = None
+    secondary_fps: Optional[float] = None
+    rate_diagnosis: Optional[RateDiagnosis] = None
+    """Why the file drifts, when it does: a frame-rate conversion, or a cut."""
+
+    @property
+    def is_likely_cut(self) -> bool:
+        return bool(self.rate_diagnosis and self.rate_diagnosis.is_likely_cut)
+
+    @property
+    def is_rate_mismatch(self) -> bool:
+        return bool(self.rate_diagnosis and self.rate_diagnosis.is_rate_mismatch)
 
     @property
     def primary_name(self) -> str:
@@ -112,6 +127,13 @@ class PairResult:
             "elapsedMs": self.elapsed_ms,
             "primaryDurationS": self.primary_duration_s,
             "secondaryDurationS": self.secondary_duration_s,
+            "primaryTrack": self.primary_track,
+            "secondaryTrack": self.secondary_track,
+            "primaryFps": self.primary_fps,
+            "secondaryFps": self.secondary_fps,
+            "isLikelyCut": self.is_likely_cut,
+            "isRateMismatch": self.is_rate_mismatch,
+            "rateDiagnosis": self.rate_diagnosis.to_dict() if self.rate_diagnosis else None,
         }
 
 
@@ -145,6 +167,8 @@ def analyze_pair(
     max_offset_ms: float = 60000.0,
     token: Optional[CancellationToken] = None,
     progress: Optional[Callable[[int], None]] = None,
+    primary_track: int = 0,
+    secondary_track: int = 0,
 ) -> PairResult:
     """Measure the offset between two media files.
 
@@ -153,8 +177,15 @@ def analyze_pair(
         window_count: how many points across the file to measure.
         max_offset_ms: reject alignments implying a larger shift than this.
         progress: called with 0-100 as windows complete.
+        primary_track: which audio stream of the primary to compare.
+        secondary_track: which audio stream of the secondary to compare.
     """
-    result = PairResult(primary_path, secondary_path)
+    result = PairResult(
+        primary_path,
+        secondary_path,
+        primary_track=primary_track,
+        secondary_track=secondary_track,
+    )
 
     def report(percent: int) -> None:
         if progress:
@@ -165,10 +196,16 @@ def analyze_pair(
         if token:
             token.raise_if_cancelled()
 
-        primary_duration = get_duration(primary_path, token)
-        secondary_duration = get_duration(secondary_path, token)
+        # One probe per file: duration and frame rate come from the same call,
+        # so identifying a rate mismatch later costs nothing extra.
+        primary_info = probe(primary_path, token)
+        secondary_info = probe(secondary_path, token)
+        primary_duration = primary_info.duration
+        secondary_duration = secondary_info.duration
         result.primary_duration_s = primary_duration
         result.secondary_duration_s = secondary_duration
+        result.primary_fps = primary_info.fps
+        result.secondary_fps = secondary_info.fps
 
         if not primary_duration or primary_duration <= 0:
             result.error = f"Could not read duration of {result.primary_name}"
@@ -193,11 +230,16 @@ def analyze_pair(
                 effective_window,
                 max_offset_ms,
                 token,
+                primary_track,
+                secondary_track,
             )
             result.windows.append(WindowResult(position, estimate))
             report(5 + int(90 * (index + 1) / len(positions)))
 
         _reconcile(result)
+        result.rate_diagnosis = diagnose(
+            result.drift_ms_per_s, result.primary_fps, result.secondary_fps
+        )
         report(100)
         return result
 
@@ -213,6 +255,8 @@ def _measure_window(
     window_s: float,
     max_offset_ms: float,
     token: Optional[CancellationToken],
+    primary_track: int = 0,
+    secondary_track: int = 0,
 ) -> OffsetEstimate:
     """Measure one window, padding the secondary so a shifted match still fits.
 
@@ -226,7 +270,12 @@ def _measure_window(
 
     try:
         primary = load_audio(
-            primary_path, ANALYSIS_SR, duration=window_s, offset=position_s, token=token
+            primary_path,
+            ANALYSIS_SR,
+            duration=window_s,
+            offset=position_s,
+            token=token,
+            track=primary_track,
         )
         secondary = load_audio(
             secondary_path,
@@ -234,6 +283,7 @@ def _measure_window(
             duration=secondary_window,
             offset=secondary_start,
             token=token,
+            track=secondary_track,
         )
     except MediaError as exc:
         return OffsetEstimate(None, 0.0, 0.0, str(exc))

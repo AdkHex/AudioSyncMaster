@@ -4,6 +4,8 @@ import {
   Check,
   Clipboard,
   Download,
+  Gauge,
+  Scissors,
   TrendingDown,
   TrendingUp,
   Wand2,
@@ -25,7 +27,7 @@ import {
   type SyncResult,
 } from "@/lib/types";
 
-type Filter = "all" | ConfidenceLevel | "drift" | "failed";
+type Filter = "all" | ConfidenceLevel | "drift" | "cut" | "failed";
 
 interface ResultsPanelProps {
   results: SyncResult[];
@@ -102,7 +104,8 @@ export const ResultsPanel = memo(function ResultsPanel({
       high: results.filter((r) => !r.error && confidenceLevel(r) === "high").length,
       medium: results.filter((r) => !r.error && confidenceLevel(r) === "medium").length,
       low: results.filter((r) => !r.error && confidenceLevel(r) === "low").length,
-      drift: results.filter((r) => r.hasSignificantDrift).length,
+      drift: results.filter((r) => r.hasSignificantDrift && !r.isLikelyCut).length,
+      cut: results.filter((r) => r.isLikelyCut).length,
       failed: results.filter((r) => r.error || r.delayMs === null).length,
     }),
     [results],
@@ -113,7 +116,9 @@ export const ResultsPanel = memo(function ResultsPanel({
       case "all":
         return results;
       case "drift":
-        return results.filter((r) => r.hasSignificantDrift);
+        return results.filter((r) => r.hasSignificantDrift && !r.isLikelyCut);
+      case "cut":
+        return results.filter((r) => r.isLikelyCut);
       case "failed":
         return results.filter((r) => r.error || r.delayMs === null);
       default:
@@ -125,7 +130,12 @@ export const ResultsPanel = memo(function ResultsPanel({
   const applicableKeys = useMemo(
     () =>
       filtered
-        .filter((r) => r.delayMs !== null && !r.error && r.primaryPath && r.secondaryPath)
+        // A different cut has no single delay that aligns it, so offering to
+        // "fix" one would write a file that is still out of sync.
+        .filter(
+          (r) =>
+            r.delayMs !== null && !r.error && !r.isLikelyCut && r.primaryPath && r.secondaryPath,
+        )
         .map(resultKey),
     [filtered],
   );
@@ -143,6 +153,7 @@ export const ResultsPanel = memo(function ResultsPanel({
     { id: "medium", label: "Medium", count: counts.medium },
     { id: "low", label: "Low", count: counts.low },
     { id: "drift", label: "Drift", count: counts.drift },
+    { id: "cut", label: "Different cut", count: counts.cut },
     { id: "failed", label: "Failed", count: counts.failed },
   ];
 
@@ -261,7 +272,10 @@ export const ResultsPanel = memo(function ResultsPanel({
                 const key = resultKey(result);
                 const level = confidenceLevel(result);
                 const applicable =
-                  result.delayMs !== null && !result.error && !!result.primaryPath;
+                  result.delayMs !== null &&
+                  !result.error &&
+                  !result.isLikelyCut &&
+                  !!result.primaryPath;
                 const command = ffmpegCommandFor(result);
                 const selected = selectedKeys.has(key);
                 const drifting = result.hasSignificantDrift;
@@ -316,7 +330,28 @@ export const ResultsPanel = memo(function ResultsPanel({
                     </td>
 
                     <td className="whitespace-nowrap px-3 py-2.5 text-right">
-                      {drifting ? (
+                      {result.isLikelyCut ? (
+                        <Pill
+                          tone="destructive"
+                          title={
+                            result.rateDiagnosis?.explanation ??
+                            "The runtimes diverge too fast for a frame-rate difference."
+                          }
+                        >
+                          <Scissors className="h-2.5 w-2.5" aria-hidden />
+                          Different cut
+                        </Pill>
+                      ) : result.isRateMismatch ? (
+                        <Pill
+                          tone="warning"
+                          title={result.rateDiagnosis?.explanation ?? undefined}
+                        >
+                          <Gauge className="h-2.5 w-2.5" aria-hidden />
+                          {result.rateDiagnosis?.sourceFps && result.rateDiagnosis?.targetFps
+                            ? `${result.rateDiagnosis.sourceFps}→${result.rateDiagnosis.targetFps}fps`
+                            : "Speed"}
+                        </Pill>
+                      ) : drifting ? (
                         <Pill
                           tone="warning"
                           className="tabular font-mono"
