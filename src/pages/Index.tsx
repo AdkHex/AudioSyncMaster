@@ -70,13 +70,13 @@ export default function Index() {
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [recentFolders, setRecentFolders] = useState(() => loadRecentFolders());
   const [probes, setProbes] = useState<Record<string, MediaProbe>>({});
-  // Audio streams of the currently selected files, and which one to compare.
-  // Files routinely carry several; without a choice every run silently used
-  // the first, which on a disc rip is often a commentary track.
-  const [videoTracks, setVideoTracks] = useState<TrackListing | null>(null);
-  const [audioTracks, setAudioTracks] = useState<TrackListing | null>(null);
-  const [videoTrack, setVideoTrack] = useState(0);
-  const [audioTrack, setAudioTrack] = useState(0);
+  // Audio streams of every selected file, keyed by path, and which stream to
+  // compare for each. Files routinely carry several; without a choice every run
+  // silently used the first, which on a disc rip is often a commentary track.
+  // Keyed per file rather than per side, because a selection can mix sources
+  // whose track layouts have nothing in common.
+  const [listings, setListings] = useState<Record<string, TrackListing>>({});
+  const [trackChoices, setTrackChoices] = useState<Record<string, number>>({});
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
 
   const [showSettings, setShowSettings] = useState(false);
@@ -108,10 +108,8 @@ export default function Index() {
   settingsRef.current = settings;
   // Read through refs: buildRequest must not be re-created on every track
   // change, or the pairing-preview effect that depends on it re-runs endlessly.
-  const videoTrackRef = useRef(videoTrack);
-  videoTrackRef.current = videoTrack;
-  const audioTrackRef = useRef(audioTrack);
-  audioTrackRef.current = audioTrack;
+  const trackChoicesRef = useRef(trackChoices);
+  trackChoicesRef.current = trackChoices;
   const overridesRef = useRef(pairOverrides);
   overridesRef.current = pairOverrides;
   // Read through a ref so buildRequest stays stable; it is called from the
@@ -238,38 +236,44 @@ export default function Index() {
     }
   }, []);
 
-  // Read the audio streams of the first file on each side. The first is
-  // representative: a season folder is encoded consistently, and probing every
-  // episode to populate one dropdown would be wasteful.
+  // Read the audio streams of every selected file.
+  //
+  // This used to probe only the first file on each side and apply that one
+  // choice to all of them, on the assumption that a season folder is encoded
+  // consistently. Mixed sources break that: a REMUX with five language tracks
+  // beside a WEB-DL with one leaves the second file's dropdown describing
+  // streams it does not have, and no way to pick per file.
   useEffect(() => {
-    const videoPath = state.videoFiles[0]?.path;
-    const audioPath = state.audioFiles[0]?.path;
-    const paths = [videoPath, audioPath].filter(Boolean) as string[];
+    const paths = [
+      ...state.videoFiles.map((file) => file.path),
+      ...state.audioFiles.map((file) => file.path),
+    ];
     if (paths.length === 0) {
-      setVideoTracks(null);
-      setAudioTracks(null);
-      setVideoTrack(0);
-      setAudioTrack(0);
+      setListings({});
+      setTrackChoices({});
       return;
     }
 
     let active = true;
     void api
       .listAudioTracks(paths)
-      .then((listings) => {
+      .then((entries) => {
         if (!active) return;
-        const byPath = new Map(listings.map((entry) => [entry.path, entry]));
-        const video = videoPath ? byPath.get(videoPath) ?? null : null;
-        const audio = audioPath ? byPath.get(audioPath) ?? null : null;
-        setVideoTracks(video);
-        setAudioTracks(audio);
-        // Reset any selection the previous file made valid.
-        setVideoTrack((current) =>
-          current < (video?.tracks.length ?? 1) ? current : 0,
-        );
-        setAudioTrack((current) =>
-          current < (audio?.tracks.length ?? 1) ? current : 0,
-        );
+        const byPath: Record<string, TrackListing> = {};
+        entries.forEach((entry) => {
+          byPath[entry.path] = entry;
+        });
+        setListings(byPath);
+        // Drop choices that the newly probed files can no longer satisfy,
+        // rather than sending the engine a stream index that does not exist.
+        setTrackChoices((current) => {
+          const next: Record<string, number> = {};
+          Object.entries(current).forEach(([path, index]) => {
+            const available = byPath[path]?.tracks.length ?? 0;
+            if (index > 0 && index < available) next[path] = index;
+          });
+          return next;
+        });
       })
       .catch(() => undefined);
 
@@ -413,14 +417,26 @@ export default function Index() {
         current.mode === "series" && config.matchPattern.trim()
           ? config.matchPattern
           : null,
-      videoTrack: videoTrackRef.current,
-      audioTrack: audioTrackRef.current,
-      // Only sent once the user has actually changed something: otherwise the
-      // engine should do its own matching, which stays correct as the
-      // selection or pattern changes.
+      // Kept as the default for any pair that does not name its own stream.
+      // Track 0 is the file's first audio stream, which is what the engine
+      // would have used anyway.
+      videoTrack: 0,
+      audioTrack: 0,
+      // Sent once the user has changed the matching or chosen a stream for any
+      // file. Otherwise the engine should do its own matching, which stays
+      // correct as the selection or pattern changes.
+      //
+      // Per-file stream choices travel on the pairs themselves: the engine
+      // reads primaryTrack/secondaryTrack per pair, so a selection mixing a
+      // five-track REMUX with a single-track WEB-DL is expressible.
       pairs:
-        Object.keys(overridesRef.current).length > 0
-          ? (effectivePairingRef.current?.pairs ?? null)
+        Object.keys(overridesRef.current).length > 0 ||
+        Object.keys(trackChoicesRef.current).length > 0
+          ? (effectivePairingRef.current?.pairs.map((pair) => ({
+              ...pair,
+              primaryTrack: trackChoicesRef.current[pair.primaryPath] ?? 0,
+              secondaryTrack: trackChoicesRef.current[pair.secondaryPath] ?? 0,
+            })) ?? null)
           : null,
       windowSeconds: config.windowSeconds,
       windowCount: config.windowCount,
@@ -726,6 +742,17 @@ export default function Index() {
   const busy = state.status === "processing";
   const hasResults = state.results.length > 0;
 
+  /** Choose which audio stream of one file to compare. Index 0 is the file's
+   *  first stream, which is the default, so it is stored as an absence. */
+  const handleTrackChange = useCallback((path: string, index: number) => {
+    setTrackChoices((current) => {
+      const next = { ...current };
+      if (index > 0) next[path] = index;
+      else delete next[path];
+      return next;
+    });
+  }, []);
+
   const toggleSelection = useCallback((key: string) => {
     setSelectedKeys((prev) => {
       const next = new Set(prev);
@@ -775,12 +802,9 @@ export default function Index() {
           probes={probes}
           dragTarget={dragTarget}
           busy={busy}
-          videoTracks={videoTracks}
-          audioTracks={audioTracks}
-          videoTrack={videoTrack}
-          audioTrack={audioTrack}
-          onVideoTrackChange={setVideoTrack}
-          onAudioTrackChange={setAudioTrack}
+          listings={listings}
+          trackChoices={trackChoices}
+          onTrackChange={handleTrackChange}
           onBrowse={(kind) => void handleBrowse(kind)}
           onRemove={(kind, id) => dispatch({ type: "removeFiles", kind, ids: [id] })}
           onClear={(kind) => dispatch({ type: "clearFiles", kind })}
@@ -849,12 +873,19 @@ export default function Index() {
                 />
               ) : state.videoFiles.length === 0 && state.audioFiles.length === 0 ? (
                 <EmptyState
-                  title="Add files to begin"
+                  // The title names the question the mode answers. "Add files
+                  // to begin" was the same in all three, which left the point
+                  // of Find match discoverable only by trying it.
+                  title={
+                    state.mode === "compare"
+                      ? "Find which release a dub matches"
+                      : "Add files to begin"
+                  }
                   body={
                     state.mode === "movie"
                       ? "Pick the videos whose timing is already correct, and the one audio track to align against them."
                       : state.mode === "compare"
-                        ? `Every video is tested against every audio track, so you can see which release a dub was timed for. Up to ${MAX_COMPARE_INPUTS} files per side.`
+                        ? `Every video is tested against every audio track, and the results rank which pairing actually lines up. Use this when you do not know which release a dub was timed for. Up to ${MAX_COMPARE_INPUTS} files per side.`
                         : "Pick the episode folder and the folder of dubs. They are matched by season and episode number."
                   }
                 />

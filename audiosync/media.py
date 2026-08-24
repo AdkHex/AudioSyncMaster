@@ -192,6 +192,9 @@ class AudioTrack:
     title: Optional[str] = None
     channels: Optional[int] = None
     sample_rate: Optional[int] = None
+    bit_rate: Optional[int] = None
+    """Bits per second, when the container declares it. Absent for lossless
+    and for streams whose bitrate is only knowable by decoding them."""
     is_default: bool = False
 
     @property
@@ -223,6 +226,7 @@ class AudioTrack:
             "title": self.title,
             "channels": self.channels,
             "sampleRate": self.sample_rate,
+            "bitRate": self.bit_rate,
             "isDefault": self.is_default,
             "label": self.label,
         }
@@ -301,6 +305,20 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
                 except (TypeError, ValueError):
                     stream_rate = None
 
+            # Matroska keeps the per-stream bitrate in a tag rather than the
+            # stream itself, so check both before giving up.
+            stream_bitrate = None
+            raw_bitrate = (
+                stream.get("bit_rate")
+                or tags.get("BPS")
+                or tags.get("BPS-eng")
+            )
+            if raw_bitrate:
+                try:
+                    stream_bitrate = int(raw_bitrate)
+                except (TypeError, ValueError):
+                    stream_bitrate = None
+
             tracks.append(
                 AudioTrack(
                     index=len(tracks),
@@ -309,6 +327,7 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
                     title=tags.get("title") or tags.get("TITLE"),
                     channels=stream.get("channels"),
                     sample_rate=stream_rate,
+                    bit_rate=stream_bitrate,
                     is_default=bool(disposition.get("default")),
                 )
             )

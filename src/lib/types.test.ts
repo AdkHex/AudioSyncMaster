@@ -9,8 +9,37 @@ import {
   formatDuration,
   formatElapsed,
   formatSize,
+  streamSummary,
+  type AudioTrackInfo,
   type SyncResult,
+  type TrackListing,
 } from "./types";
+
+function track(overrides: Partial<AudioTrackInfo> = {}): AudioTrackInfo {
+  return {
+    index: 0,
+    codec: "ac3",
+    language: "eng",
+    title: null,
+    channels: 6,
+    sampleRate: 48000,
+    bitRate: 448000,
+    isDefault: true,
+    label: "Track 1",
+    ...overrides,
+  };
+}
+
+function listing(overrides: Partial<TrackListing> = {}): TrackListing {
+  return {
+    path: "/media/ep01.mkv",
+    name: "ep01.mkv",
+    tracks: [track()],
+    fps: 23.976,
+    duration: 3600,
+    ...overrides,
+  };
+}
 
 function make(overrides: Partial<SyncResult> = {}): SyncResult {
   return {
@@ -133,5 +162,54 @@ describe("frame offset", () => {
   it("ignores non-finite input", () => {
     expect(frameOffset(Number.NaN, 25)).toBeNull();
     expect(frameOffset(500, Number.POSITIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("stream summary", () => {
+  it("reports frame rate for video, which is what explains steady drift", () => {
+    const summary = streamSummary(undefined, listing(), "video");
+    expect(summary).toContain("23.976 fps");
+    expect(summary).toContain("AC3");
+    expect(summary).toContain("5.1");
+  });
+
+  it("never reports frame rate for audio, which has no frames", () => {
+    // An audio-only file probes with fps null; claiming one would be inventing
+    // a property the format does not have.
+    const summary = streamSummary(undefined, listing({ fps: null }), "audio");
+    expect(summary).not.toContain("fps");
+    expect(summary).toContain("AC3");
+  });
+
+  it("drops the sample rate when it is the universal 48 kHz", () => {
+    // Space in the sidebar is scarce; a value that is the same on every film
+    // release earns none of it.
+    expect(streamSummary(undefined, listing(), "audio")).not.toContain("kHz");
+    expect(
+      streamSummary(undefined, listing({ tracks: [track({ sampleRate: 44100 })] }), "audio"),
+    ).toContain("44.1 kHz");
+  });
+
+  it("counts tracks only when there is a choice to make", () => {
+    expect(streamSummary(undefined, listing(), "audio")).not.toContain("tracks");
+
+    const multi = listing({
+      tracks: [track(), track({ index: 1 }), track({ index: 2 })],
+    });
+    expect(streamSummary(undefined, multi, "audio")).toContain("3 tracks");
+  });
+
+  it("omits a bitrate the container never declared", () => {
+    const summary = streamSummary(
+      undefined,
+      listing({ tracks: [track({ bitRate: null })] }),
+      "audio",
+    );
+    expect(summary).not.toContain("k ");
+    expect(summary).toContain("AC3");
+  });
+
+  it("says nothing at all when there is nothing to say", () => {
+    expect(streamSummary(undefined, undefined, "audio")).toBeNull();
   });
 });

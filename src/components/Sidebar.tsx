@@ -2,7 +2,6 @@ import { Play, Square } from "lucide-react";
 import { memo } from "react";
 
 import { FilePanel } from "@/components/FilePanel";
-import { TrackSelector } from "@/components/TrackSelector";
 import { cx } from "@/lib/cx";
 import type { FileItem, MediaProbe, SyncMode, TrackListing } from "@/lib/types";
 
@@ -17,12 +16,12 @@ interface SidebarProps {
   dragTarget: "video" | "audio" | null;
   busy: boolean;
 
-  videoTracks: TrackListing | null;
-  audioTracks: TrackListing | null;
-  videoTrack: number;
-  audioTrack: number;
-  onVideoTrackChange: (index: number) => void;
-  onAudioTrackChange: (index: number) => void;
+  /** Audio streams per file path, and the chosen stream for each. Per file
+   *  rather than per side: a selection can mix sources whose track layouts
+   *  have nothing in common. */
+  listings: Record<string, TrackListing>;
+  trackChoices: Record<string, number>;
+  onTrackChange: (path: string, index: number) => void;
 
   onBrowse: (kind: "video" | "audio") => void;
   onRemove: (kind: "video" | "audio", id: string) => void;
@@ -52,12 +51,9 @@ export const Sidebar = memo(function Sidebar({
   probes,
   dragTarget,
   busy,
-  videoTracks,
-  audioTracks,
-  videoTrack,
-  audioTrack,
-  onVideoTrackChange,
-  onAudioTrackChange,
+  listings,
+  trackChoices,
+  onTrackChange,
   onBrowse,
   onRemove,
   onClear,
@@ -68,9 +64,6 @@ export const Sidebar = memo(function Sidebar({
   onRun,
   onStop,
 }: SidebarProps) {
-  const hasStreams =
-    (videoTracks?.tracks.length ?? 0) > 1 || (audioTracks?.tracks.length ?? 0) > 1;
-
   return (
     <aside className="flex w-[288px] shrink-0 flex-col border-r border-border">
       <div
@@ -86,6 +79,9 @@ export const Sidebar = memo(function Sidebar({
             folder={videoFolder}
             recentFolder={recentFolders.video}
             probes={probes}
+            listings={listings}
+            trackChoices={trackChoices}
+            onTrackChange={onTrackChange}
             dragActive={dragTarget === "video"}
             disabled={busy}
             onBrowse={() => onBrowse("video")}
@@ -111,6 +107,9 @@ export const Sidebar = memo(function Sidebar({
             folder={audioFolder}
             recentFolder={recentFolders.audio}
             probes={probes}
+            listings={listings}
+            trackChoices={trackChoices}
+            onTrackChange={onTrackChange}
             dragActive={dragTarget === "audio"}
             disabled={busy}
             onBrowse={() => onBrowse("audio")}
@@ -119,29 +118,6 @@ export const Sidebar = memo(function Sidebar({
           />
         </div>
 
-        {/* Only shown when a file actually offers a choice: a picker with one
-            option is noise. */}
-        {hasStreams && (
-          <>
-            <hr className="my-5 border-border" />
-            <div className="flex flex-col gap-3">
-              <TrackSelector
-                label="Video audio"
-                tracks={videoTracks?.tracks ?? []}
-                value={videoTrack}
-                onChange={onVideoTrackChange}
-                disabled={busy}
-              />
-              <TrackSelector
-                label="Dub track"
-                tracks={audioTracks?.tracks ?? []}
-                value={audioTrack}
-                onChange={onAudioTrackChange}
-                disabled={busy}
-              />
-            </div>
-          </>
-        )}
       </div>
 
       <div className="shrink-0 px-4 pb-4 pt-2">

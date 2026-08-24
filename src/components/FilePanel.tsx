@@ -2,7 +2,14 @@ import { X } from "lucide-react";
 import { memo, useMemo } from "react";
 
 import { cx } from "@/lib/cx";
-import { formatDuration, formatSize, type FileItem, type MediaProbe } from "@/lib/types";
+import {
+  formatDuration,
+  formatSize,
+  streamSummary,
+  type FileItem,
+  type MediaProbe,
+  type TrackListing,
+} from "@/lib/types";
 
 interface FilePanelProps {
   kind: "video" | "audio";
@@ -12,6 +19,11 @@ interface FilePanelProps {
   folder: string | null;
   recentFolder: string | null;
   probes: Record<string, MediaProbe>;
+  /** Audio streams per file path, for the per-file track picker. */
+  listings: Record<string, TrackListing>;
+  /** Chosen stream index per file path. Absent means the first stream. */
+  trackChoices: Record<string, number>;
+  onTrackChange: (path: string, index: number) => void;
   dragActive: boolean;
   disabled: boolean;
   onBrowse: () => void;
@@ -32,6 +44,9 @@ export const FilePanel = memo(function FilePanel({
   folder,
   recentFolder,
   probes,
+  listings,
+  trackChoices,
+  onTrackChange,
   dragActive,
   disabled,
   onBrowse,
@@ -85,44 +100,85 @@ export const FilePanel = memo(function FilePanel({
         </button>
       ) : (
         <>
-          <ul className="flex flex-col">
+          <ul className="flex flex-col gap-1">
             {files.map((file) => {
               const probe = probes[file.path];
               const missing =
                 probe && (kind === "video" ? !probe.hasVideo : !probe.hasAudio);
+              const listing = listings[file.path];
+              const tracks = listing?.tracks ?? [];
+              const chosen = trackChoices[file.path] ?? 0;
+              const details = streamSummary(probe, listing, kind);
 
               return (
-                <li key={file.id} className="group flex items-baseline gap-2 py-[3px]">
-                  <span
-                    className="min-w-0 flex-1 truncate text-[12.5px]"
-                    title={file.name}
-                  >
-                    {file.name}
-                  </span>
-
-                  {missing ? (
-                    <span className="shrink-0 text-[11px] text-destructive">
-                      no {kind === "video" ? "video" : "audio"}
+                <li key={file.id} className="group">
+                  <div className="flex items-baseline gap-2">
+                    <span
+                      className="min-w-0 flex-1 truncate text-[12.5px]"
+                      title={file.name}
+                    >
+                      {file.name}
                     </span>
-                  ) : probe?.duration ? (
+
+                    {missing ? (
+                      <span className="shrink-0 text-[11px] text-destructive">
+                        no {kind === "video" ? "video" : "audio"}
+                      </span>
+                    ) : probe?.duration ? (
+                      <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
+                        {formatDuration(probe.duration)}
+                      </span>
+                    ) : null}
+
                     <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
-                      {formatDuration(probe.duration)}
+                      {formatSize(file.size)}
                     </span>
-                  ) : null}
 
-                  <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
-                    {formatSize(file.size)}
-                  </span>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(file.id)}
+                      disabled={disabled}
+                      className="-mr-1 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
+                    >
+                      <X className="h-3 w-3" aria-hidden />
+                      <span className="sr-only">Remove {file.name}</span>
+                    </button>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onRemove(file.id)}
-                    disabled={disabled}
-                    className="-mr-1 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
-                  >
-                    <X className="h-3 w-3" aria-hidden />
-                    <span className="sr-only">Remove {file.name}</span>
-                  </button>
+                  {/* What the file actually contains. Codec, rate and channels
+                      were probed already and thrown away; seeing them is how
+                      you notice you loaded the commentary or a stereo downmix. */}
+                  {details && (
+                    <p className="font-mono text-[10.5px] leading-snug text-muted-foreground/80">
+                      {details}
+                    </p>
+                  )}
+
+                  {/* Per file, not per side: a selection can mix a REMUX
+                      carrying five languages with a WEB-DL carrying one. */}
+                  {tracks.length > 1 && (
+                    <select
+                      value={chosen}
+                      disabled={disabled}
+                      onChange={(event) =>
+                        onTrackChange(file.path, Number(event.target.value))
+                      }
+                      aria-label={`Audio stream for ${file.name}`}
+                      className="mt-1 w-full appearance-none rounded-md bg-elevated px-2 py-1 pr-6 text-[11.5px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                      style={{
+                        backgroundImage:
+                          "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23969696' stroke-width='2.5'><path d='m6 9 6 6 6-6'/></svg>\")",
+                        backgroundRepeat: "no-repeat",
+                        backgroundPosition: "right 7px center",
+                      }}
+                    >
+                      {tracks.map((track) => (
+                        <option key={track.index} value={track.index}>
+                          {track.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </li>
               );
             })}

@@ -31,6 +31,7 @@ export interface AudioTrackInfo {
   title: string | null;
   channels: number | null;
   sampleRate: number | null;
+  bitRate: number | null;
   isDefault: boolean;
   label: string;
 }
@@ -273,6 +274,64 @@ export function formatSize(bytes?: number | null): string {
     unit += 1;
   }
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+const CHANNEL_NAMES: Record<number, string> = {
+  1: "mono",
+  2: "stereo",
+  6: "5.1",
+  8: "7.1",
+};
+
+/** One line describing what a file actually contains.
+ *
+ *  All of this was probed already and then thrown away, leaving rows that
+ *  showed only a duration and a size. Seeing the codec and channel layout is
+ *  how you notice you have loaded a commentary track or a stereo downmix
+ *  rather than the feature audio.
+ *
+ *  Frame rate appears only for video: an audio file has no frames, so there is
+ *  no fps to report. For video it is worth the space, because a 25 fps PAL
+ *  master against a 23.976 fps source is the usual cause of steady drift. */
+export function streamSummary(
+  probe: MediaProbe | undefined,
+  listing: TrackListing | undefined,
+  kind: "video" | "audio",
+): string | null {
+  const tracks = listing?.tracks ?? probe?.audioTracks ?? [];
+  const first = tracks[0];
+  const parts: string[] = [];
+
+  if (kind === "video") {
+    const fps = listing?.fps ?? probe?.fps;
+    if (fps) parts.push(`${Number(fps.toFixed(3))} fps`);
+  }
+
+  const codec = first?.codec ?? probe?.audioCodec;
+  if (codec) parts.push(codec.toUpperCase());
+
+  if (first?.channels) {
+    parts.push(CHANNEL_NAMES[first.channels] ?? `${first.channels}ch`);
+  }
+
+  // Sample rate is the least useful of these -- it is 48 kHz on essentially
+  // every film release -- so it is dropped when it would push the line past
+  // the sidebar's width and truncate something that does vary.
+  if (first?.sampleRate && first.sampleRate !== 48000) {
+    const khz = first.sampleRate / 1000;
+    parts.push(`${Number(khz.toFixed(1))} kHz`);
+  }
+
+  if (first?.bitRate) {
+    parts.push(`${Math.round(first.bitRate / 1000)}k`);
+  }
+
+  // Only worth saying when there is a choice to make.
+  if (tracks.length > 1) {
+    parts.push(`${tracks.length} tracks`);
+  }
+
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 export function formatElapsed(ms: number | null): string {

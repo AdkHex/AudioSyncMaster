@@ -16,10 +16,25 @@ interface AppHeaderProps {
   onOpenSettings: () => void;
 }
 
-const MODES: { id: SyncMode; label: string }[] = [
-  { id: "movie", label: "Movies" },
-  { id: "series", label: "Series" },
-  { id: "compare", label: "Compare" },
+/** The three modes differ in how videos are matched to audio, which the labels
+ *  alone do not convey -- "Compare" in particular reads like a synonym for what
+ *  the other two already do. The hint is what distinguishes them. */
+const MODES: { id: SyncMode; label: string; hint: string }[] = [
+  {
+    id: "movie",
+    label: "Movies",
+    hint: "One audio track against every video. For different releases of the same film.",
+  },
+  {
+    id: "series",
+    label: "Series",
+    hint: "One track per episode, matched by episode number.",
+  },
+  {
+    id: "compare",
+    label: "Find match",
+    hint: "Tests every video against every track to find which release a dub was timed for.",
+  },
 ];
 
 /** Wordmark, mode switch, and the panels that are not part of the main flow. */
@@ -43,11 +58,12 @@ export const AppHeader = memo(function AppHeader({
       </div>
 
       <nav className="ml-1.5 flex gap-0.5" aria-label="Sync mode">
-        {MODES.map(({ id, label }) => (
+        {MODES.map(({ id, label, hint }) => (
           <button
             key={id}
             type="button"
             aria-current={mode === id ? "page" : undefined}
+            title={hint}
             onClick={() => onModeChange(id)}
             disabled={disabled}
             className={cx(
