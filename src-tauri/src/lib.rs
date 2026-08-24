@@ -515,6 +515,51 @@ async fn preview_pairs(
     .map_err(|err| err.to_string())?
 }
 
+/// Render a short aligned excerpt and return its path.
+///
+/// A confidence score is an argument; hearing the audio land settles it.
+#[tauri::command]
+async fn render_preview(
+    app: AppHandle,
+    handle: State<'_, BridgeHandle>,
+    request: Value,
+) -> Result<Option<String>, String> {
+    let handle = handle.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String("preview".into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(Duration::from_secs(300)) {
+                    Ok(event) => match event.get("type").and_then(Value::as_str) {
+                        Some("previewDone") => {
+                            return Ok(event
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .map(str::to_string));
+                        }
+                        Some("error") => {
+                            let _ = app_for_task.emit(
+                                "sync-log",
+                                event.get("message").and_then(Value::as_str).unwrap_or(""),
+                            );
+                        }
+                        _ => {}
+                    },
+                    Err(_) => return Err("Timed out rendering the preview.".into()),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 #[tauri::command]
 async fn apply_corrections(
     app: AppHandle,
@@ -638,6 +683,21 @@ async fn export_json(window: Window, results: Vec<SyncResult>) -> Result<String,
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Open a file with whatever the OS considers its default application.
+///
+/// Used for previews: the user's own player is better at playback than
+/// anything embeddable, and it already knows their audio device.
+#[tauri::command]
+fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !PathBuf::from(&path).exists() {
+        return Err("That file no longer exists.".into());
+    }
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 fn reveal_path(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
@@ -710,9 +770,11 @@ pub fn run() {
             apply_corrections,
             probe_media,
             list_audio_tracks,
+            render_preview,
             export_csv,
             export_json,
             reveal_path,
+            open_path,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

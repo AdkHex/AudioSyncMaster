@@ -127,6 +127,8 @@ export interface MatchPair {
   key: string;
   method: string;
   score: number;
+  primaryTrack?: number;
+  secondaryTrack?: number;
 }
 
 export interface PairingReport {
@@ -148,6 +150,10 @@ export interface AnalyzeRequest {
   matchPattern: string | null;
   videoTrack: number;
   audioTrack: number;
+  /** Explicit pairs, sent when the user has corrected the matching by hand.
+   *  The engine uses these verbatim instead of re-matching, which would
+   *  silently undo the edit. */
+  pairs?: MatchPair[] | null;
   windowSeconds: number;
   windowCount: number;
   maxOffsetMs: number;
@@ -276,6 +282,24 @@ export function formatElapsed(ms: number | null): string {
   if (seconds < 60) return `${seconds.toFixed(1)} s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(Math.round(seconds % 60)).padStart(2, "0")}`;
+}
+
+/** A delay expressed in video frames, which is how editors think about sync.
+ *
+ *  "+317.5 ms" says nothing about whether that is a lot. "8 frames" is
+ *  immediately meaningful to anyone who works with video, and the frame rate is
+ *  already known.
+ */
+export function frameOffset(
+  delayMs: number | null,
+  fps: number | null | undefined,
+): number | null {
+  if (delayMs === null || !fps || !Number.isFinite(delayMs) || !Number.isFinite(fps)) {
+    return null;
+  }
+  const frames = Math.round((delayMs / 1000) * fps);
+  // Below half a frame there is nothing useful to say.
+  return frames === 0 ? null : frames;
 }
 
 /** The ffmpeg command a user would run by hand for this result. */

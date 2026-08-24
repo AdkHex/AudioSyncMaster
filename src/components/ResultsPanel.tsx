@@ -2,17 +2,21 @@ import {
   AlertTriangle,
   ArrowRight,
   Check,
+  ChevronDown,
   Clipboard,
   Download,
   Gauge,
+  Loader2,
+  Play,
   Scissors,
   TrendingDown,
   TrendingUp,
   Wand2,
   X,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { Fragment, memo, useMemo, useState } from "react";
 
+import { ResultDetail } from "@/components/ResultDetail";
 import { Button, Card, CardHeader, Checkbox, Pill } from "@/components/ui";
 import { cx } from "@/lib/cx";
 import {
@@ -21,6 +25,7 @@ import {
   formatDelay,
   formatDrift,
   formatElapsed,
+  frameOffset,
   resultKey,
   type ConfidenceLevel,
   type RunSummary,
@@ -39,6 +44,10 @@ interface ResultsPanelProps {
   onExportJson: () => void;
   onApply: () => void;
   onCopy: (text: string) => void;
+  /** Render and open a short aligned excerpt so a result can be judged by ear. */
+  onPreview: (result: SyncResult) => void;
+  /** Key of the result currently being rendered, if any. */
+  previewingKey: string | null;
   applying: boolean;
   outputSuffix: string;
 }
@@ -93,10 +102,23 @@ export const ResultsPanel = memo(function ResultsPanel({
   onExportJson,
   onApply,
   onCopy,
+  onPreview,
+  previewingKey,
   applying,
   outputSuffix,
 }: ResultsPanelProps) {
   const [filter, setFilter] = useState<Filter>("all");
+  // Which rows have their measurement detail open. The engine reports far more
+  // than fits a table row, and hiding it entirely meant the work was wasted.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggleExpanded = (key: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const counts = useMemo(
     () => ({
@@ -280,10 +302,12 @@ export const ResultsPanel = memo(function ResultsPanel({
                 const selected = selectedKeys.has(key);
                 const drifting = result.hasSignificantDrift;
                 const DriftIcon = (result.driftMsPerS ?? 0) < 0 ? TrendingDown : TrendingUp;
+                const isExpanded = expanded.has(key);
+                const frames = frameOffset(result.delayMs, result.primaryFps);
 
                 return (
+                  <Fragment key={key}>
                   <tr
-                    key={key}
                     className={cx(
                       "group border-b border-border last:border-0",
                       selected ? "bg-accent" : "hover:bg-elevated",
@@ -325,7 +349,17 @@ export const ResultsPanel = memo(function ResultsPanel({
                       {result.error ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
-                        formatDelay(result.delayMs)
+                        <>
+                          {formatDelay(result.delayMs)}
+                          {/* Frames are how editors judge whether an offset
+                              matters; milliseconds alone carry no scale. */}
+                          {frames !== null && (
+                            <span className="block font-sans text-[10px] font-normal text-muted-foreground">
+                              ≈ {frames > 0 ? "+" : ""}
+                              {frames} frame{Math.abs(frames) === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </>
                       )}
                     </td>
 
@@ -397,21 +431,60 @@ export const ResultsPanel = memo(function ResultsPanel({
                     </td>
 
                     <td className="px-3 py-2.5">
-                      {command && (
+                      <div className="flex items-center justify-end gap-0.5">
+                        {command && (
+                          <button
+                            type="button"
+                            onClick={() => onCopy(command)}
+                            title="Copy the equivalent ffmpeg command"
+                            className="rounded p-1 text-muted-foreground opacity-0 transition hover:bg-sunken hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          >
+                            <Clipboard className="h-3 w-3" aria-hidden />
+                            <span className="sr-only">
+                              Copy ffmpeg command for {result.videoFile}
+                            </span>
+                          </button>
+                        )}
+                        {applicable && (
+                          <button
+                            type="button"
+                            onClick={() => onPreview(result)}
+                            disabled={previewingKey !== null}
+                            title="Play a short excerpt with this delay applied"
+                            className="rounded p-1 text-muted-foreground opacity-0 transition hover:bg-sunken hover:text-foreground focus-visible:opacity-100 disabled:opacity-40 group-hover:opacity-100"
+                          >
+                            {previewingKey === key ? (
+                              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                            ) : (
+                              <Play className="h-3 w-3" aria-hidden />
+                            )}
+                            <span className="sr-only">
+                              Preview {result.videoFile} with this delay
+                            </span>
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => onCopy(command)}
-                          title="Copy the equivalent ffmpeg command"
-                          className="rounded p-1 text-muted-foreground opacity-0 transition hover:bg-sunken hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          onClick={() => toggleExpanded(key)}
+                          aria-expanded={isExpanded}
+                          className="rounded p-1 text-muted-foreground transition hover:bg-sunken hover:text-foreground"
                         >
-                          <Clipboard className="h-3 w-3" aria-hidden />
+                          <ChevronDown
+                            className={cx(
+                              "h-3.5 w-3.5 transition-transform",
+                              isExpanded && "rotate-180",
+                            )}
+                            aria-hidden
+                          />
                           <span className="sr-only">
-                            Copy ffmpeg command for {result.videoFile}
+                            {isExpanded ? "Hide" : "Show"} details for {result.videoFile}
                           </span>
                         </button>
-                      )}
+                      </div>
                     </td>
                   </tr>
+                  {isExpanded && <ResultDetail result={result} columnCount={7} />}
+                  </Fragment>
                 );
               })}
             </tbody>

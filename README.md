@@ -63,6 +63,21 @@ something else: the files contain different material. Those are reported as
 **Different cut** and excluded from the fixable set, because no single delay or
 speed ratio aligns them.
 
+## Reviewing results
+
+Every measurement expands to show what it was built from: the offset at the
+start and end of the file, how many sample windows were usable, the frame rate
+and codec of each source, and any codec delay that was removed. Delays are also
+given in video frames, which is how a mismatch is usually judged.
+
+**Preview** renders a short excerpt with the measured delay applied and opens it
+in your player. Hearing the dub land on the picture settles a borderline result
+in a way a confidence score cannot.
+
+Pairings can be corrected before a run. If series matching gets one wrong, pick
+the right audio from the dropdown, or skip that video entirely — the engine uses
+the corrected pairs verbatim rather than re-matching.
+
 ## Requirements
 
 - Node 20+

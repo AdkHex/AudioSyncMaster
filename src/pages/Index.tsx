@@ -22,6 +22,7 @@ import { ProgressPanel } from "@/components/ProgressPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { TrackSelector } from "@/components/TrackSelector";
+import { LiveAnnouncer } from "@/components/LiveAnnouncer";
 import { UpdateDialog } from "@/components/UpdateDialog";
 import { Button, IconButton, Notice, StepHeader } from "@/components/ui";
 import { cx } from "@/lib/cx";
@@ -48,11 +49,26 @@ import type {
   FileItem,
   HistoryEntry,
   MediaProbe,
+  PairingReport,
   SyncMode,
   TrackListing,
   SyncResult,
 } from "@/lib/types";
 import { MAX_COMPARE_INPUTS, formatSize, resultKey } from "@/lib/types";
+import {
+  announceApplyFinished,
+  announceProgress,
+  announceRunFailed,
+  announceRunFinished,
+  announceRunStarted,
+  type Announcement,
+} from "@/lib/announce";
+import {
+  applyOverrides,
+  countManualPairs,
+  pruneOverrides,
+  type PairOverrides,
+} from "@/lib/pairing";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
 
 /** Injected from package.json at build time, so Settings always reports the
@@ -82,11 +98,18 @@ export default function Index() {
   const [dragTarget, setDragTarget] = useState<"video" | "audio" | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [previewingKey, setPreviewingKey] = useState<string | null>(null);
+  // Hand corrections to the automatic pairing, keyed by video path so they
+  // survive a re-match when the pattern or selection changes.
+  const [pairOverrides, setPairOverrides] = useState<PairOverrides>({});
   const [applyState, setApplyState] = useState<ApplyState | null>(null);
   const [cancellingApply, setCancellingApply] = useState(false);
   const [remainingMs, setRemainingMs] = useState<number | null>(null);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  // What a screen reader should say next. Analysis is long-running and almost
+  // entirely visual, so without this its progress and outcome are invisible.
+  const [announcement, setAnnouncement] = useState<Announcement | null>(null);
 
   /** Mirrors state for callbacks that must not be re-created on every change.
    *  The original captured stale values here: the keyboard handler closed over
@@ -102,6 +125,11 @@ export default function Index() {
   videoTrackRef.current = videoTrack;
   const audioTrackRef = useRef(audioTrack);
   audioTrackRef.current = audioTrack;
+  const overridesRef = useRef(pairOverrides);
+  overridesRef.current = pairOverrides;
+  // Read through a ref so buildRequest stays stable; it is called from the
+  // keyboard handler, which must not close over a stale pairing.
+  const effectivePairingRef = useRef<PairingReport | null>(null);
 
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveRecentFolders(recentFolders), [recentFolders]);
@@ -148,13 +176,16 @@ export default function Index() {
     api
       .subscribeToSync({
         onLog: (message) => dispatch({ type: "log", message }),
-        onProgress: (event) =>
+        onProgress: (event) => {
           dispatch({
             type: "progress",
             processed: event.processed,
             total: event.total,
             current: event.current,
-          }),
+          });
+          const milestone = announceProgress(event.processed, event.total);
+          if (milestone) setAnnouncement(milestone);
+        },
         onFileStart: (file) => dispatch({ type: "fileStart", file }),
         onFileProgress: (event) =>
           dispatch({ type: "fileProgress", file: event.file, percent: event.percent }),
@@ -258,6 +289,20 @@ export default function Index() {
     return () => {
       active = false;
     };
+  }, [state.videoFiles, state.audioFiles]);
+
+  // Drop corrections whose files are no longer selected, so the engine is
+  // never asked to analyse something that has been removed.
+  useEffect(() => {
+    setPairOverrides((current) => {
+      if (Object.keys(current).length === 0) return current;
+      const pruned = pruneOverrides(
+        current,
+        state.videoFiles.map((file) => file.path),
+        state.audioFiles.map((file) => file.path),
+      );
+      return Object.keys(pruned).length === Object.keys(current).length ? current : pruned;
+    });
   }, [state.videoFiles, state.audioFiles]);
 
   // ---------------------------------------------------------------- selection
@@ -383,6 +428,13 @@ export default function Index() {
           : null,
       videoTrack: videoTrackRef.current,
       audioTrack: audioTrackRef.current,
+      // Only sent once the user has actually changed something: otherwise the
+      // engine should do its own matching, which stays correct as the
+      // selection or pattern changes.
+      pairs:
+        Object.keys(overridesRef.current).length > 0
+          ? (effectivePairingRef.current?.pairs ?? null)
+          : null,
       windowSeconds: config.windowSeconds,
       windowCount: config.windowCount,
       maxOffsetMs: config.maxOffsetMs,
@@ -446,6 +498,12 @@ export default function Index() {
 
     setSelectedKeys(new Set());
     dispatch({ type: "runStarted", total: current.videoFiles.length });
+    setAnnouncement(
+      announceRunStarted(
+        stateRef.current.pairing?.pairs.length ?? current.videoFiles.length,
+        current.mode,
+      ),
+    );
 
     try {
       const run = await api.startSync(buildRequest());
@@ -455,6 +513,7 @@ export default function Index() {
         summary: run.summary,
         cancelled: run.cancelled,
       });
+      setAnnouncement(announceRunFinished(run.results, run.summary, run.cancelled));
 
       if (run.cancelled) {
         toast.info("Analysis cancelled.");
@@ -484,6 +543,7 @@ export default function Index() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       dispatch({ type: "runFailed", message });
+      setAnnouncement(announceRunFailed(message));
       toast.error("Analysis failed", { description: message });
       setShowConsole(true);
     }
@@ -534,6 +594,9 @@ export default function Index() {
           },
         });
       }
+      setAnnouncement(
+        announceApplyFinished(outcome.written.length, outcome.failed.length),
+      );
       outcome.failed.forEach((failure) =>
         dispatch({ type: "log", message: `${failure.video}: ${failure.error}` }),
       );
@@ -576,6 +639,35 @@ export default function Index() {
     },
     [],
   );
+
+  /** Render a short aligned excerpt and hand it to the user's own player.
+   *
+   *  A confidence score is an argument; hearing the dub land on the picture is
+   *  the only thing that settles a borderline result. */
+  const handlePreview = useCallback(async (result: SyncResult) => {
+    if (!result.primaryPath || !result.secondaryPath || result.delayMs === null) return;
+    const key = resultKey(result);
+    setPreviewingKey(key);
+    try {
+      const path = await api.renderPreview({
+        videoPath: result.primaryPath,
+        audioPath: result.secondaryPath,
+        delayMs: result.delayMs,
+        driftMsPerS: result.hasSignificantDrift ? result.driftMsPerS : null,
+        audioTrack: result.secondaryTrack ?? 0,
+        durationSeconds: 12,
+      });
+      if (!path) {
+        toast.error("Could not render the preview.");
+        return;
+      }
+      await api.openPath(path);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not open the preview");
+    } finally {
+      setPreviewingKey(null);
+    }
+  }, []);
 
   const handleCopy = useCallback(async (text: string) => {
     try {
@@ -625,6 +717,25 @@ export default function Index() {
   // ---------------------------------------------------------------- derived
 
   const selection = useMemo(() => validateSelection(state), [state]);
+
+  /** What will actually be analysed: the engine's matching, plus any pair the
+   *  user corrected by hand. */
+  const effectivePairing = useMemo(
+    () =>
+      state.pairing
+        ? applyOverrides(
+            state.pairing,
+            pairOverrides,
+            state.audioFiles.map((file) => ({ path: file.path, name: file.name })),
+          )
+        : null,
+    [state.pairing, pairOverrides, state.audioFiles],
+  );
+  const manualPairCount = useMemo(() => countManualPairs(pairOverrides), [pairOverrides]);
+  effectivePairingRef.current = effectivePairing;
+  // Count what will actually run, not what the matcher first proposed: an
+  // excluded video must disappear from the button too.
+  const pairCount = effectivePairing?.pairs.length ?? 0;
   const busy = state.status === "processing";
   const hasResults = state.results.length > 0;
   const hasFiles = state.videoFiles.length > 0 || state.audioFiles.length > 0;
@@ -640,7 +751,7 @@ export default function Index() {
     return `${count} file${count === 1 ? "" : "s"}${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
   }, [hasFiles, state.videoFiles, state.audioFiles]);
 
-  const pairCount = state.pairing?.pairs.length ?? 0;
+
 
   const toggleSelection = useCallback((key: string) => {
     setSelectedKeys((prev) => {
@@ -849,11 +960,22 @@ export default function Index() {
                   state={pairCount > 0 ? "active" : "todo"}
                   aside={
                     state.pairing
-                      ? `${pairCount} pair${pairCount === 1 ? "" : "s"} · matched by ${state.pairing.method}`
+                      ? `${pairCount} pair${pairCount === 1 ? "" : "s"} · matched by ${effectivePairing?.method ?? state.pairing.method}`
                       : undefined
                   }
                 />
-                <PairingPreview pairing={state.pairing} loading={pairingLoading} />
+                <PairingPreview
+                  pairing={effectivePairing}
+                  loading={pairingLoading}
+                  audioFiles={state.audioFiles}
+                  videoFiles={state.videoFiles}
+                  manualCount={manualPairCount}
+                  disabled={busy}
+                  onRepair={(videoPath, audioPath) =>
+                    setPairOverrides((current) => ({ ...current, [videoPath]: audioPath }))
+                  }
+                  onResetRepairs={() => setPairOverrides({})}
+                />
               </>
             )}
 
@@ -948,6 +1070,8 @@ export default function Index() {
                   onExportJson={() => void handleExport(state.results, "json")}
                   onApply={() => void handleApply()}
                   onCopy={(text) => void handleCopy(text)}
+                  onPreview={(result) => void handlePreview(result)}
+                  previewingKey={previewingKey}
                   applying={applying}
                   outputSuffix={settings.outputSuffix}
                 />
@@ -1023,6 +1147,8 @@ export default function Index() {
       />
 
       <UpdateDialog update={update} onDismiss={() => setUpdate(null)} />
+
+      <LiveAnnouncer announcement={announcement} />
     </div>
   );
 }

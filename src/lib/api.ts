@@ -90,6 +90,28 @@ export async function listAudioTracks(paths: string[]): Promise<TrackListing[]> 
   return invoke<TrackListing[]>("list_audio_tracks", { paths });
 }
 
+export interface PreviewRequest {
+  videoPath: string;
+  audioPath: string;
+  delayMs: number;
+  driftMsPerS?: number | null;
+  audioTrack?: number;
+  positionSeconds?: number | null;
+  durationSeconds?: number;
+}
+
+/** Render a short aligned excerpt and return its path, or null on failure. */
+export async function renderPreview(request: PreviewRequest): Promise<string | null> {
+  requireDesktop("Rendering a preview");
+  return invoke<string | null>("render_preview", { request });
+}
+
+/** Hand a file to the OS so the user's own player opens it. */
+export async function openPath(path: string): Promise<void> {
+  requireDesktop("Opening a file");
+  await invoke("open_path", { path });
+}
+
 export async function previewPairs(request: Partial<AnalyzeRequest>): Promise<PairingReport> {
   requireDesktop("Previewing pairs");
   return invoke<PairingReport>("preview_pairs", { request });

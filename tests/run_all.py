@@ -23,6 +23,7 @@ MODULES = [
     "test_tracks",
     "test_compare",
     "test_codecdelay",
+    "test_preview",
     "test_mux",
     "test_bridge",
 ]

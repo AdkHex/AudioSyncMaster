@@ -190,6 +190,61 @@ def apply_correction(
     return plan.output_path
 
 
+PREVIEW_TIMEOUT_S = 180
+
+
+def build_preview_command(
+    video_path: str,
+    audio_path: str,
+    delay_ms: float,
+    position_s: float,
+    duration_s: float,
+    output_path: str,
+    video_track: int = 0,
+    audio_track: int = 0,
+    drift_ms_per_s: Optional[float] = None,
+) -> List[str]:
+    """ffmpeg command for a short aligned excerpt.
+
+    The audio is taken from wherever the measured delay says it should be, so
+    playing the result is a direct test of the measurement: if the number is
+    right, the excerpt is in sync.
+    """
+    audio_start = max(0.0, position_s + (delay_ms / 1000.0))
+
+    command = [ffmpeg_path(), "-nostdin", "-y"]
+
+    # Input seeks, so the cost does not scale with how far into the file the
+    # excerpt sits. A preview is a quick check; decoding two hours to reach it
+    # would defeat the point. Exactness is not needed here -- the ear cannot
+    # resolve a keyframe's worth of start position, and both inputs shift
+    # together anyway.
+    command.extend(["-ss", f"{position_s:.6f}", "-i", video_path])
+    command.extend(["-ss", f"{audio_start:.6f}", "-i", audio_path])
+
+    command.extend([
+        "-t", f"{duration_s:.6f}",
+        # The video's own audio is irrelevant here: the point is to hear the
+        # dub against the picture, so only the video stream is taken from it.
+        "-map", "0:v:0",
+        "-map", f"1:a:{max(0, audio_track)}",
+    ])
+
+    # With drift, the excerpt only stays aligned if the rate is corrected too.
+    if drift_ms_per_s is not None and abs(drift_ms_per_s) > 1e-6:
+        ratio = 1.0 + (drift_ms_per_s / 1000.0)
+        if 0.5 <= ratio <= 2.0:
+            command.extend(["-filter:a", f"atempo={ratio:.9f}"])
+
+    command.extend([
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        "-shortest", output_path,
+    ])
+    return command
+
+
 def extract_preview(
     video_path: str,
     audio_path: str,
@@ -198,23 +253,45 @@ def extract_preview(
     duration_s: float,
     output_path: str,
     token: Optional[CancellationToken] = None,
+    video_track: int = 0,
+    audio_track: int = 0,
+    drift_ms_per_s: Optional[float] = None,
 ) -> str:
     """Render a short aligned excerpt so a result can be checked by ear.
 
-    Verifying a number by listening to a few seconds is far more convincing
-    than trusting a confidence score, especially for the ambiguous cases.
+    Hearing a few seconds line up is far more convincing than a confidence
+    score, and it is the only way to settle the borderline cases.
     """
-    offset_s = -delay_ms / 1000.0
-    audio_start = max(0.0, position_s + offset_s)
+    if not os.path.isfile(video_path):
+        raise MediaError(f"Video not found: {video_path}")
+    if not os.path.isfile(audio_path):
+        raise MediaError(f"Audio not found: {audio_path}")
 
-    command = [
-        ffmpeg_path(), "-nostdin", "-y",
-        "-i", video_path, "-ss", f"{position_s:.6f}", "-t", f"{duration_s:.6f}",
-        "-i", audio_path, "-ss", f"{audio_start:.6f}", "-t", f"{duration_s:.6f}",
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-        "-c:a", "aac", "-b:a", "160k",
-        "-shortest", output_path,
-    ]
-    _run(command, MUX_TIMEOUT_S, token, what="render preview")
+    parent = os.path.dirname(os.path.abspath(output_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    _run(
+        build_preview_command(
+            video_path, audio_path, delay_ms, position_s, duration_s, output_path,
+            video_track, audio_track, drift_ms_per_s,
+        ),
+        PREVIEW_TIMEOUT_S,
+        token,
+        what="render preview",
+    )
+
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+        raise MediaError("ffmpeg produced no preview output")
     return output_path
+
+
+def choose_preview_position(duration_s: Optional[float], window_s: float = 12.0) -> float:
+    """Pick a point worth listening to.
+
+    A third of the way in avoids both the opening logo and the credits, which
+    are the two places most likely to be silent or music-only.
+    """
+    if not duration_s or duration_s <= window_s:
+        return 0.0
+    return max(0.0, min(duration_s / 3.0, duration_s - window_s))

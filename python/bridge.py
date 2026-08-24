@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import threading
 import traceback
 
@@ -35,6 +36,7 @@ try:
     from audiosync.batch import BatchEvents, BatchOptions, run_batch, summarize
     from audiosync.matching import (
         MAX_COMPARE_INPUTS,
+        MatchPair,
         list_media,
         match_folders,
         pair_every_combination,
@@ -42,7 +44,13 @@ try:
         validate_pattern,
     )
     from audiosync.media import CancellationToken, MediaError, has_ffmpeg, probe
-    from audiosync.mux import apply_correction, command_string, plan_correction
+    from audiosync.mux import (
+        apply_correction,
+        choose_preview_position,
+        command_string,
+        extract_preview,
+        plan_correction,
+    )
 except Exception as exc:  # noqa: BLE001
     sys.stderr.write(f"Failed to import audiosync package: {exc}\n")
     traceback.print_exc(file=sys.stderr)
@@ -111,7 +119,47 @@ def handle_analyze(request: dict) -> None:
         max_workers=int(request.get("maxWorkers", 3)),
     )
 
-    if mode == "movie":
+    # A pairing the user corrected by hand wins outright. Re-matching here
+    # would silently undo their edit, which is worse than not offering the edit.
+    explicit = request.get("pairs")
+    if explicit:
+        pairs = []
+        for entry in explicit:
+            video = entry.get("primaryPath")
+            audio = entry.get("secondaryPath")
+            if not video or not audio:
+                continue
+            if not os.path.isfile(video) or not os.path.isfile(audio):
+                emit_log(f"Skipping a pair whose files are missing: {os.path.basename(video or '?')}")
+                continue
+            pairs.append(
+                MatchPair(
+                    video,
+                    audio,
+                    entry.get("key") or os.path.basename(video),
+                    entry.get("method") or "chosen by hand",
+                    float(entry.get("score", 1.0) or 1.0),
+                    primary_track=int(entry.get("primaryTrack", request.get("videoTrack", 0)) or 0),
+                    secondary_track=int(entry.get("secondaryTrack", request.get("audioTrack", 0)) or 0),
+                )
+            )
+
+        if not pairs:
+            emit_error("None of the chosen pairs could be used.", fatal=True)
+            emit({"type": "done", "results": [], "summary": summarize([])})
+            return
+
+        emit_log(f"Using {len(pairs)} pair(s) supplied by the app.")
+        emit({
+            "type": "pairs",
+            "pairs": [pair.to_dict() for pair in pairs],
+            "method": "supplied",
+            "unmatchedPrimary": [],
+            "unmatchedSecondary": [],
+            "warning": None,
+        })
+
+    elif mode == "movie":
         audio_file = request.get("audioFile")
         if not audio_file or not os.path.isfile(audio_file):
             emit_error("Select an audio file for movie mode.", fatal=True)
@@ -347,6 +395,61 @@ def handle_list_tracks(request: dict) -> None:
     emit({"type": "tracks", "files": results})
 
 
+def handle_preview(request: dict) -> None:
+    """Render a short aligned excerpt so the user can check a result by ear.
+
+    Written to a temp directory rather than beside the source: a preview is a
+    throwaway, and cluttering the user's media folder with them is not.
+    """
+    video = request.get("videoPath")
+    audio = request.get("audioPath")
+    delay = request.get("delayMs")
+
+    if not video or not audio or delay is None:
+        emit_error("A preview needs a video, an audio track and a measured delay.")
+        emit({"type": "previewDone", "path": None})
+        return
+
+    duration = float(request.get("durationSeconds", 12.0))
+    position = request.get("positionSeconds")
+    if position is None:
+        try:
+            position = choose_preview_position(probe(video).duration, duration)
+        except MediaError:
+            position = 0.0
+
+    output = os.path.join(
+        tempfile.gettempdir(),
+        f"audiosync-preview-{abs(hash((video, audio, round(float(delay), 3))))}.mp4",
+    )
+
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        extract_preview(
+            video,
+            audio,
+            float(delay),
+            float(position),
+            duration,
+            output,
+            token=token,
+            audio_track=int(request.get("audioTrack", 0) or 0),
+            drift_ms_per_s=request.get("driftMsPerS"),
+        )
+        emit({
+            "type": "previewDone",
+            "path": output,
+            "positionSeconds": float(position),
+            "durationSeconds": duration,
+        })
+    except (MediaError, OSError) as exc:
+        emit_error(f"Could not render the preview: {exc}")
+        emit({"type": "previewDone", "path": None})
+    finally:
+        _set_token(None)
+
+
 def handle_apply(request: dict) -> None:
     """Write corrected files for the supplied set of measured results."""
     items = request.get("items") or []
@@ -418,6 +521,7 @@ HANDLERS = {
     "previewPairs": handle_preview_pairs,
     "probe": handle_probe,
     "listTracks": handle_list_tracks,
+    "preview": handle_preview,
     "apply": handle_apply,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),

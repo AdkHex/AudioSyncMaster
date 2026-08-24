@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   confidenceLevel,
+  frameOffset,
   ffmpegCommandFor,
   formatDelay,
   formatDrift,
@@ -105,5 +106,32 @@ describe("ffmpeg command", () => {
       make({ primaryPath: "/media/My Show S01E01.mkv" }),
     )!;
     expect(command).toContain('"/media/My Show S01E01.mkv"');
+  });
+});
+
+describe("frame offset", () => {
+  it("converts a delay into frames at the file's rate", () => {
+    // 8 frames at 23.976fps is ~333ms; this is the number an editor thinks in.
+    expect(frameOffset(333.7, 23.976)).toBe(8);
+    expect(frameOffset(1000, 25)).toBe(25);
+  });
+
+  it("signs the result so direction survives", () => {
+    expect(frameOffset(-333.7, 23.976)).toBe(-8);
+  });
+
+  it("says nothing when the offset rounds to under a frame", () => {
+    expect(frameOffset(5, 23.976)).toBeNull();
+  });
+
+  it("says nothing without a frame rate", () => {
+    expect(frameOffset(500, null)).toBeNull();
+    expect(frameOffset(500, undefined)).toBeNull();
+    expect(frameOffset(null, 25)).toBeNull();
+  });
+
+  it("ignores non-finite input", () => {
+    expect(frameOffset(Number.NaN, 25)).toBeNull();
+    expect(frameOffset(500, Number.POSITIVE_INFINITY)).toBeNull();
   });
 });
