@@ -88,6 +88,12 @@ pub struct SyncResult {
     pub is_likely_cut: Option<bool>,
     #[serde(default)]
     pub is_rate_mismatch: Option<bool>,
+    #[serde(default)]
+    pub codec_delay_ms: Option<f64>,
+    #[serde(default)]
+    pub primary_codec: Option<String>,
+    #[serde(default)]
+    pub secondary_codec: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

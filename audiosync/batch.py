@@ -109,6 +109,16 @@ def run_batch(
                 error=f"{type(exc).__name__}: {exc}",
             )
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
+
+        # Say so when a measurement was adjusted, rather than folding it in
+        # silently -- an unexplained few milliseconds is exactly the kind of
+        # thing that erodes trust in the number.
+        if result.codec_delay_ms:
+            events.log(
+                f"{name}: compensated {result.codec_delay_ms:+.3f}ms of codec delay "
+                f"({result.primary_codec or 'unknown'} vs "
+                f"{result.secondary_codec or 'unknown'} decode with different alignment)."
+            )
         return result
 
     executor = ThreadPoolExecutor(max_workers=workers)

@@ -40,8 +40,8 @@ fn number(value: Option<f64>, decimals: usize) -> String {
 pub fn render(results: &[SyncResult]) -> String {
     let mut out = String::from(
         "Video,Audio,Delay (ms),Confidence,Drift (ms/s),Total Drift (ms),\
-         Start Delay (ms),End Delay (ms),Video FPS,Audio Track,Windows Used,Windows Total,\
-         Elapsed (ms),Status\n",
+         Start Delay (ms),End Delay (ms),Video FPS,Audio Track,Video Codec,Audio Codec,\
+         Codec Delay Removed (ms),Windows Used,Windows Total,Elapsed (ms),Status\n",
     );
 
     for result in results {
@@ -75,6 +75,9 @@ pub fn render(results: &[SyncResult]) -> String {
                 .secondary_track
                 .map(|v| (v + 1).to_string())
                 .unwrap_or_default(),
+            escape(result.primary_codec.as_deref().unwrap_or("")),
+            escape(result.secondary_codec.as_deref().unwrap_or("")),
+            number(result.codec_delay_ms, 3),
             result
                 .windows_used
                 .map(|v| v.to_string())

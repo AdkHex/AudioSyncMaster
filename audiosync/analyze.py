@@ -26,6 +26,8 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
+from .codecdelay import describe as describe_codec_delay
+from .codecdelay import relative_codec_delay_ms
 from .correlate import OffsetEstimate, estimate_offset
 from .framerate import RateDiagnosis, diagnose
 from .media import CancellationToken, MediaError, load_audio, probe
@@ -76,6 +78,12 @@ class PairResult:
     secondary_fps: Optional[float] = None
     rate_diagnosis: Optional[RateDiagnosis] = None
     """Why the file drifts, when it does: a frame-rate conversion, or a cut."""
+    codec_delay_ms: float = 0.0
+    """Codec delay already removed from delay_ms. Some formats decode shifted
+    from where the source sat, which lands in the measurement when the two
+    files use different codecs."""
+    primary_codec: Optional[str] = None
+    secondary_codec: Optional[str] = None
 
     @property
     def is_likely_cut(self) -> bool:
@@ -133,8 +141,20 @@ class PairResult:
             "secondaryFps": self.secondary_fps,
             "isLikelyCut": self.is_likely_cut,
             "isRateMismatch": self.is_rate_mismatch,
+            "codecDelayMs": self.codec_delay_ms,
+            "primaryCodec": self.primary_codec,
+            "secondaryCodec": self.secondary_codec,
             "rateDiagnosis": self.rate_diagnosis.to_dict() if self.rate_diagnosis else None,
         }
+
+
+def _track_of(info, index: int):
+    """Codec and sample rate of the stream actually being compared."""
+    tracks = getattr(info, "audio_tracks", None) or []
+    if 0 <= index < len(tracks):
+        track = tracks[index]
+        return track.codec, track.sample_rate
+    return info.audio_codec, info.sample_rate
 
 
 def plan_windows(
@@ -207,6 +227,17 @@ def analyze_pair(
         result.primary_fps = primary_info.fps
         result.secondary_fps = secondary_info.fps
 
+        # Track-specific codec details, since a container's first stream is not
+        # necessarily the one being compared.
+        primary_stream = _track_of(primary_info, primary_track)
+        secondary_stream = _track_of(secondary_info, secondary_track)
+        result.primary_codec = primary_stream[0]
+        result.secondary_codec = secondary_stream[0]
+        result.codec_delay_ms = relative_codec_delay_ms(
+            primary_stream[0], primary_stream[1],
+            secondary_stream[0], secondary_stream[1],
+        )
+
         if not primary_duration or primary_duration <= 0:
             result.error = f"Could not read duration of {result.primary_name}"
             return result
@@ -237,6 +268,16 @@ def analyze_pair(
             report(5 + int(90 * (index + 1) / len(positions)))
 
         _reconcile(result)
+
+        # Remove the part of the measurement that is codec alignment rather
+        # than real sync. Applied to every offset, so a correction can never
+        # be double-counted or missed on one of them.
+        if result.codec_delay_ms:
+            for attribute in ("delay_ms", "delay_at_start_ms", "start_delay_ms", "end_delay_ms"):
+                value = getattr(result, attribute)
+                if value is not None:
+                    setattr(result, attribute, value - result.codec_delay_ms)
+
         result.rate_diagnosis = diagnose(
             result.drift_ms_per_s, result.primary_fps, result.secondary_fps
         )

@@ -94,6 +94,10 @@ export interface SyncResult {
   secondaryFps?: number | null;
   isLikelyCut?: boolean | null;
   isRateMismatch?: boolean | null;
+  /** Codec delay already removed from delayMs, so the figure is not silent. */
+  codecDelayMs?: number | null;
+  primaryCodec?: string | null;
+  secondaryCodec?: string | null;
   rateDiagnosis?: RateDiagnosis | null;
 }
 
