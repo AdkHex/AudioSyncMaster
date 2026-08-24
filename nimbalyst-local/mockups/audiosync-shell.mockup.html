@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AudioSyncMaster</title>
+<style>
+  /* Restraint over decoration: one accent, two greys, borders only where a
+     surface genuinely changes. Everything else is separated by space. */
+  :root {
+    --bg:      #161616;
+    --panel:   #1c1c1c;
+    --raised:  #232323;
+    --line:    rgba(255,255,255,0.07);
+
+    --fg:      #ededed;
+    --muted:   #969696;
+    --dim:     #666666;
+
+    --accent:  #4f7cff;
+    --warn:    #d69553;
+    --bad:     #d9695f;
+    --good:    #5aa870;
+
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+  svg { display: block; }
+
+  .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  /* ───────────────────────────── header ───────────────────────────── */
+  .head {
+    display: flex; align-items: center; gap: 14px;
+    height: 44px; flex-shrink: 0; padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+  .mark {
+    width: 20px; height: 20px; border-radius: 6px; background: var(--accent);
+    display: grid; place-items: center; color: #fff; font-size: 10px; font-weight: 700;
+  }
+  .modes { display: flex; gap: 2px; margin-left: 6px; }
+  .modes button {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12.5px; cursor: pointer;
+    padding: 5px 12px; border-radius: 7px;
+  }
+  .modes button.on { background: var(--raised); color: var(--fg); font-weight: 550; }
+  .grow { flex: 1; }
+  .icon {
+    width: 28px; height: 28px; border: 0; border-radius: 7px;
+    background: transparent; color: var(--muted); cursor: pointer;
+    display: grid; place-items: center;
+  }
+  .icon:hover { background: var(--raised); color: var(--fg); }
+
+  /* ───────────────────────────── layout ───────────────────────────── */
+  .main { display: flex; flex: 1; min-height: 0; }
+
+  .side {
+    width: 288px; flex-shrink: 0;
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .side-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px; }
+
+  /* one heading style, used everywhere */
+  .label {
+    font-size: 11px; font-weight: 600; color: var(--dim);
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .label button {
+    border: 0; background: transparent; color: var(--accent);
+    font: inherit; font-size: 11.5px; font-weight: 500; cursor: pointer;
+  }
+
+  /* Files are a plain list. No card, no border, no inner divider - the
+     indentation and the spacing already group them. */
+  .files { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
+  .file {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 4px 0; font-size: 12.5px;
+  }
+  .file .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .file .s { font-family: var(--mono); font-size: 11px; color: var(--dim); flex-shrink: 0; }
+  .path {
+    font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .drop {
+    border: 1px dashed rgba(255,255,255,0.13); border-radius: 9px;
+    padding: 22px 14px; text-align: center;
+    color: var(--dim); font-size: 12px; cursor: pointer;
+  }
+  .drop:hover { border-color: rgba(255,255,255,0.22); color: var(--muted); }
+
+  .sep { height: 1px; background: var(--line); margin: 20px 0; }
+
+  select.pick {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; font: inherit; font-size: 12.5px; color: var(--fg);
+    background: var(--raised); border: 0; border-radius: 8px;
+    padding: 8px 30px 8px 11px; cursor: pointer;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23969696' stroke-width='2.5'><path d='m6 9 6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center;
+  }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  .sublabel { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+
+  .side-foot { flex-shrink: 0; padding: 16px; }
+  .go {
+    width: 100%; border: 0; border-radius: 9px;
+    background: var(--accent); color: #fff;
+    font: inherit; font-size: 13px; font-weight: 600;
+    padding: 11px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  .go:disabled { background: var(--raised); color: var(--dim); cursor: default; }
+
+  /* ───────────────────────────── content ──────────────────────────── */
+  .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  .bar {
+    display: flex; align-items: center; gap: 16px;
+    height: 44px; flex-shrink: 0; padding: 0 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .bar h2 { font-size: 13px; font-weight: 600; }
+  .filters { display: flex; gap: 3px; }
+  .filters button {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12px; cursor: pointer;
+    padding: 4px 10px; border-radius: 6px;
+  }
+  .filters button.on { background: var(--raised); color: var(--fg); font-weight: 550; }
+  .filters button:disabled { color: var(--dim); opacity: .45; cursor: default; }
+
+  /* progress: a single quiet line, not a panel */
+  .running {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 18px; flex-shrink: 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px;
+  }
+  .running .who { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  .rail { width: 160px; height: 3px; border-radius: 2px; background: var(--raised); overflow: hidden; flex-shrink: 0; }
+  .rail i { display: block; height: 100%; background: var(--accent); }
+  .running .num { font-family: var(--mono); font-size: 11.5px; color: var(--dim); flex-shrink: 0; }
+
+  /* ─── results ─── */
+  .list { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+
+  .cols {
+    display: grid;
+    grid-template-columns: 34px 1fr 130px 120px 96px 60px;
+    align-items: center; gap: 14px;
+    padding: 0 18px 8px; margin-top: 10px;
+    font-size: 11px; color: var(--dim);
+  }
+  .cols .r { text-align: right; }
+  .cols .c { text-align: center; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 34px 1fr 130px 120px 96px 60px;
+    align-items: center; gap: 14px;
+    padding: 13px 18px;
+    border-top: 1px solid var(--line);
+    cursor: pointer;
+  }
+  .row:hover { background: rgba(255,255,255,0.022); }
+  .row.open { background: rgba(79,124,255,0.055); }
+
+  .who .t { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who .u {
+    font-size: 11.5px; color: var(--dim); margin-top: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .ms { text-align: right; font-family: var(--mono); font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .ms span { display: block; font-size: 10.5px; font-weight: 400; color: var(--dim); margin-top: 2px; }
+
+  /* tags carry colour with text, not with a filled pill */
+  .tag { text-align: center; font-size: 11.5px; white-space: nowrap; }
+  .tag.w { color: var(--warn); }
+  .tag.b { color: var(--bad); }
+  .tag.g { color: var(--good); }
+  .tag.n { color: var(--dim); }
+
+  .took { text-align: right; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+
+  .chk {
+    width: 15px; height: 15px; accent-color: var(--accent);
+    cursor: pointer; margin: 0;
+  }
+
+  /* detail: plain rows of label/value, no boxes */
+  .detail { padding: 4px 18px 20px 66px; background: rgba(79,124,255,0.055); }
+  .dcols { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 22px 40px; max-width: 780px; }
+  @media (max-width: 1180px) { .dcols { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  .dcols h4 { font-size: 11px; font-weight: 600; color: var(--dim); margin-bottom: 8px; }
+  .d { display: flex; justify-content: space-between; gap: 14px; padding: 3px 0; font-size: 12.5px; }
+  .d dt { color: var(--muted); }
+  .d dd { font-family: var(--mono); }
+
+  .why {
+    margin-top: 18px; max-width: 780px;
+    font-size: 12.5px; color: var(--muted); line-height: 1.65;
+  }
+  .why b { color: var(--fg); font-weight: 600; }
+
+  .acts { display: flex; gap: 10px; margin-top: 16px; }
+  .act {
+    border: 1px solid var(--line); background: transparent; border-radius: 7px;
+    color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+    padding: 6px 12px; display: flex; align-items: center; gap: 6px;
+  }
+  .act:hover { border-color: rgba(255,255,255,0.18); color: var(--fg); }
+
+  /* ─── footer action ─── */
+  .foot {
+    display: flex; align-items: center; gap: 14px;
+    flex-shrink: 0; padding: 14px 18px;
+    border-top: 1px solid var(--line);
+  }
+  .foot p { flex: 1; font-size: 12.5px; color: var(--muted); }
+  .foot p b { color: var(--fg); font-weight: 600; }
+  .fix {
+    border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+    font: inherit; font-size: 12.5px; font-weight: 600;
+    padding: 9px 18px; cursor: pointer;
+  }
+  .ghost {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 12.5px; cursor: pointer; padding: 9px 4px;
+  }
+  .ghost:hover { color: var(--fg); }
+
+  .status {
+    display: flex; align-items: center; gap: 8px;
+    height: 26px; flex-shrink: 0; padding: 0 14px;
+    border-top: 1px solid var(--line);
+    font-size: 11.5px; color: var(--dim);
+  }
+  .status .grow { flex: 1; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ─────────────── header ─────────────── -->
+  <div class="head">
+    <div class="brand"><span class="mark">A</span> AudioSyncMaster</div>
+    <div class="modes">
+      <button class="on">Movies</button>
+      <button>Series</button>
+      <button>Compare</button>
+    </div>
+    <div class="grow"></div>
+    <button class="icon" title="History">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
+    </button>
+    <button class="icon" title="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+    </button>
+  </div>
+
+  <div class="main">
+
+    <!-- ─────────────── sidebar ─────────────── -->
+    <aside class="side">
+      <div class="side-body">
+
+        <div class="label">Video<button>Change</button></div>
+        <div class="files">
+          <div class="file"><span class="n">Matilda.the.Musical.2022.BluRay.REMUX.mkv</span><span class="s">18.0 GB</span></div>
+          <div class="file"><span class="n">Matilda.the.Musical.2022.REPACK.Bluray.mkv</span><span class="s">14.0 GB</span></div>
+        </div>
+        <div class="path">H:\Ionic\Downloads\Videos\Videos</div>
+
+        <div class="sep"></div>
+
+        <div class="label">Dub<button>Change</button></div>
+        <div class="files">
+          <div class="file"><span class="n">Matilda_2022_ORG_Untouched_NF.eac3</span><span class="s">562 MB</span></div>
+        </div>
+        <div class="path">H:\Ionic\Downloads\Videos\Audios</div>
+
+        <div class="sep"></div>
+
+        <div class="stack">
+          <div>
+            <div class="sublabel">Video audio</div>
+            <select class="pick"><option>Track 1 · ENG · TrueHD 5.1</option></select>
+          </div>
+          <div>
+            <div class="sublabel">Dub track</div>
+            <select class="pick"><option>Track 1 · HIN · E-AC3 5.1</option></select>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="side-foot">
+        <button class="go">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8V4z"/></svg>
+          Analyse 2 files
+        </button>
+      </div>
+    </aside>
+
+    <!-- ─────────────── results ─────────────── -->
+    <main class="content">
+
+      <div class="bar">
+        <h2>Results</h2>
+        <div class="filters">
+          <button class="on">All 2</button>
+          <button disabled>High</button>
+          <button>Low 2</button>
+          <button>Drift 2</button>
+          <button disabled>Failed</button>
+        </div>
+        <div class="grow"></div>
+        <button class="icon" title="Export">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        </button>
+      </div>
+
+      <div class="running">
+        <span class="who">Analysing Matilda.the.Musical.2022.REPACK.Bluray.mkv</span>
+        <div class="rail"><i style="width:78%"></i></div>
+        <span class="num">2 of 2 · 9s left</span>
+        <button class="icon" title="Stop">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        </button>
+      </div>
+
+      <div class="list">
+
+        <div class="cols">
+          <div></div>
+          <div>File</div>
+          <div class="r">Delay</div>
+          <div class="c">Drift</div>
+          <div class="c">Confidence</div>
+          <div class="r">Time</div>
+        </div>
+
+        <!-- open row -->
+        <div class="row open">
+          <div><input class="chk" type="checkbox" checked /></div>
+          <div class="who">
+            <div class="t">Matilda.the.Musical.2022.1080p.REPACK.Bluray.DD5.1.x264-playHD.mkv</div>
+            <div class="u">Matilda_2022_ORG_Untouched_NF.eac3</div>
+          </div>
+          <div class="ms">−18283.3 ms<span>−438 frames</span></div>
+          <div class="tag w">25 → 23.976 fps</div>
+          <div class="tag b">Low · 30%</div>
+          <div class="took">4.3s</div>
+        </div>
+
+        <div class="detail">
+          <div class="dcols">
+            <div>
+              <h4>Measurement</h4>
+              <dl>
+                <div class="d"><dt>At start</dt><dd>−17 606.2 ms</dd></div>
+                <div class="d"><dt>At end</dt><dd>−18 961.4 ms</dd></div>
+                <div class="d"><dt>Windows</dt><dd>4 of 6</dd></div>
+              </dl>
+            </div>
+            <div>
+              <h4>Drift</h4>
+              <dl>
+                <div class="d"><dt>Rate</dt><dd>−0.192 ms/s</dd></div>
+                <div class="d"><dt>Total</dt><dd>−1 355.2 ms</dd></div>
+                <div class="d"><dt>Speed fix</dt><dd>1.000192×</dd></div>
+              </dl>
+            </div>
+            <div>
+              <h4>Sources</h4>
+              <dl>
+                <div class="d"><dt>Video</dt><dd>TrueHD · 23.976</dd></div>
+                <div class="d"><dt>Dub</dt><dd>E-AC3 · HIN</dd></div>
+                <div class="d"><dt>Lengths</dt><dd>1:57:26 / 2:02:01</dd></div>
+              </dl>
+            </div>
+          </div>
+
+          <p class="why">
+            The dub was timed against a <b>25 fps</b> source, but this video is <b>23.976 fps</b>.
+            Resampling corrects it exactly. <b>+5.3 ms</b> of codec delay was already removed.
+          </p>
+
+          <div class="acts">
+            <button class="act">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8V4z"/></svg>
+              Preview
+            </button>
+            <button class="act">Copy ffmpeg command</button>
+          </div>
+        </div>
+
+        <!-- closed row -->
+        <div class="row">
+          <div><input class="chk" type="checkbox" /></div>
+          <div class="who">
+            <div class="t">Matilda.the.Musical.2022.1080p.BluRay.REMUX.AVC.mkv</div>
+            <div class="u">Matilda_2022_ORG_Untouched_NF.eac3</div>
+          </div>
+          <div class="ms">−17606.2 ms<span>−422 frames</span></div>
+          <div class="tag w">25 → 23.976 fps</div>
+          <div class="tag b">Low · 29%</div>
+          <div class="took">12.2s</div>
+        </div>
+
+      </div>
+
+      <div class="foot">
+        <p><b>1 selected</b> — a corrected copy is written next to the original. Sources are never changed.</p>
+        <button class="ghost">Output folder</button>
+        <button class="fix">Fix 1 file</button>
+      </div>
+
+    </main>
+  </div>
+
+  <div class="status">
+    <span>Movie mode · 2 results</span>
+    <div class="grow"></div>
+    <span>Enter to analyse · Esc to stop</span>
+  </div>
+</div>
+</body>
+</html>

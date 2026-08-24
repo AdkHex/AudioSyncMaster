@@ -1,31 +1,18 @@
-import {
-  AlertTriangle,
-  Film,
-  GitCompare,
-  History as HistoryIcon,
-  Play,
-  Settings2,
-  Square,
-  Terminal,
-  Trash2,
-  Tv,
-} from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { AppHeader } from "@/components/AppHeader";
 import { ApplyProgressDialog, type ApplyState } from "@/components/ApplyProgressDialog";
 import { ConsolePanel } from "@/components/ConsolePanel";
-import { FilePanel } from "@/components/FilePanel";
 import { HistoryPanel } from "@/components/HistoryPanel";
+import { LiveAnnouncer } from "@/components/LiveAnnouncer";
 import { PairingPreview } from "@/components/PairingPreview";
 import { ProgressPanel } from "@/components/ProgressPanel";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
-import { TrackSelector } from "@/components/TrackSelector";
-import { LiveAnnouncer } from "@/components/LiveAnnouncer";
+import { Sidebar } from "@/components/Sidebar";
+import { StatusBar } from "@/components/StatusBar";
 import { UpdateDialog } from "@/components/UpdateDialog";
-import { Button, IconButton, Notice, StepHeader } from "@/components/ui";
-import { cx } from "@/lib/cx";
 import * as api from "@/lib/api";
 import {
   createHistoryEntry,
@@ -54,7 +41,7 @@ import type {
   TrackListing,
   SyncResult,
 } from "@/lib/types";
-import { MAX_COMPARE_INPUTS, formatSize, resultKey } from "@/lib/types";
+import { MAX_COMPARE_INPUTS, resultKey } from "@/lib/types";
 import {
   announceApplyFinished,
   announceProgress,
@@ -738,20 +725,6 @@ export default function Index() {
   const pairCount = effectivePairing?.pairs.length ?? 0;
   const busy = state.status === "processing";
   const hasResults = state.results.length > 0;
-  const hasFiles = state.videoFiles.length > 0 || state.audioFiles.length > 0;
-
-  // Step 1 collapses once satisfied, so attention moves down the column.
-  const selectionSummary = useMemo(() => {
-    if (!hasFiles) return null;
-    const count = state.videoFiles.length + state.audioFiles.length;
-    const bytes = [...state.videoFiles, ...state.audioFiles].reduce(
-      (sum, file) => sum + (file.size ?? 0),
-      0,
-    );
-    return `${count} file${count === 1 ? "" : "s"}${bytes > 0 ? ` · ${formatSize(bytes)}` : ""}`;
-  }, [hasFiles, state.videoFiles, state.audioFiles]);
-
-
 
   const toggleSelection = useCallback((key: string) => {
     setSelectedKeys((prev) => {
@@ -775,195 +748,117 @@ export default function Index() {
     setProbes({});
   }, []);
 
-  const modes = [
-    { id: "movie" as const, label: "Movies", Icon: Film },
-    { id: "series" as const, label: "Series", Icon: Tv },
-    { id: "compare" as const, label: "Compare", Icon: GitCompare },
-  ];
+  /** What the run button says, so the sidebar does not have to know the modes. */
+  const runLabel = pairCount > 0 ? `Analyse ${pairCount} pair${pairCount === 1 ? "" : "s"}` : "Analyse";
 
   return (
     <div className="flex h-screen flex-col bg-background">
-      <header className="flex h-[52px] shrink-0 items-center gap-3.5 border-b border-border bg-card px-4">
-        <div className="flex min-w-[150px] items-center gap-2.5">
-          <span className="grid h-[26px] w-[26px] place-items-center rounded-[7px] bg-foreground text-card">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M9 18V5l12-2v13" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-              <circle cx="6" cy="18" r="3" stroke="currentColor" strokeWidth="2.2" />
-              <circle cx="18" cy="16" r="3" stroke="currentColor" strokeWidth="2.2" />
-            </svg>
-          </span>
-          <h1 className="text-[13.5px] font-semibold tracking-tight">AudioSyncMaster</h1>
-        </div>
+      <AppHeader
+        mode={state.mode}
+        onModeChange={setMode}
+        disabled={busy}
+        showConsole={showConsole}
+        showHistory={showHistory}
+        onToggleConsole={() => setShowConsole((open) => !open)}
+        onToggleHistory={() => setShowHistory((open) => !open)}
+        onOpenSettings={() => setShowSettings(true)}
+      />
 
-        <div
-          className="mx-auto flex items-center gap-0.5 rounded-[9px] border border-border bg-sunken p-[3px]"
-          role="tablist"
-          aria-label="Sync mode"
-        >
-          {modes.map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={state.mode === id}
-              onClick={() => setMode(id)}
-              disabled={busy}
-              className={cx(
-                "flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-[12.5px] transition-colors disabled:opacity-40",
-                state.mode === id
-                  ? "bg-card font-semibold text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" aria-hidden />
-              {label}
-            </button>
-          ))}
-        </div>
+      <div className="relative flex min-h-0 flex-1">
+        <Sidebar
+          mode={state.mode}
+          videoFiles={state.videoFiles}
+          audioFiles={state.audioFiles}
+          videoFolder={state.videoFolder}
+          audioFolder={state.audioFolder}
+          recentFolders={recentFolders}
+          probes={probes}
+          dragTarget={dragTarget}
+          busy={busy}
+          videoTracks={videoTracks}
+          audioTracks={audioTracks}
+          videoTrack={videoTrack}
+          audioTrack={audioTrack}
+          onVideoTrackChange={setVideoTrack}
+          onAudioTrackChange={setAudioTrack}
+          onBrowse={(kind) => void handleBrowse(kind)}
+          onRemove={(kind, id) => dispatch({ type: "removeFiles", kind, ids: [id] })}
+          onClear={(kind) => dispatch({ type: "clearFiles", kind })}
+          onDragEnter={setDragTarget}
+          runLabel={runLabel}
+          canRun={selection.ok && desktop}
+          runBlockedReason={
+            !desktop ? "Analysis needs the desktop app." : (selection.reason ?? undefined)
+          }
+          onRun={() => void handleStart()}
+          onStop={() => void handleCancel()}
+        />
 
-        <div className="flex min-w-[150px] items-center justify-end gap-0.5">
-          <IconButton
-            label="Console"
-            active={showConsole}
-            onClick={() => setShowConsole((open) => !open)}
-          >
-            <Terminal className="h-4 w-4" aria-hidden />
-          </IconButton>
-          <IconButton
-            label="History (Ctrl+H)"
-            active={showHistory}
-            onClick={() => setShowHistory((open) => !open)}
-          >
-            <HistoryIcon className="h-4 w-4" aria-hidden />
-          </IconButton>
-          <span className="mx-1.5 h-[18px] w-px bg-border" />
-          <IconButton label="Settings (Ctrl+,)" onClick={() => setShowSettings(true)}>
-            <Settings2 className="h-4 w-4" aria-hidden />
-          </IconButton>
-        </div>
-      </header>
-
-      <main className="relative flex min-h-0 flex-1 overflow-hidden">
-        <div className="min-w-0 flex-1 overflow-y-auto px-6 py-7">
-          <div className="mx-auto flex max-w-[760px] flex-col gap-[22px]">
-            {!desktop && (
-              <Notice icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
-                <b className="font-semibold">Running in a browser.</b> File selection and
-                analysis need the desktop app.
-              </Notice>
-            )}
-
-            {/* -------------------------------------------------- step 1 */}
-            <StepHeader
-              index={1}
-              title="Select files"
-              state={hasFiles && selection.ok ? "done" : "active"}
-              aside={
-                selectionSummary ??
-                (state.mode === "movie"
-                  ? "Movie mode · many videos, one audio track"
-                  : "Series mode · one track per episode")
-              }
+        <main className="flex min-w-0 flex-1 flex-col">
+          {busy && (
+            <ProgressPanel
+              processed={state.progress.processed}
+              total={state.progress.total}
+              currentFile={state.currentFile}
+              fileProgress={state.fileProgress}
+              remainingMs={remainingMs}
             />
+          )}
 
-            <div
-              className="grid gap-3.5 md:grid-cols-2"
-              onDragOver={(event) => event.preventDefault()}
-            >
-              <div onDragEnter={() => setDragTarget("video")}>
-                <FilePanel
-                  kind="video"
-                  title="Video files"
-                  hint="The files whose timing is already correct. Drop a folder, or browse."
-                  files={state.videoFiles}
-                  folder={state.videoFolder}
-                  recentFolder={recentFolders.video}
-                  probes={probes}
-                  dragActive={dragTarget === "video"}
-                  disabled={busy}
-                  onBrowse={() => void handleBrowse("video")}
-                  onRemove={(id) => dispatch({ type: "removeFiles", kind: "video", ids: [id] })}
-                  onClear={() => dispatch({ type: "clearFiles", kind: "video" })}
+          {hasResults ? (
+            <ResultsPanel
+              results={state.results}
+              summary={state.summary}
+              selectedKeys={selectedKeys}
+              onToggleSelection={toggleSelection}
+              onToggleAll={toggleAll}
+              onExportCsv={() => void handleExport(state.results, "csv")}
+              onExportJson={() => void handleExport(state.results, "json")}
+              onApply={() => void handleApply()}
+              onCopy={(text) => void handleCopy(text)}
+              onPreview={(result) => void handlePreview(result)}
+              previewingKey={previewingKey}
+              applying={applying}
+              outputSuffix={settings.outputSuffix}
+            />
+          ) : (
+            /* Before a run, the main pane shows what will be compared. This is
+               the one thing worth checking before committing to a long job,
+               and it used to be squeezed between the inputs and the button. */
+            <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-[18px]">
+              {state.error ? (
+                <div className="mx-auto mt-[12vh] max-w-[420px] text-center">
+                  <p className="text-[13px] font-semibold text-destructive">
+                    The analysis could not finish.
+                  </p>
+                  <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">
+                    {state.error}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowConsole(true)}
+                    className="mt-3 text-[12.5px] font-medium text-primary hover:opacity-80"
+                  >
+                    Open the console
+                  </button>
+                </div>
+              ) : !desktop ? (
+                <EmptyState
+                  title="Running in a browser"
+                  body="File selection and analysis need the desktop app."
                 />
-              </div>
-              <div onDragEnter={() => setDragTarget("audio")}>
-                <FilePanel
-                  kind="audio"
-                  title={
+              ) : state.videoFiles.length === 0 && state.audioFiles.length === 0 ? (
+                <EmptyState
+                  title="Add files to begin"
+                  body={
                     state.mode === "movie"
-                      ? "Audio track"
+                      ? "Pick the videos whose timing is already correct, and the one audio track to align against them."
                       : state.mode === "compare"
-                        ? "Audio tracks to test"
-                        : "Audio files"
-                  }
-                  hint={
-                    state.mode === "movie"
-                      ? "The track to align against the videos. One file in movie mode."
-                      : state.mode === "compare"
-                        ? `Each is tested against every video. Up to ${MAX_COMPARE_INPUTS}.`
-                        : "One track per episode. Drop the folder, or browse."
-                  }
-                  files={state.audioFiles}
-                  folder={state.audioFolder}
-                  recentFolder={recentFolders.audio}
-                  probes={probes}
-                  dragActive={dragTarget === "audio"}
-                  disabled={busy}
-                  onBrowse={() => void handleBrowse("audio")}
-                  onRemove={(id) => dispatch({ type: "removeFiles", kind: "audio", ids: [id] })}
-                  onClear={() => dispatch({ type: "clearFiles", kind: "audio" })}
-                />
-              </div>
-            </div>
-
-            {state.mode === "compare" && (
-              <Notice tone="warning" icon={<GitCompare className="h-3.5 w-3.5" aria-hidden />}>
-                Every video is tested against every audio track, so you can see
-                which release a dub was timed for. Up to {MAX_COMPARE_INPUTS} files
-                per side; {state.videoFiles.length * state.audioFiles.length || 0}{" "}
-                combination
-                {state.videoFiles.length * state.audioFiles.length === 1 ? "" : "s"} queued.
-              </Notice>
-            )}
-
-            {(videoTracks || audioTracks) && (
-              <div className="grid gap-2 md:grid-cols-2">
-                {videoTracks && (
-                  <TrackSelector
-                    label="Video audio"
-                    tracks={videoTracks.tracks}
-                    value={videoTrack}
-                    onChange={setVideoTrack}
-                    disabled={busy}
-                    fps={videoTracks.fps}
-                  />
-                )}
-                {audioTracks && (
-                  <TrackSelector
-                    label="Dub track"
-                    tracks={audioTracks.tracks}
-                    value={audioTrack}
-                    onChange={setAudioTrack}
-                    disabled={busy}
-                    fps={audioTracks.fps}
-                  />
-                )}
-              </div>
-            )}
-
-            {/* -------------------------------------------------- step 2 */}
-            {!busy && (state.pairing || pairingLoading) && (
-              <>
-                <StepHeader
-                  index={2}
-                  title="Review pairing"
-                  state={pairCount > 0 ? "active" : "todo"}
-                  aside={
-                    state.pairing
-                      ? `${pairCount} pair${pairCount === 1 ? "" : "s"} · matched by ${effectivePairing?.method ?? state.pairing.method}`
-                      : undefined
+                        ? `Every video is tested against every audio track, so you can see which release a dub was timed for. Up to ${MAX_COMPARE_INPUTS} files per side.`
+                        : "Pick the episode folder and the folder of dubs. They are matched by season and episode number."
                   }
                 />
+              ) : state.pairing || pairingLoading ? (
                 <PairingPreview
                   pairing={effectivePairing}
                   loading={pairingLoading}
@@ -976,109 +871,19 @@ export default function Index() {
                   }
                   onResetRepairs={() => setPairOverrides({})}
                 />
-              </>
-            )}
-
-            {/* -------------------------------------------------- step 3 */}
-            <StepHeader
-              index={3}
-              title={busy ? "Analysing" : "Analyse"}
-              // Only "done" when this selection actually produced the results.
-              // Loading a past run leaves the selection empty, so the step is
-              // not something the user has completed here.
-              state={busy ? "active" : hasResults && selection.ok ? "done" : "todo"}
-            />
-
-            {busy && (
-              <ProgressPanel
-                processed={state.progress.processed}
-                total={state.progress.total}
-                currentFile={state.currentFile}
-                fileProgress={state.fileProgress}
-                remainingMs={remainingMs}
-                results={state.results}
-              />
-            )}
-
-            <div className="flex flex-wrap items-center gap-3">
-              {busy ? (
-                <>
-                  <Button size="lg" onClick={() => void handleCancel()}>
-                    <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
-                    Stop
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    Stops after the current file finishes.
-                  </span>
-                </>
               ) : (
-                <>
-                  <Button
-                    variant="primary"
-                    size="lg"
-                    onClick={() => void handleStart()}
-                    disabled={!selection.ok}
-                  >
-                    <Play className="h-4 w-4 fill-current" aria-hidden />
-                    {pairCount > 0
-                      ? `Analyse ${pairCount} pair${pairCount === 1 ? "" : "s"}`
-                      : "Analyse"}
-                  </Button>
-
-                  {(hasFiles || hasResults) && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        dispatch({ type: "clearAll" });
-                        setSelectedKeys(new Set());
-                        setProbes({});
-                      }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" aria-hidden />
-                      Clear all
-                    </Button>
-                  )}
-
-                  {/* A disabled button that explains itself, rather than one
-                      that simply sits there dead. Suppressed while nothing is
-                      selected at all, where the empty drop zones already say it. */}
-                  {!selection.ok && hasFiles && (
-                    <span className="text-xs text-muted-foreground">{selection.reason}</span>
-                  )}
-                </>
+                <EmptyState
+                  title={selection.ok ? "Ready" : "Not ready yet"}
+                  body={
+                    selection.ok
+                      ? "Run the analysis to measure the delay for each pair."
+                      : (selection.reason ?? "Add files on both sides.")
+                  }
+                />
               )}
             </div>
-
-            {state.error && (
-              <Notice tone="destructive" icon={<AlertTriangle className="h-3.5 w-3.5" aria-hidden />}>
-                <b className="font-semibold">The analysis could not finish.</b> {state.error}
-              </Notice>
-            )}
-
-            {/* -------------------------------------------------- step 4 */}
-            {hasResults && (
-              <>
-                <StepHeader index={4} title="Review &amp; fix" state="active" />
-                <ResultsPanel
-                  results={state.results}
-                  summary={state.summary}
-                  selectedKeys={selectedKeys}
-                  onToggleSelection={toggleSelection}
-                  onToggleAll={toggleAll}
-                  onExportCsv={() => void handleExport(state.results, "csv")}
-                  onExportJson={() => void handleExport(state.results, "json")}
-                  onApply={() => void handleApply()}
-                  onCopy={(text) => void handleCopy(text)}
-                  onPreview={(result) => void handlePreview(result)}
-                  previewingKey={previewingKey}
-                  applying={applying}
-                  outputSuffix={settings.outputSuffix}
-                />
-              </>
-            )}
-          </div>
-        </div>
+          )}
+        </main>
 
         {showHistory && (
           <HistoryPanel
@@ -1100,7 +905,7 @@ export default function Index() {
             onClear={() => persistHistory([])}
           />
         )}
-      </main>
+      </div>
 
       {showConsole && (
         <ConsolePanel
@@ -1111,23 +916,14 @@ export default function Index() {
         />
       )}
 
-      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
-        <span>
-          {state.mode === "movie"
-            ? "Movie"
-            : state.mode === "compare"
-              ? "Compare"
-              : "Series"}{" "}
-          mode
-          {hasResults && ` · ${state.results.length} result${state.results.length === 1 ? "" : "s"}`}
-        </span>
-        <span className="flex gap-3.5">
-          <Shortcut keys="↵" label="analyse" />
-          <Shortcut keys="esc" label="stop" />
-          <Shortcut keys="⌃H" label="history" />
-          <Shortcut keys="⌃," label="settings" />
-        </span>
-      </footer>
+      <StatusBar
+        mode={state.mode}
+        pairCount={pairCount}
+        resultCount={state.results.length}
+        summary={state.summary}
+        busy={busy}
+        version={APP_VERSION}
+      />
 
       <SettingsDialog
         open={showSettings}
@@ -1153,13 +949,15 @@ export default function Index() {
   );
 }
 
-function Shortcut({ keys, label }: { keys: string; label: string }) {
+/** A short, centred explanation of what to do next.
+ *
+ *  Deliberately the only centred thing in the app: it marks a pane that has
+ *  nothing in it, so there is no content for it to compete with. */
+function EmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <span className="flex items-center gap-1.5">
-      <kbd className="rounded border border-border-strong border-b-2 bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-        {keys}
-      </kbd>
-      {label}
-    </span>
+    <div className="mx-auto mt-[12vh] max-w-[420px] text-center">
+      <p className="text-[13px] font-semibold">{title}</p>
+      <p className="mt-1.5 text-[12.5px] leading-relaxed text-muted-foreground">{body}</p>
+    </div>
   );
 }

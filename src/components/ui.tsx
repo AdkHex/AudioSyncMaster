@@ -113,6 +113,36 @@ export function Pill({ tone = "neutral", className, ...props }: PillProps) {
   );
 }
 
+// ------------------------------------------------------------------------ tag
+
+type TagTone = "neutral" | "success" | "warning" | "destructive";
+
+const TAG_TONES: Record<TagTone, string> = {
+  neutral: "text-muted-foreground",
+  success: "text-success",
+  warning: "text-warning",
+  destructive: "text-destructive",
+};
+
+/** A status word carrying its meaning in colour alone.
+ *
+ *  A filled, bordered pill is three visual devices for one piece of
+ *  information. In a list where most rows carry two of them, that reads as
+ *  clutter; coloured text says the same thing and lets the filenames stay the
+ *  loudest element in the row. */
+export function Tag({
+  tone = "neutral",
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLSpanElement> & { tone?: TagTone }) {
+  return (
+    <span
+      className={cx("whitespace-nowrap text-[11.5px]", TAG_TONES[tone], className)}
+      {...props}
+    />
+  );
+}
+
 // ----------------------------------------------------------------------- card
 
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
@@ -156,112 +186,6 @@ export function Notice({ tone = "warning", icon, className, children, ...props }
       {icon && <span className="mt-px shrink-0">{icon}</span>}
       <span className="min-w-0">{children}</span>
     </div>
-  );
-}
-
-// ----------------------------------------------------------------- step header
-
-interface StepHeaderProps {
-  index: number;
-  title: string;
-  state: "todo" | "active" | "done";
-  aside?: React.ReactNode;
-}
-
-/** The spine of the guided flow: Select -> Review -> Analyse -> Fix. */
-export function StepHeader({ index, title, state, aside }: StepHeaderProps) {
-  return (
-    <div className="flex items-center gap-3">
-      <span
-        className={cx(
-          "grid h-[21px] w-[21px] shrink-0 place-items-center rounded-full border text-[11px] font-semibold",
-          state === "done" && "border-success bg-success text-success-foreground",
-          state === "active" && "border-primary bg-primary text-primary-foreground",
-          state === "todo" && "border-border-strong bg-card text-muted-foreground",
-        )}
-      >
-        {state === "done" ? (
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
-        ) : (
-          index
-        )}
-      </span>
-      <h2
-        className={cx(
-          "text-xs font-semibold uppercase tracking-[0.06em]",
-          state === "todo" ? "text-muted-foreground" : "text-foreground",
-        )}
-      >
-        {title}
-      </h2>
-      <span className="h-px flex-1 bg-border" />
-      {aside && <span className="shrink-0 text-[11px] text-muted-foreground">{aside}</span>}
-    </div>
-  );
-}
-
-// -------------------------------------------------------------------- overlays
-
-interface ScrimProps {
-  onClose: () => void;
-  className?: string;
-}
-
-export function Scrim({ onClose, className }: ScrimProps) {
-  return (
-    <div
-      className={cx("absolute inset-0 z-40 animate-fade-in bg-black/50 backdrop-blur-[2px]", className)}
-      onMouseDown={onClose}
-      aria-hidden
-    />
-  );
-}
-
-/** Checkbox styled to match the mockup. Native input kept for accessibility and
- *  keyboard behaviour; the visual is drawn on top of it. */
-interface CheckboxProps {
-  checked: boolean;
-  onChange: () => void;
-  disabled?: boolean;
-  label: string;
-  indeterminate?: boolean;
-}
-
-export function Checkbox({ checked, onChange, disabled, label, indeterminate }: CheckboxProps) {
-  return (
-    <span className="relative inline-flex h-[15px] w-[15px] shrink-0 align-middle">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={onChange}
-        disabled={disabled}
-        aria-label={label}
-        className="peer absolute inset-0 z-10 m-0 cursor-pointer opacity-0 disabled:cursor-not-allowed"
-      />
-      <span
-        aria-hidden
-        className={cx(
-          "pointer-events-none grid h-[15px] w-[15px] place-items-center rounded border-[1.5px] transition-colors",
-          "peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-card",
-          checked || indeterminate
-            ? "border-primary bg-primary text-primary-foreground"
-            : "border-border-strong bg-card",
-          disabled && "opacity-40",
-        )}
-      >
-        {indeterminate && !checked ? (
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round">
-            <path d="M6 12h12" />
-          </svg>
-        ) : checked ? (
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.6" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
-        ) : null}
-      </span>
-    </span>
   );
 }
 

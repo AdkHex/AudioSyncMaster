@@ -1,7 +1,6 @@
-import { FileAudio, FileVideo, FolderOpen, Music, Trash2, Upload, X } from "lucide-react";
+import { X } from "lucide-react";
 import { memo, useMemo } from "react";
 
-import { Button, Card, CardHeader, IconButton, Pill } from "@/components/ui";
 import { cx } from "@/lib/cx";
 import { formatDuration, formatSize, type FileItem, type MediaProbe } from "@/lib/types";
 
@@ -20,8 +19,11 @@ interface FilePanelProps {
   onClear: () => void;
 }
 
-/** One column of the selection step: an empty drop target, or the chosen files
- *  with their probed duration and stream status. */
+/** One input group in the sidebar.
+ *
+ *  A plain list rather than a bordered card: the heading and the spacing
+ *  already group these rows, so a box around them is a third device doing the
+ *  same job. */
 export const FilePanel = memo(function FilePanel({
   kind,
   title,
@@ -36,143 +38,115 @@ export const FilePanel = memo(function FilePanel({
   onRemove,
   onClear,
 }: FilePanelProps) {
-  const Icon = kind === "video" ? FolderOpen : Music;
-  const FileIcon = kind === "video" ? FileVideo : FileAudio;
-
   const totalSize = useMemo(
     () => files.reduce((sum, file) => sum + (file.size ?? 0), 0),
     [files],
   );
 
-  // Empty: a real drop target rather than a bordered box with a sentence in it.
-  if (files.length === 0) {
-    return (
-      <section
-        aria-label={title}
-        className={cx(
-          "flex min-h-[196px] flex-col items-center justify-center gap-2.5 rounded-xl border-[1.5px] border-dashed px-5 py-7 text-center transition-colors",
-          dragActive
-            ? "border-solid border-primary bg-accent ring-4 ring-primary/20"
-            : "border-border-strong bg-card",
-        )}
-      >
-        <span
-          className={cx(
-            "grid h-[42px] w-[42px] place-items-center rounded-[11px] transition-colors",
-            dragActive ? "bg-primary text-primary-foreground" : "bg-sunken text-muted-foreground",
-          )}
-        >
-          {dragActive ? (
-            <Upload className="h-5 w-5" aria-hidden />
-          ) : (
-            <Icon className="h-5 w-5" aria-hidden />
-          )}
-        </span>
-
-        <h3 className={cx("text-[13px] font-semibold", dragActive && "text-primary")}>
-          {dragActive ? `Drop to add ${kind} files` : title}
-        </h3>
-
-        {!dragActive && (
-          <>
-            <p className="max-w-[30ch] text-[11.5px] leading-relaxed text-muted-foreground">
-              {hint}
-            </p>
-            <Button size="sm" onClick={onBrowse} disabled={disabled} className="mt-0.5">
-              Browse…
-            </Button>
-            {recentFolder && (
-              <p
-                className="max-w-full truncate font-mono text-[11px] text-muted-foreground/70"
-                title={recentFolder}
-              >
-                Last used: {recentFolder}
-              </p>
-            )}
-          </>
-        )}
-      </section>
-    );
-  }
-
   return (
-    <Card
-      aria-label={title}
-      className={cx(
-        "flex flex-col transition-colors",
-        dragActive && "border-primary ring-4 ring-primary/20",
-      )}
-    >
-      <CardHeader>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-[13px] font-semibold">{title}</h3>
-          <p className="mt-px text-[11.5px] text-muted-foreground">
-            {files.length} file{files.length === 1 ? "" : "s"} · {formatSize(totalSize)}
-          </p>
-        </div>
-        <IconButton
-          label={`Clear ${title.toLowerCase()}`}
-          onClick={onClear}
-          disabled={disabled}
-          className="hover:text-destructive"
-        >
-          <Trash2 className="h-3.5 w-3.5" aria-hidden />
-        </IconButton>
-        <Button size="sm" onClick={onBrowse} disabled={disabled}>
-          Browse
-        </Button>
-      </CardHeader>
-
-      <ul className="flex max-h-[190px] flex-col gap-0.5 overflow-y-auto p-1.5">
-        {files.map((file) => {
-          const probe = probes[file.path];
-          const streamMissing = probe && (kind === "video" ? !probe.hasVideo : !probe.hasAudio);
-          return (
-            <li
-              key={file.id}
-              className="group flex items-center gap-2.5 rounded-md px-2.5 py-2 hover:bg-sunken"
+    <section aria-label={title}>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <h2 className="text-[11px] font-semibold text-muted-foreground">{title}</h2>
+        {files.length > 0 ? (
+          <div className="flex items-baseline gap-2.5">
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={disabled}
+              className="text-[11.5px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
             >
-              <FileIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="min-w-0 flex-1 truncate text-xs" title={file.name}>
-                {file.name}
-              </span>
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={onBrowse}
+              disabled={disabled}
+              className="text-[11.5px] font-medium text-primary transition-opacity hover:opacity-80 disabled:opacity-40"
+            >
+              Change
+            </button>
+          </div>
+        ) : null}
+      </div>
 
-              {probe?.duration != null && (
-                <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
-                  {formatDuration(probe.duration)}
-                </span>
-              )}
-              <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
-                {formatSize(file.size)}
-              </span>
-
-              {streamMissing && (
-                <Pill tone="destructive">No {kind === "video" ? "video" : "audio"}</Pill>
-              )}
-
-              <button
-                type="button"
-                onClick={() => onRemove(file.id)}
-                disabled={disabled}
-                title={`Remove ${file.name}`}
-                className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-destructive/15 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
-              >
-                <X className="h-3 w-3" aria-hidden />
-                <span className="sr-only">Remove {file.name}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-
-      {folder && (
-        <footer
-          className="truncate border-t border-border px-4 py-2 font-mono text-[11px] text-muted-foreground"
-          title={folder}
+      {files.length === 0 ? (
+        <button
+          type="button"
+          onClick={onBrowse}
+          disabled={disabled}
+          className={cx(
+            "w-full rounded-[9px] border border-dashed px-3.5 py-6 text-center text-xs transition-colors disabled:opacity-40",
+            dragActive
+              ? "border-primary/60 bg-primary/5 text-primary"
+              : "border-border-strong text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground",
+          )}
         >
-          {folder}
-        </footer>
+          {dragActive ? `Drop to add ${kind} files` : hint}
+        </button>
+      ) : (
+        <>
+          <ul className="flex flex-col">
+            {files.map((file) => {
+              const probe = probes[file.path];
+              const missing =
+                probe && (kind === "video" ? !probe.hasVideo : !probe.hasAudio);
+
+              return (
+                <li key={file.id} className="group flex items-baseline gap-2 py-[3px]">
+                  <span
+                    className="min-w-0 flex-1 truncate text-[12.5px]"
+                    title={file.name}
+                  >
+                    {file.name}
+                  </span>
+
+                  {missing ? (
+                    <span className="shrink-0 text-[11px] text-destructive">
+                      no {kind === "video" ? "video" : "audio"}
+                    </span>
+                  ) : probe?.duration ? (
+                    <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
+                      {formatDuration(probe.duration)}
+                    </span>
+                  ) : null}
+
+                  <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">
+                    {formatSize(file.size)}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => onRemove(file.id)}
+                    disabled={disabled}
+                    className="-mr-1 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 disabled:opacity-0"
+                  >
+                    <X className="h-3 w-3" aria-hidden />
+                    <span className="sr-only">Remove {file.name}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+
+          <p className="mt-1.5 flex items-baseline justify-between gap-2 font-mono text-[10.5px] text-muted-foreground">
+            <span className="min-w-0 truncate" title={folder ?? undefined}>
+              {folder ?? ""}
+            </span>
+            {files.length > 1 && (
+              <span className="tabular shrink-0">{formatSize(totalSize)}</span>
+            )}
+          </p>
+        </>
       )}
-    </Card>
+
+      {files.length === 0 && recentFolder && (
+        <p
+          className="mt-2 truncate font-mono text-[10.5px] text-muted-foreground"
+          title={recentFolder}
+        >
+          {recentFolder}
+        </p>
+      )}
+    </section>
   );
 });
