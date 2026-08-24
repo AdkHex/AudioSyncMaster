@@ -20,6 +20,8 @@ that works and what you have to do.
 
 That is the whole process. CI then:
 
+- refuses to build at all if `v<version>` is already released, or if the four
+  version sources disagree
 - runs the full test suite on Linux, Windows and macOS, plus Rust checks
 - builds installers for all three platforms
 - signs the updater artifacts with the private key held in GitHub Secrets
@@ -28,6 +30,18 @@ That is the whole process. CI then:
   every installed app
 
 Nothing is published unless the tests pass first.
+
+### Forgetting the bump
+
+Pushing without bumping used to be the quiet failure mode: the run went green,
+the commit looked shipped, and nothing reached users — `tauri-action` will not
+overwrite a tag that already exists, so it published nothing and said so only
+in the log. That is why the `Version is releasable` job exists. It runs first,
+takes seconds, and fails the whole workflow with a message naming the files to
+edit.
+
+If you see that failure, bump and push again; there is nothing to clean up,
+because the stale run published nothing.
 
 ## What users see
 

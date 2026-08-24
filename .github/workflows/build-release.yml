@@ -11,6 +11,49 @@ permissions:
   contents: write
 
 jobs:
+  # A push whose version already has a tag builds green and publishes nothing,
+  # because tauri-action will not overwrite an existing release. The commit then
+  # looks shipped -- green check, successful run -- while every installed app
+  # stays on the old build. Catch that here, in seconds, rather than after three
+  # platforms have each spent eight minutes building something discardable.
+  version:
+    name: Version is releasable
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.read.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: read
+        run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check the version is not already released
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="v${{ steps.read.outputs.value }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag is already released. Bump the version in package.json, \
+          src-tauri/tauri.conf.json, src-tauri/Cargo.toml and both lockfiles, or this \
+          commit will never reach installed apps."
+            exit 1
+          fi
+          echo "$tag has not been released yet."
+
+      - name: Check every version source agrees
+        run: |
+          pkg="${{ steps.read.outputs.value }}"
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cargo=$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "package.json=$pkg tauri.conf.json=$conf Cargo.toml=$cargo"
+          if [ "$pkg" != "$conf" ] || [ "$pkg" != "$cargo" ]; then
+            echo "::error::Version mismatch. CI tags from package.json, but the app \
+          reports tauri.conf.json -- if they disagree the updater compares the wrong number."
+            exit 1
+          fi
+
   # Nothing is published unless this passes first. The original workflow tagged
   # and released on every push with no verification at all.
   test:
@@ -104,7 +147,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
-    needs: [test, rust]
+    needs: [version, test, rust]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
