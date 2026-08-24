@@ -50,6 +50,47 @@ def test_rates_are_identified_without_metadata():
     assert result.source_fps and result.target_fps
 
 
+def test_the_named_conversion_describes_the_audio_not_the_video():
+    """source_fps is the rate the AUDIO was timed at; target_fps is the video's.
+
+    It is the audio that gets resampled, so a diagnosis reading
+    "video_fps -> audio_fps" tells the user the opposite of what will happen.
+    The two code paths -- both rates known, and rates inferred from the drift
+    alone -- must agree on that direction, and previously did not: the search
+    path named the video's rate as the source.
+    """
+    # Both rates known: 25fps audio laid against a 23.976fps video.
+    known = diagnose(_drift_for(23.976, 25.0), primary_fps=23.976, secondary_fps=25.0)
+    assert known is not None and known.is_rate_mismatch
+    assert known.source_fps == 25.0, "source_fps must be the audio's rate"
+    assert known.target_fps == 23.976, "target_fps must be the video's rate"
+
+    # Same physical situation, but only the video's rate is known, so the pair
+    # is recovered by search. It must describe the same conversion.
+    inferred = diagnose(_drift_for(23.976, 25.0), primary_fps=23.976)
+    assert inferred is not None and inferred.is_rate_mismatch
+    assert inferred.source_fps == 25.0, "search path inverted the direction"
+    assert inferred.target_fps == 23.976
+
+
+def test_a_24fps_dub_against_a_23_976_video_is_named_that_way_round():
+    """The common NTSC film case, reported from the field.
+
+    A dub timed at 24fps against a 23.976fps release drifts by ~-0.998 ms/s.
+    The fix resamples the audio from 24 down to 23.976; reporting
+    "23.976 -> 24" reads as though the video were being changed.
+    """
+    result = diagnose(-0.998, primary_fps=23.976)
+    assert result is not None and result.is_rate_mismatch
+    assert result.source_fps == 24.0
+    assert result.target_fps == 23.976
+    assert "24fps source" in result.explanation
+    assert "video is 23.976fps" in result.explanation
+
+    # And the correction must slow the audio down, not speed it up.
+    assert result.correction_ratio is not None and result.correction_ratio < 1.0
+
+
 def test_extreme_drift_is_reported_as_a_cut():
     """Runtimes diverging this fast are different edits, not a rate issue."""
     result = diagnose(MAX_RATE_DRIFT_MS_PER_S * 2)

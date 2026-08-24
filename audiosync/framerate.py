@@ -144,30 +144,35 @@ def diagnose(
             )
 
     # Otherwise search the common rate pairs for one that fits the measurement.
+    #
+    # speed_ratio is how much faster the secondary runs than the primary, so a
+    # candidate pair fits when audio_fps / video_fps equals it. Naming the
+    # variables that way round matters: it is the audio that gets resampled, so
+    # source_fps must be the rate the audio was timed at and target_fps the
+    # video's rate it has to become. Deriving them the other way round reports a
+    # correction that reads as though the video were being changed.
     best: Optional[tuple] = None
-    for source in COMMON_RATES:
-        for target in COMMON_RATES:
-            if source == target:
+    for audio_fps in COMMON_RATES:
+        for video_fps in COMMON_RATES:
+            if video_fps == audio_fps:
                 continue
-            ratio = target / source
+            ratio = audio_fps / video_fps
             error = abs(ratio - speed_ratio) / max(ratio, 1e-9)
             if error <= RATIO_TOLERANCE and (best is None or error < best[0]):
-                best = (error, source, target, ratio)
+                best = (error, audio_fps, video_fps, ratio)
 
     if best is not None:
-        _, source, target, ratio = best
+        _, audio_fps, video_fps, ratio = best
         return RateDiagnosis(
             drift_ms_per_s=drift_ms_per_s,
             speed_ratio=ratio,
-            source_fps=source,
-            target_fps=target,
+            source_fps=audio_fps,
+            target_fps=video_fps,
             is_rate_mismatch=True,
             explanation=(
-                f"The drift matches a {_format_fps(source)}fps to "
-                f"{_format_fps(target)}fps conversion. Resampling the audio "
-                "corrects it exactly."
-                if source and target
-                else "The audio runs at a slightly different speed. Resampling corrects it."
+                f"The audio was timed against a {_format_fps(audio_fps)}fps "
+                f"source, but this video is {_format_fps(video_fps)}fps. "
+                "Resampling the audio corrects it exactly."
             ),
         )
 
