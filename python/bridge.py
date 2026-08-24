@@ -34,8 +34,10 @@ for candidate in (BASE_DIR, ROOT_DIR):
 try:
     from audiosync.batch import BatchEvents, BatchOptions, run_batch, summarize
     from audiosync.matching import (
+        MAX_COMPARE_INPUTS,
         list_media,
         match_folders,
+        pair_every_combination,
         pair_movie_mode,
         validate_pattern,
     )
@@ -144,6 +146,50 @@ def handle_analyze(request: dict) -> None:
             }
         )
 
+    elif mode == "compare":
+        # Every video against every audio: answers "which release was this dub
+        # timed for?" rather than assuming the pairing is already known.
+        video_files = [p for p in (request.get("videoFiles") or []) if os.path.isfile(p)]
+        audio_files = [p for p in (request.get("audioFiles") or []) if os.path.isfile(p)]
+
+        if not video_files or not audio_files:
+            emit_error(
+                "Compare mode needs at least one video and one audio file.", fatal=True
+            )
+            emit({"type": "done", "results": [], "summary": summarize([])})
+            return
+
+        if len(video_files) > MAX_COMPARE_INPUTS or len(audio_files) > MAX_COMPARE_INPUTS:
+            emit_error(
+                f"Compare mode allows up to {MAX_COMPARE_INPUTS} files per side; "
+                f"got {len(video_files)} video and {len(audio_files)} audio. "
+                "The work grows as the product of both sides.",
+                fatal=True,
+            )
+            emit({"type": "done", "results": [], "summary": summarize([])})
+            return
+
+        pairs = pair_every_combination(
+            video_files,
+            audio_files,
+            primary_track=int(request.get("videoTrack", 0) or 0),
+            secondary_track=int(request.get("audioTrack", 0) or 0),
+        )
+        emit_log(
+            f"Comparing {len(video_files)} video file(s) against "
+            f"{len(audio_files)} audio file(s): {len(pairs)} combinations."
+        )
+        emit(
+            {
+                "type": "pairs",
+                "pairs": [pair.to_dict() for pair in pairs],
+                "method": "every combination",
+                "unmatchedPrimary": [],
+                "unmatchedSecondary": [],
+                "warning": None,
+            }
+        )
+
     elif mode == "series":
         video_folder = request.get("videoFolder")
         audio_folder = request.get("audioFolder")
@@ -214,6 +260,27 @@ def handle_preview_pairs(request: dict) -> None:
             pattern,
         )
         emit({"type": "pairs", **report.to_dict()})
+        return
+
+    if mode == "compare":
+        videos = [p for p in (request.get("videoFiles") or []) if os.path.isfile(p)]
+        audios = [p for p in (request.get("audioFiles") or []) if os.path.isfile(p)]
+        pairs = pair_every_combination(videos, audios)
+        over = len(videos) > MAX_COMPARE_INPUTS or len(audios) > MAX_COMPARE_INPUTS
+        emit(
+            {
+                "type": "pairs",
+                "pairs": [pair.to_dict() for pair in pairs],
+                "method": "every combination",
+                "unmatchedPrimary": [],
+                "unmatchedSecondary": [],
+                "warning": (
+                    f"Up to {MAX_COMPARE_INPUTS} files per side are allowed."
+                    if over
+                    else None
+                ),
+            }
+        )
         return
 
     audio_file = request.get("audioFile") or ""

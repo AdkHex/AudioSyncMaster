@@ -81,6 +81,22 @@ updates work normally from then on.
 npx tauri signer generate -w ~/.tauri/audiosync.key
 ```
 
+## The packaged engine
+
+The Python engine ships as a PyInstaller **directory** build under
+`src-tauri/resources/engine`, not as a single-file executable and not as a
+Tauri `externalBin`.
+
+This is deliberate. A `--onefile` build re-extracts its entire payload to a
+temp directory on every launch; measured cold start was 32-63 seconds per run
+on macOS once Gatekeeper rescanned the unpacked copy. The directory build
+starts in ~0.12s because nothing is unpacked. A directory cannot be an
+`externalBin`, hence the resource folder.
+
+CI verifies the packaged engine both starts *and* measures a known fixture
+correctly, since a build that launches but computes garbage would otherwise
+ship unnoticed.
+
 ## Platform notes
 
 - **Windows** — the NSIS installer is used for updates (`updaterJsonPreferNsis`).

@@ -7,6 +7,7 @@ import {
   validateSelection,
   type SyncState,
 } from "./syncReducer";
+import { MAX_COMPARE_INPUTS } from "./types";
 import type { FileItem, SyncResult } from "./types";
 
 function file(name: string, kind: "video" | "audio" = "video", folder = "/media"): FileItem {
@@ -240,6 +241,35 @@ describe("validation", () => {
       { type: "addFiles", kind: "audio", files: [file("a.ac3", "audio")] },
     );
     expect(validateSelection(state).ok).toBe(false);
+  });
+
+  it("accepts a compare-mode selection with several files per side", () => {
+    const state = reduce(
+      { ...initialSyncState, mode: "compare" },
+      { type: "addFiles", kind: "video", files: [file("a.mkv"), file("b.mkv")] },
+      {
+        type: "addFiles",
+        kind: "audio",
+        files: [file("x.ac3", "audio"), file("y.ac3", "audio")],
+      },
+    );
+    expect(validateSelection(state).ok).toBe(true);
+  });
+
+  it("rejects a compare-mode selection over the per-side cap", () => {
+    // The work is the product of both sides, so an unbounded selection could
+    // queue hundreds of analyses from two careless folder picks.
+    const many = Array.from({ length: MAX_COMPARE_INPUTS + 1 }, (_, i) =>
+      file(`v${i}.mkv`),
+    );
+    const state = reduce(
+      { ...initialSyncState, mode: "compare" },
+      { type: "addFiles", kind: "video", files: many },
+      { type: "addFiles", kind: "audio", files: [file("x.ac3", "audio")] },
+    );
+    const check = validateSelection(state);
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/up to/i);
   });
 
   it("accepts a complete movie-mode selection", () => {

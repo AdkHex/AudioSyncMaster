@@ -358,3 +358,39 @@ def pair_movie_mode(
         )
         for video_path in video_paths
     ]
+
+
+# Comparing everything against everything grows as the product of both sides, so
+# a careless selection could queue hundreds of analyses. Five references against
+# five dubs is 25 pairs, which is already a long run.
+MAX_COMPARE_INPUTS = 5
+
+
+def pair_every_combination(
+    video_paths: Sequence[str],
+    audio_paths: Sequence[str],
+    primary_track: int = 0,
+    secondary_track: int = 0,
+) -> List[MatchPair]:
+    """Pair every video with every audio track.
+
+    Answers a question the one-to-one modes cannot: *which* release was this dub
+    timed against? A dub synced to a WEB-DL will drift steadily against a BluRay
+    with different framing, and comparing both at once shows immediately which
+    one it belongs to.
+    """
+    pairs: List[MatchPair] = []
+    for video_path in video_paths:
+        for audio_path in audio_paths:
+            pairs.append(
+                MatchPair(
+                    video_path,
+                    audio_path,
+                    f"{os.path.basename(video_path)}::{os.path.basename(audio_path)}",
+                    "every combination",
+                    1.0,
+                    primary_track=primary_track,
+                    secondary_track=secondary_track,
+                )
+            )
+    return pairs

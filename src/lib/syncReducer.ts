@@ -7,6 +7,7 @@
  *  owner, and streamed results are merged by identity rather than appended
  *  blindly. */
 
+import { MAX_COMPARE_INPUTS } from "./types";
 import type {
   FileItem,
   PairingReport,
@@ -269,10 +270,28 @@ export function validateSelection(state: SyncState): { ok: boolean; reason?: str
   if (state.audioFiles.length === 0) {
     return {
       ok: false,
-      reason: state.mode === "movie"
-        ? "Choose the audio file to sync against."
-        : "Choose the folder containing the audio tracks.",
+      reason:
+        state.mode === "movie"
+          ? "Choose the audio file to sync against."
+          : state.mode === "compare"
+            ? "Add the audio tracks to test."
+            : "Choose the folder containing the audio tracks.",
     };
+  }
+  if (state.mode === "compare") {
+    if (state.videoFiles.length > MAX_COMPARE_INPUTS) {
+      return {
+        ok: false,
+        reason: `Compare mode allows up to ${MAX_COMPARE_INPUTS} video files.`,
+      };
+    }
+    if (state.audioFiles.length > MAX_COMPARE_INPUTS) {
+      return {
+        ok: false,
+        reason: `Compare mode allows up to ${MAX_COMPARE_INPUTS} audio files.`,
+      };
+    }
+    return { ok: true };
   }
   if (state.mode === "series" && !state.audioFolder) {
     return { ok: false, reason: "Series mode needs an audio folder." };

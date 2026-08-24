@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Film,
+  GitCompare,
   History as HistoryIcon,
   Play,
   Settings2,
@@ -51,7 +52,7 @@ import type {
   TrackListing,
   SyncResult,
 } from "@/lib/types";
-import { formatSize, resultKey } from "@/lib/types";
+import { MAX_COMPARE_INPUTS, formatSize, resultKey } from "@/lib/types";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
 
 /** Injected from package.json at build time, so Settings always reports the
@@ -375,6 +376,7 @@ export default function Index() {
       audioFolder: current.mode === "series" ? current.audioFolder : null,
       audioFile: current.mode === "movie" ? (current.audioFiles[0]?.path ?? null) : null,
       videoFiles: current.videoFiles.map((file) => file.path),
+      audioFiles: current.audioFiles.map((file) => file.path),
       matchPattern:
         current.mode === "series" && config.matchPattern.trim()
           ? config.matchPattern
@@ -665,6 +667,7 @@ export default function Index() {
   const modes = [
     { id: "movie" as const, label: "Movies", Icon: Film },
     { id: "series" as const, label: "Series", Icon: Tv },
+    { id: "compare" as const, label: "Compare", Icon: GitCompare },
   ];
 
   return (
@@ -775,11 +778,19 @@ export default function Index() {
               <div onDragEnter={() => setDragTarget("audio")}>
                 <FilePanel
                   kind="audio"
-                  title={state.mode === "movie" ? "Audio track" : "Audio files"}
+                  title={
+                    state.mode === "movie"
+                      ? "Audio track"
+                      : state.mode === "compare"
+                        ? "Audio tracks to test"
+                        : "Audio files"
+                  }
                   hint={
                     state.mode === "movie"
                       ? "The track to align against the videos. One file in movie mode."
-                      : "One track per episode. Drop the folder, or browse."
+                      : state.mode === "compare"
+                        ? `Each is tested against every video. Up to ${MAX_COMPARE_INPUTS}.`
+                        : "One track per episode. Drop the folder, or browse."
                   }
                   files={state.audioFiles}
                   folder={state.audioFolder}
@@ -793,6 +804,16 @@ export default function Index() {
                 />
               </div>
             </div>
+
+            {state.mode === "compare" && (
+              <Notice tone="warning" icon={<GitCompare className="h-3.5 w-3.5" aria-hidden />}>
+                Every video is tested against every audio track, so you can see
+                which release a dub was timed for. Up to {MAX_COMPARE_INPUTS} files
+                per side; {state.videoFiles.length * state.audioFiles.length || 0}{" "}
+                combination
+                {state.videoFiles.length * state.audioFiles.length === 1 ? "" : "s"} queued.
+              </Notice>
+            )}
 
             {(videoTracks || audioTracks) && (
               <div className="grid gap-2 md:grid-cols-2">
@@ -968,7 +989,12 @@ export default function Index() {
 
       <footer className="flex h-7 shrink-0 items-center justify-between border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
         <span>
-          {state.mode === "movie" ? "Movie" : "Series"} mode
+          {state.mode === "movie"
+            ? "Movie"
+            : state.mode === "compare"
+              ? "Compare"
+              : "Series"}{" "}
+          mode
           {hasResults && ` · ${state.results.length} result${state.results.length === 1 ? "" : "s"}`}
         </span>
         <span className="flex gap-3.5">

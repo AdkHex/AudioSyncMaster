@@ -34,6 +34,35 @@ audio starts early and silence is inserted instead.
 This is asserted directly by `tests/test_correlate.py` and verified end to end
 by a real mux round-trip in `tests/test_mux.py`.
 
+## Modes
+
+- **Movies** — several video files against one audio track.
+- **Series** — a folder of episodes against a folder of dubs, paired by name.
+- **Compare** — every video against every audio track, to work out *which*
+  release a dub was timed for. A dub synced to a WEB-DL drifts against a BluRay
+  with different framing; comparing both at once shows which one it belongs to.
+  Capped at five files per side, since the work is the product of both.
+
+## Audio tracks
+
+A container often carries several audio streams — the original language, a dub,
+a commentary. When a file has more than one, a picker appears showing each
+stream's language, title, codec and channel layout, and the choice reaches
+ffmpeg as `-map 0:a:N`. Without it every comparison silently used the first
+stream, which on a disc rip is often not the one you want.
+
+## Frame rate and cuts
+
+Steady drift almost always has one cause: audio mastered at a different frame
+rate. The app reads each file's rate and names the conversion — "timed against
+a 25fps source, but this video is 23.976fps" — along with the resampling factor
+that cancels it exactly.
+
+Drift larger than any standard conversion can produce (beyond ~45 ms/s) means
+something else: the files contain different material. Those are reported as
+**Different cut** and excluded from the fixable set, because no single delay or
+speed ratio aligns them.
+
 ## Requirements
 
 - Node 20+

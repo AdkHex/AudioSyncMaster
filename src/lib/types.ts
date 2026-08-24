@@ -1,7 +1,11 @@
 /** Shared types. Field names match the Rust structs and the Python engine
  *  exactly -- all three layers speak camelCase across the wire. */
 
-export type SyncMode = "movie" | "series";
+export type SyncMode = "movie" | "series" | "compare";
+
+/** Upper bound per side in compare mode. The work is the product of both
+ *  sides, so five against five is already 25 analyses. */
+export const MAX_COMPARE_INPUTS = 5;
 
 export type ProcessingStatus = "idle" | "processing" | "complete" | "cancelled";
 
@@ -136,6 +140,7 @@ export interface AnalyzeRequest {
   audioFolder: string | null;
   audioFile: string | null;
   videoFiles: string[] | null;
+  audioFiles: string[] | null;
   matchPattern: string | null;
   videoTrack: number;
   audioTrack: number;

@@ -21,6 +21,7 @@ MODULES = [
     "test_matching",
     "test_framerate",
     "test_tracks",
+    "test_compare",
     "test_mux",
     "test_bridge",
 ]
