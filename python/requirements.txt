@@ -1,5 +1,6 @@
-# The analysis engine needs only these. librosa, soundfile, rich and
-# pymediainfo were dropped: all decoding now goes through ffmpeg directly,
-# which removes three overlapping code paths that disagreed on seek semantics.
+# The analysis engine needs only numpy. Everything else was removed:
+# librosa/soundfile/rich/pymediainfo because all decoding goes through ffmpeg,
+# and scipy because it was imported for a single function (fftconvolve) that
+# numpy's own FFT reproduces exactly -- scipy alone was ~0.3s of the frozen
+# sidecar's cold start and a large share of its size.
 numpy>=1.24
-scipy>=1.10

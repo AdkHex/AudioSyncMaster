@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy.signal import fftconvolve
 
 # Envelope frame rate. The envelope is decimated relative to the audio, so the
 # coarse search runs on a much smaller array; precision is recovered afterwards
@@ -132,9 +131,45 @@ def _parabolic_vertex(corr: np.ndarray, index: int) -> float:
     return index + offset
 
 
+def _fast_fft_size(n: int) -> int:
+    """Smallest 5-smooth size >= n.
+
+    FFT cost depends sharply on the factorisation of the transform length. A
+    plain next-power-of-two can nearly double the work when n sits just above a
+    power of two; allowing factors of 3 and 5 finds a much closer fit.
+    """
+    if n <= 16:
+        return 16
+
+    best = 1 << (n - 1).bit_length()  # a power of two always works
+    # Every 5-smooth number is (3^a * 5^b) shifted up by powers of two, so
+    # walking the odd 3/5 combinations below `best` covers the whole space.
+    power_of_three = 1
+    while power_of_three < best:
+        odd = power_of_three
+        while odd < best:
+            candidate = odd
+            while candidate < n:
+                candidate *= 2
+            best = min(best, candidate)
+            odd *= 5
+        power_of_three *= 3
+    return best
+
+
 def _correlate(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
-    """Cross-correlation of two standardized signals, full overlap."""
-    return fftconvolve(primary, secondary[::-1], mode="full")
+    """Cross-correlation of two standardized signals, full overlap.
+
+    Uses numpy's real-input FFT directly rather than scipy.signal.fftconvolve.
+    scipy was the single heaviest import in the frozen sidecar (~0.3s of a
+    ~0.35s cold start, and a large share of the bundle) for exactly one
+    function. rfft also halves the transform work versus a complex FFT, since
+    both inputs are real.
+    """
+    n = len(primary) + len(secondary) - 1
+    size = _fast_fft_size(n)
+    spectrum = np.fft.rfft(primary, size) * np.fft.rfft(secondary[::-1], size)
+    return np.fft.irfft(spectrum, size)[:n]
 
 
 def estimate_offset(

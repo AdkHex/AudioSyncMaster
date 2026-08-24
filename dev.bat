@@ -41,7 +41,11 @@ if errorlevel 1 exit /b 1
 if "%BUILD_SIDECAR%"=="1" (
   echo [4/5] Building the sidecar
   "%VENV%\Scripts\pip" install --quiet pyinstaller
-  "%VENV%\Scripts\pyinstaller" --onefile --clean --noconfirm ^
+  REM A directory build, NOT --onefile. Onefile re-extracts its whole payload
+  REM to a temp folder on every launch, costing tens of seconds per run.
+  if exist src-tauri\resources\engine rmdir /s /q src-tauri\resources\engine
+  "%VENV%\Scripts\pyinstaller" --onedir --clean --noconfirm --log-level WARN ^
+    --distpath build\engine --workpath build\pyi --specpath build\pyi ^
     --name audiosync-cli ^
     --paths . ^
     --hidden-import audiosync ^
@@ -52,14 +56,18 @@ if "%BUILD_SIDECAR%"=="1" (
     --hidden-import audiosync.media ^
     --hidden-import audiosync.mux ^
     --collect-all numpy ^
-    --collect-all scipy ^
+    --exclude-module scipy ^
+    --exclude-module matplotlib ^
+    --exclude-module tkinter ^
+    --exclude-module PIL ^
+    --exclude-module pandas ^
+    --exclude-module pytest ^
     python\bridge.py
   if errorlevel 1 exit /b 1
 
-  if not exist src-tauri\bin mkdir src-tauri\bin
-  copy /Y dist\audiosync-cli.exe src-tauri\bin\audiosync-cli.exe >nul
-  copy /Y dist\audiosync-cli.exe src-tauri\bin\audiosync-cli-x86_64-pc-windows-msvc.exe >nul
-  echo   sidecar written to src-tauri\bin\
+  if not exist src-tauri\resources mkdir src-tauri\resources
+  xcopy /E /I /Y /Q build\engine\audiosync-cli src-tauri\resources\engine >nul
+  echo   engine written to src-tauri\resources\engine\
 ) else (
   echo [4/5] Skipping sidecar build ^(pass --sidecar to build it^)
 )

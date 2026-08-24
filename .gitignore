@@ -7,7 +7,7 @@ npm-debug.log*
 node_modules
 dist
 dist-ssr
-build
+build/
 *.local
 
 # Python
@@ -20,9 +20,10 @@ __pycache__/
 tests/fixtures/
 
 # Bundled binaries
-src-tauri/bin/audiosync-cli*
 src-tauri/resources/ffmpeg/*
 !src-tauri/resources/ffmpeg/.gitkeep
+src-tauri/resources/engine/*
+!src-tauri/resources/engine/.gitkeep
 src-tauri/target/
 src-tauri/gen/
 

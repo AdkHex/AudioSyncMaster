@@ -1,0 +1,1656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AudioSyncMaster — Redesign</title>
+<style>
+/* ============================================================
+   DESIGN TOKENS
+   Calm neutral. One accent. Colour carries meaning only.
+   ============================================================ */
+:root {
+  /* Neutral ramp — very slightly cool, never blue-cast */
+  --n0:#ffffff; --n25:#fcfcfd; --n50:#f7f8f9; --n100:#eff1f3; --n150:#e6e9ec;
+  --n200:#d9dde1; --n300:#bcc2c9; --n400:#98a0a9; --n500:#727a84;
+  --n600:#545c66; --n700:#3c434c; --n800:#272c33; --n900:#181c21; --n950:#0e1114;
+
+  --bg:var(--n25); --surface:var(--n0); --surface-2:var(--n50); --sunken:var(--n100);
+  --line:var(--n150); --line-strong:var(--n200);
+  --text:var(--n900); --text-2:var(--n600); --text-3:var(--n500); --text-4:var(--n400);
+
+  --accent:#2f6df6; --accent-hover:#215ce0; --accent-weak:#eaf1fe; --accent-line:#c5d9fd; --on-accent:#fff;
+  --ok:#16794a; --ok-weak:#e5f4ec; --ok-line:#b8e0cb;
+  --warn:#9a5b00; --warn-weak:#fdf1de; --warn-line:#f3d9ab;
+  --bad:#c0362c; --bad-weak:#fdecea; --bad-line:#f5c6c1;
+
+  --r-sm:6px; --r:9px; --r-lg:13px; --r-xl:18px;
+  --sh-1:0 1px 2px rgba(16,20,26,.05), 0 1px 1px rgba(16,20,26,.03);
+  --sh-2:0 4px 14px rgba(16,20,26,.07), 0 1px 3px rgba(16,20,26,.05);
+  --sh-3:0 22px 60px rgba(16,20,26,.20), 0 3px 12px rgba(16,20,26,.10);
+  --focus:0 0 0 3px rgba(47,109,246,.28);
+
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+
+.dark {
+  --bg:#0d1013; --surface:#14181d; --surface-2:#181d23; --sunken:#101418;
+  --line:#232931; --line-strong:#2e3540;
+  --text:#eef1f4; --text-2:#a6afba; --text-3:#7d8792; --text-4:#5d666f;
+
+  --accent:#4d86ff; --accent-hover:#6b9aff; --accent-weak:#16233c; --accent-line:#274068; --on-accent:#08111f;
+  --ok:#4ec98b; --ok-weak:#122a1f; --ok-line:#1f4a35;
+  --warn:#e0a44e; --warn-weak:#2b2113; --warn-line:#4d3a1c;
+  --bad:#f0766a; --bad-weak:#2d1715; --bad-line:#542621;
+
+  --sh-1:0 1px 2px rgba(0,0,0,.4);
+  --sh-2:0 6px 18px rgba(0,0,0,.45);
+  --sh-3:0 26px 70px rgba(0,0,0,.62), 0 3px 14px rgba(0,0,0,.5);
+  --focus:0 0 0 3px rgba(77,134,255,.32);
+}
+
+/* ============================================================
+   BASE
+   ============================================================ */
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:var(--sans);
+  background:var(--n100);
+  color:var(--text);
+  -webkit-font-smoothing:antialiased;
+  padding:40px 28px 90px;
+  font-size:14px;
+}
+.dark body,body.darkpage{background:#07090b}
+
+/* Spec page scaffolding (not part of the product UI) */
+.wrap{max-width:1180px;margin:0 auto}
+.doc-h{font-size:30px;font-weight:680;letter-spacing:-.02em;color:#12161b}
+.doc-sub{color:#5b636d;margin-top:8px;max-width:70ch;line-height:1.6;font-size:14px}
+.sec{margin:52px 0 16px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.sec h2{font-size:17px;font-weight:660;color:#12161b;letter-spacing:-.01em}
+.sec .num{font:600 11px/1 var(--mono);color:#fff;background:#12161b;padding:5px 7px;border-radius:5px}
+.sec p{color:#5b636d;font-size:13px;flex:1 1 320px;line-height:1.55}
+
+/* The app frame — mimics the desktop window */
+.frame{
+  width:100%;border-radius:12px;overflow:hidden;
+  box-shadow:0 20px 50px rgba(10,14,20,.16), 0 2px 8px rgba(10,14,20,.10);
+  border:1px solid rgba(0,0,0,.10);
+  background:var(--bg);
+}
+.frame.dark{border-color:#000}
+.titlebar{
+  height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;
+  background:var(--surface-2);border-bottom:1px solid var(--line);
+}
+.tb-dots{display:flex;gap:7px}
+.tb-dots i{width:11px;height:11px;border-radius:50%;display:block}
+.tb-title{font-size:11.5px;color:var(--text-3);font-weight:520;margin-inline:auto;padding-right:44px}
+.app{background:var(--bg);color:var(--text);display:flex;flex-direction:column}
+
+/* ============================================================
+   APP CHROME — header / footer
+   ============================================================ */
+.hdr{
+  height:52px;flex:none;display:flex;align-items:center;gap:14px;
+  padding:0 16px;border-bottom:1px solid var(--line);background:var(--surface);
+}
+.brand{display:flex;align-items:center;gap:9px;min-width:150px}
+.mark{
+  width:26px;height:26px;border-radius:7px;display:grid;place-items:center;
+  background:var(--text);color:var(--surface);flex:none;
+}
+.brand b{font-size:13.5px;font-weight:620;letter-spacing:-.01em}
+
+.seg{
+  display:flex;gap:2px;padding:3px;border-radius:9px;
+  background:var(--sunken);border:1px solid var(--line);margin-inline:auto;
+}
+.seg button{
+  font:520 12.5px var(--sans);color:var(--text-2);background:none;border:0;cursor:pointer;
+  padding:6px 15px;border-radius:6px;display:flex;align-items:center;gap:7px;
+}
+.seg button[aria-selected="true"]{background:var(--surface);color:var(--text);box-shadow:var(--sh-1);font-weight:580}
+
+.hdr-actions{display:flex;align-items:center;gap:2px;min-width:150px;justify-content:flex-end}
+.ico{
+  width:31px;height:31px;border-radius:7px;display:grid;place-items:center;
+  color:var(--text-3);background:none;border:0;cursor:pointer;
+}
+.ico:hover{background:var(--sunken);color:var(--text)}
+.ico[data-on]{background:var(--accent-weak);color:var(--accent)}
+.ico-sep{width:1px;height:18px;background:var(--line);margin:0 5px}
+
+.ftr{
+  height:28px;flex:none;display:flex;align-items:center;justify-content:space-between;
+  padding:0 16px;border-top:1px solid var(--line);background:var(--surface);
+  font-size:11px;color:var(--text-4);
+}
+.keys{display:flex;gap:14px}
+.keys span{display:flex;align-items:center;gap:5px}
+kbd{
+  font:500 10px/1 var(--mono);color:var(--text-3);background:var(--sunken);
+  border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:3px 5px;
+}
+
+/* ============================================================
+   CANVAS — the guided single column
+   ============================================================ */
+.canvas{flex:1;overflow:hidden;position:relative;display:flex}
+.scroll{flex:1;overflow-y:auto;padding:26px 24px 34px}
+.col{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+
+/* Step heading — the spine of the guided flow */
+.step{display:flex;align-items:center;gap:11px;margin-bottom:-6px}
+.step .dot{
+  width:21px;height:21px;border-radius:50%;flex:none;display:grid;place-items:center;
+  font:600 11px var(--mono);color:var(--text-3);
+  background:var(--surface);border:1px solid var(--line-strong);
+}
+.step.done .dot{background:var(--ok);border-color:var(--ok);color:#fff}
+.step.now .dot{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.step h3{font-size:12px;font-weight:620;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3)}
+.step.now h3,.step.done h3{color:var(--text)}
+.step .rule{flex:1;height:1px;background:var(--line)}
+.step .aside{font-size:11.5px;color:var(--text-4)}
+
+/* ============================================================
+   CARDS & DROP ZONES
+   ============================================================ */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--sh-1)}
+.card-h{display:flex;align-items:center;gap:10px;padding:13px 15px;border-bottom:1px solid var(--line)}
+.card-h h4{font-size:13px;font-weight:590}
+.card-h .sub{font-size:11.5px;color:var(--text-3);margin-top:1px}
+.card-h .sp{flex:1}
+
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+/* Empty drop target — big, quiet, obviously a target */
+.drop{
+  border:1.5px dashed var(--line-strong);border-radius:var(--r-lg);background:var(--surface);
+  padding:30px 20px;display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center;
+  min-height:186px;justify-content:center;
+}
+.drop .glyph{
+  width:42px;height:42px;border-radius:11px;display:grid;place-items:center;
+  background:var(--sunken);color:var(--text-4);
+}
+.drop b{font-size:13px;font-weight:590}
+.drop p{font-size:11.5px;color:var(--text-3);line-height:1.5;max-width:30ch}
+.drop .recent{font:11px var(--mono);color:var(--text-4);margin-top:2px}
+.drop.hot{border-color:var(--accent);border-style:solid;background:var(--accent-weak);box-shadow:var(--focus)}
+.drop.hot .glyph{background:var(--accent);color:var(--on-accent)}
+.drop.hot b{color:var(--accent)}
+
+/* Filled file list */
+.files{padding:7px;display:flex;flex-direction:column;gap:2px;max-height:190px;overflow-y:auto}
+.f{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:var(--r-sm)}
+.f:hover{background:var(--sunken)}
+.f .ft{flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.f .meta{font:11px var(--mono);color:var(--text-4);flex:none}
+.f .x{opacity:0;color:var(--text-4);border:0;background:none;cursor:pointer;display:grid;place-items:center;padding:2px}
+.f:hover .x{opacity:1}
+.card-f{padding:8px 14px;border-top:1px solid var(--line);font:11px var(--mono);color:var(--text-4);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ============================================================
+   BUTTONS & CONTROLS
+   ============================================================ */
+.btn{
+  font:560 13px var(--sans);border-radius:var(--r);cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:9px 16px;border:1px solid var(--line-strong);background:var(--surface);color:var(--text);
+  box-shadow:var(--sh-1);
+}
+.btn:hover{background:var(--surface-2)}
+.btn-sm{padding:6px 11px;font-size:12px;border-radius:var(--r-sm)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn-primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn-lg{padding:12px 26px;font-size:14px;font-weight:600;border-radius:11px}
+.btn-ghost{border-color:transparent;background:none;box-shadow:none;color:var(--text-2)}
+.btn-ghost:hover{background:var(--sunken);color:var(--text)}
+.btn[disabled]{opacity:.42;cursor:not-allowed;box-shadow:none}
+.btn-danger{color:var(--bad);border-color:var(--bad-line);background:var(--bad-weak)}
+
+.runbar{display:flex;align-items:center;gap:12px}
+.runbar .note{font-size:12px;color:var(--text-3)}
+
+/* Pills / badges */
+.pill{
+  display:inline-flex;align-items:center;gap:5px;border-radius:999px;
+  padding:3px 9px;font-size:11px;font-weight:560;border:1px solid transparent;white-space:nowrap;
+}
+.pill-ok{background:var(--ok-weak);color:var(--ok);border-color:var(--ok-line)}
+.pill-warn{background:var(--warn-weak);color:var(--warn);border-color:var(--warn-line)}
+.pill-bad{background:var(--bad-weak);color:var(--bad);border-color:var(--bad-line)}
+.pill-neutral{background:var(--sunken);color:var(--text-3);border-color:var(--line)}
+.pill-accent{background:var(--accent-weak);color:var(--accent);border-color:var(--accent-line)}
+
+/* Notices */
+.notice{
+  display:flex;gap:10px;padding:11px 13px;border-radius:var(--r);font-size:12.5px;line-height:1.5;
+  border:1px solid var(--warn-line);background:var(--warn-weak);color:var(--warn);
+}
+.notice.bad{border-color:var(--bad-line);background:var(--bad-weak);color:var(--bad)}
+.notice svg{flex:none;margin-top:1px}
+.notice b{font-weight:620}
+
+/* ============================================================
+   PAIRING PREVIEW
+   ============================================================ */
+.pairs{display:flex;flex-direction:column;max-height:210px;overflow-y:auto}
+.pair{display:flex;align-items:center;gap:11px;padding:9px 15px;font-size:12.5px}
+.pair + .pair{border-top:1px solid var(--line)}
+.pair .side{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pair .side.b{color:var(--text-2)}
+.pair .arrow{color:var(--text-4);flex:none}
+.pair .ep{
+  font:600 10.5px var(--mono);background:var(--sunken);color:var(--text-2);
+  padding:3px 6px;border-radius:5px;flex:none;border:1px solid var(--line)
+}
+
+/* ============================================================
+   PROGRESS
+   ============================================================ */
+.prog-top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.spin{width:15px;height:15px;flex:none;border-radius:50%;border:2px solid var(--line-strong);border-top-color:var(--accent);animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.prog-name{flex:1;min-width:0;font-size:13px;font-weight:540;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prog-eta{font:11.5px var(--mono);color:var(--text-3);flex:none}
+.bar{height:6px;border-radius:999px;background:var(--sunken);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:999px;background:var(--accent)}
+.bar.thin{height:4px}
+.bar.thin i{background:var(--text-3)}
+.bar-row{display:flex;justify-content:space-between;font-size:11px;color:var(--text-4);margin:7px 0 5px}
+.queue{margin-top:15px;border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:8px}
+.q{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--text-3)}
+.q .qi{width:15px;height:15px;flex:none;display:grid;place-items:center}
+.q .qn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.q.active{color:var(--text);font-weight:540}
+
+/* ============================================================
+   RESULTS
+   ============================================================ */
+.sumrow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;box-shadow:var(--sh-1)}
+.stat .k{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px}
+.stat .v{font:640 22px/1.15 var(--sans);letter-spacing:-.02em;margin-top:6px}
+.stat.ok .v{color:var(--ok)} .stat.warn .v{color:var(--warn)} .stat.bad .v{color:var(--bad)}
+
+.tabs{display:flex;gap:3px;padding:9px 12px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tab{
+  font:530 12px var(--sans);border:0;background:none;color:var(--text-3);cursor:pointer;
+  padding:5px 11px;border-radius:7px;display:flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.tab:hover{background:var(--sunken);color:var(--text)}
+.tab[aria-selected="true"]{background:var(--sunken);color:var(--text);font-weight:600}
+.tab .n{font:600 10.5px var(--mono);color:var(--text-4)}
+.tab[disabled]{opacity:.35;cursor:not-allowed}
+
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+thead th{
+  font-size:10.5px;font-weight:620;letter-spacing:.05em;text-transform:uppercase;color:var(--text-4);
+  text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);background:var(--surface-2);
+  white-space:nowrap;
+}
+tbody td{padding:11px 12px;border-bottom:1px solid var(--line);font-size:12.5px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--surface-2)}
+tbody tr[data-sel]{background:var(--accent-weak)}
+tbody tr[data-sel]:hover{background:var(--accent-weak)}
+.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+.center{text-align:center}
+.fname{overflow:hidden}
+.fname>span,.fname .p{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fname .p{color:var(--text-4);font-size:11px;margin-top:2px}
+/* Fixed layout: the pair column absorbs whatever the sized columns leave. */
+col.c-sel{width:38px} col.c-delay{width:118px} col.c-drift{width:124px}
+col.c-conf{width:132px} col.c-time{width:64px} col.c-act{width:38px}
+.delay{font-weight:620;font-size:13px}
+.delay.neg{color:var(--text)}
+.cbx{
+  width:15px;height:15px;border-radius:4px;border:1.5px solid var(--line-strong);background:var(--surface);
+  display:inline-grid;place-items:center;cursor:pointer;vertical-align:middle;
+}
+.cbx[data-on]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.rowbtn{opacity:0;border:0;background:none;color:var(--text-4);cursor:pointer;padding:3px;border-radius:5px}
+tr:hover .rowbtn{opacity:1}
+.rowbtn:hover{background:var(--sunken);color:var(--text)}
+
+/* The apply bar — the payoff action, given real weight */
+.applybar{
+  display:flex;align-items:center;gap:12px;padding:12px 15px;border-top:1px solid var(--line);
+  background:var(--surface-2);border-radius:0 0 var(--r-lg) var(--r-lg);
+}
+.applybar .lead{flex:1;font-size:12.5px;color:var(--text-2)}
+.applybar .lead b{color:var(--text);font-weight:620}
+
+/* ============================================================
+   OVERLAYS — settings / history / console / dialogs
+   ============================================================ */
+.sheet-wrap{position:relative}
+.scrim{position:absolute;inset:0;background:rgba(12,16,22,.45);backdrop-filter:blur(2px);z-index:5}
+.dark .scrim{background:rgba(0,0,0,.62)}
+.sheet{
+  position:absolute;z-index:6;background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r-xl);box-shadow:var(--sh-3);overflow:hidden;display:flex;flex-direction:column;
+}
+.sheet-h{display:flex;align-items:center;gap:10px;padding:15px 17px;border-bottom:1px solid var(--line)}
+.sheet-h h4{font-size:14px;font-weight:620;letter-spacing:-.01em}
+.sheet-h .sub{font-size:11.5px;color:var(--text-3);margin-top:2px}
+.sheet-b{padding:6px 17px 17px;overflow-y:auto}
+.sheet-f{display:flex;align-items:center;gap:9px;padding:13px 17px;border-top:1px solid var(--line);background:var(--surface-2)}
+
+/* Settings groups */
+.grp{padding:15px 0;border-bottom:1px solid var(--line)}
+.grp:last-child{border-bottom:0}
+.grp-t{font-size:11px;font-weight:620;letter-spacing:.05em;text-transform:uppercase;color:var(--text-4);margin-bottom:13px}
+.fld{display:grid;grid-template-columns:1fr auto;gap:4px 14px;align-items:center;padding:9px 0}
+.fld + .fld{border-top:1px solid var(--line)}
+.fld .lbl{font-size:13px;font-weight:540}
+.fld .hint{grid-column:1;font-size:11.5px;color:var(--text-3);line-height:1.5;max-width:46ch}
+.fld .ctl{grid-row:1/3;grid-column:2;display:flex;align-items:center;gap:10px}
+.range{width:132px;height:4px;border-radius:999px;background:var(--sunken);position:relative}
+.range i{position:absolute;left:0;top:0;height:100%;border-radius:999px;background:var(--accent)}
+.range b{position:absolute;top:50%;width:15px;height:15px;border-radius:50%;background:var(--surface);
+  border:1.5px solid var(--accent);transform:translate(-50%,-50%);box-shadow:var(--sh-1)}
+.val{font:600 12px var(--mono);color:var(--text);min-width:36px;text-align:right}
+.inp{
+  font:12.5px var(--mono);color:var(--text);background:var(--sunken);
+  border:1px solid var(--line-strong);border-radius:var(--r-sm);padding:7px 10px;width:190px;
+}
+.inp.wide{width:100%}
+.inp.err{border-color:var(--bad);box-shadow:0 0 0 3px rgba(192,54,44,.15)}
+.inp.ph{color:var(--text-4)}
+.swtch{width:36px;height:21px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer}
+.swtch i{position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:var(--sh-1)}
+.swtch[data-on]{background:var(--accent)} .swtch[data-on] i{left:17.5px}
+.themebtns{display:flex;gap:2px;padding:3px;background:var(--sunken);border-radius:8px;border:1px solid var(--line)}
+.themebtns button{font:530 11.5px var(--sans);border:0;background:none;color:var(--text-3);cursor:pointer;padding:5px 10px;border-radius:5px;display:flex;align-items:center;gap:5px}
+.themebtns button[aria-selected="true"]{background:var(--surface);color:var(--text);box-shadow:var(--sh-1);font-weight:590}
+
+/* History drawer */
+.hist-item{padding:12px;border-radius:var(--r);border:1px solid var(--line);background:var(--surface);cursor:pointer}
+.hist-item:hover{border-color:var(--line-strong);box-shadow:var(--sh-1)}
+.hist-top{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.hist-top .when{font-size:11.5px;color:var(--text-3);flex:1}
+.hist-line{font-size:12.5px;font-weight:540;margin-bottom:9px}
+.hist-line span{color:var(--text-3);font-weight:400}
+.hist-acts{display:flex;gap:6px}
+
+/* Console */
+.term{
+  background:var(--sunken);border-top:1px solid var(--line);
+  font:11.5px/1.75 var(--mono);padding:12px 15px;max-height:150px;overflow-y:auto;
+}
+.term .l{display:flex;gap:11px}
+.term .t{color:var(--text-4);flex:none}
+.term .m{color:var(--text-2);min-width:0;word-break:break-all}
+.term .m.ok{color:var(--ok)} .term .m.bad{color:var(--bad)} .term .m.warn{color:var(--warn)}
+
+/* Toast */
+.toast{
+  display:flex;align-items:center;gap:11px;padding:12px 14px;border-radius:var(--r);
+  background:var(--surface);border:1px solid var(--line);box-shadow:var(--sh-2);width:340px;
+}
+.toast .ti{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;flex:none;color:#fff}
+.toast .tt{flex:1;min-width:0}
+.toast .tt b{display:block;font-size:12.5px;font-weight:590}
+.toast .tt span{display:block;font-size:11.5px;color:var(--text-3);margin-top:2px}
+
+/* Utility */
+.mono{font-family:var(--mono)}
+.muted{color:var(--text-3)}
+.row{display:flex;align-items:center;gap:9px}
+.sp{flex:1}
+.stack{display:flex;flex-direction:column;gap:9px}
+svg{display:block}
+.cap{
+  margin-top:9px;font-size:11.5px;color:#6b737d;display:flex;gap:7px;align-items:flex-start;line-height:1.55;
+}
+.cap b{color:#12161b;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1 class="doc-h">AudioSyncMaster — visual redesign</h1>
+<p class="doc-sub">
+  A calm, guided single column. Every screen from the current app is here, rebuilt: nothing is removed,
+  only re-ranked. The spine is a four-step flow — <b>Select → Review → Analyse → Fix</b> — and everything
+  secondary (history, console, settings, updates) moves into overlays so the main surface stays quiet.
+</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     1 — EMPTY STATE
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">01</span>
+  <h2>Empty state — Movies</h2>
+  <p>First launch. Two big drop targets, one obvious next action, and the step spine visible from the start so the flow is legible before anything is loaded.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark" style="height:560px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        </span>
+        <b>AudioSyncMaster</b>
+      </div>
+
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="true">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>
+          Movies
+        </button>
+        <button role="tab" aria-selected="false">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>
+          Series
+        </button>
+      </div>
+
+      <div class="hdr-actions">
+        <button class="ico" title="Console">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
+        </button>
+        <button class="ico" title="History">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+        </button>
+        <span class="ico-sep"></span>
+        <button class="ico" title="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step now">
+        <span class="dot">1</span><h3>Select files</h3><span class="rule"></span>
+        <span class="aside">Movie mode · many videos, one audio track</span>
+      </div>
+
+      <div class="duo">
+        <div class="drop">
+          <span class="glyph">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+          </span>
+          <b>Video files</b>
+          <p>The files whose timing is already correct. Drop a folder, or browse.</p>
+          <button class="btn btn-sm" style="margin-top:4px">Browse…</button>
+          <span class="recent">Last used: H:\Downloads\Videos</span>
+        </div>
+
+        <div class="drop">
+          <span class="glyph">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </span>
+          <b>Audio track</b>
+          <p>The track to align against the videos. One file in movie mode.</p>
+          <button class="btn btn-sm" style="margin-top:4px">Browse…</button>
+          <span class="recent">Last used: H:\Downloads\Audios</span>
+        </div>
+      </div>
+
+      <div class="step"><span class="dot">2</span><h3>Review pairing</h3><span class="rule"></span></div>
+      <div class="step"><span class="dot">3</span><h3>Analyse</h3><span class="rule"></span></div>
+
+      <div class="runbar">
+        <button class="btn btn-primary btn-lg" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+          Analyse
+        </button>
+        <span class="note">Add video files and an audio track to begin.</span>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Movie mode</span>
+      <span class="keys">
+        <span><kbd>↵</kbd> analyse</span><span><kbd>esc</kbd> stop</span>
+        <span><kbd>⌃H</kbd> history</span><span><kbd>⌃,</kbd> settings</span>
+      </span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> the disabled Analyse button now explains itself instead of failing silently; drop targets get a real icon, a Browse button and the remembered folder; the step spine tells you where you are.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     2 — FILES SELECTED + PAIRING (movie mode) + drag hover
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">02</span>
+  <h2>Files selected — pairing preview</h2>
+  <p>Movie mode with two videos and one track. Step 1 collapses to a compact summary, the pairing preview earns its place, and Analyse becomes the single bright thing on screen.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark" style="height:640px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>Movies</button>
+        <button role="tab" aria-selected="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Select files</h3><span class="rule"></span>
+        <span class="aside">3 files · 32.5 GB</span>
+      </div>
+
+      <div class="duo">
+        <div class="card">
+          <div class="card-h">
+            <div style="min-width:0">
+              <h4>Video files</h4>
+              <div class="sub">2 files · 32.0 GB</div>
+            </div>
+            <span class="sp"></span>
+            <button class="ico" title="Clear"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>
+            <button class="btn btn-sm">Browse</button>
+          </div>
+          <div class="files">
+            <div class="f">
+              <span class="ft">Roald.Dahls.Matilda.the.Musical.2022.1080p.BluRay.REMUX.mkv</span>
+              <span class="meta">1:57:26</span><span class="meta">18.0 GB</span>
+              <button class="x"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+            </div>
+            <div class="f">
+              <span class="ft">Roald.Dahls.Matilda.the.Musical.2022.1080p.REPACK.x264.mkv</span>
+              <span class="meta">1:57:26</span><span class="meta">14.0 GB</span>
+              <button class="x"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+            </div>
+          </div>
+          <div class="card-f">H:\Downloads\Videos\Videos</div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">
+            <div style="min-width:0">
+              <h4>Audio track</h4>
+              <div class="sub">1 file · 562 MB</div>
+            </div>
+            <span class="sp"></span>
+            <button class="ico" title="Clear"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>
+            <button class="btn btn-sm">Browse</button>
+          </div>
+          <div class="files">
+            <div class="f">
+              <span class="ft">Roald_Dahls_Matilda_The_Musical_2022_ORG_Hindi.mka</span>
+              <span class="meta">2:02:01</span><span class="meta">562 MB</span>
+              <button class="x"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+            </div>
+          </div>
+          <div class="card-f">H:\Downloads\Videos\Audios</div>
+        </div>
+      </div>
+
+      <div class="step now">
+        <span class="dot">2</span><h3>Review pairing</h3><span class="rule"></span>
+        <span class="aside">2 pairs · matched by single track</span>
+      </div>
+
+      <div class="card">
+        <div class="pairs">
+          <div class="pair">
+            <span class="side">Roald.Dahls.Matilda…BluRay.REMUX.mkv</span>
+            <span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+            <span class="side b">Roald_Dahls_Matilda…ORG_Hindi.mka</span>
+          </div>
+          <div class="pair">
+            <span class="side">Roald.Dahls.Matilda…REPACK.x264.mkv</span>
+            <span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+            <span class="side b">Roald_Dahls_Matilda…ORG_Hindi.mka</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="step"><span class="dot">3</span><h3>Analyse</h3><span class="rule"></span></div>
+
+      <div class="runbar">
+        <button class="btn btn-primary btn-lg">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>
+          Analyse 2 pairs
+        </button>
+        <button class="btn btn-ghost btn-sm">Clear all</button>
+        <span class="sp"></span>
+        <span class="note">Takes about 3 min</span>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Movie mode</span>
+      <span class="keys"><span><kbd>↵</kbd> analyse</span><span><kbd>esc</kbd> stop</span><span><kbd>⌃H</kbd> history</span><span><kbd>⌃,</kbd> settings</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> file rows show duration and size inline; the Analyse button states the work it will do and roughly how long; step 1 shrinks once satisfied so attention moves forward.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     3 — SERIES MODE + drag hover + warnings
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">03</span>
+  <h2>Series mode — episode pairing, warnings, drag hover</h2>
+  <p>Series matches one track per episode, so pairing is where the risk lives. Episode keys are shown explicitly, fuzzy matches are flagged with their score, and unmatched files are called out before a long run starts.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark" style="height:660px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>Movies</button>
+        <button role="tab" aria-selected="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Select files</h3><span class="rule"></span>
+        <span class="aside">8 videos · 8 tracks</span>
+      </div>
+
+      <div class="duo">
+        <div class="card">
+          <div class="card-h">
+            <div style="min-width:0"><h4>Video files</h4><div class="sub">8 files · 21.4 GB</div></div>
+            <span class="sp"></span>
+            <button class="btn btn-sm">Browse</button>
+          </div>
+          <div class="files" style="max-height:150px">
+            <div class="f"><span class="ft">Show.S01E01.1080p.WEB-DL.mkv</span><span class="meta">42:10</span></div>
+            <div class="f"><span class="ft">Show.S01E02.1080p.WEB-DL.mkv</span><span class="meta">44:02</span></div>
+            <div class="f"><span class="ft">Show.S01E03.1080p.WEB-DL.mkv</span><span class="meta">41:38</span></div>
+            <div class="f"><span class="ft">Show.S01E04.1080p.WEB-DL.mkv</span><span class="meta">43:55</span></div>
+            <div class="f"><span class="ft">Show.S01E05.1080p.WEB-DL.mkv</span><span class="meta">42:47</span></div>
+          </div>
+          <div class="card-f">D:\Shows\Season 01</div>
+        </div>
+
+        <!-- drag-hover state -->
+        <div class="drop hot">
+          <span class="glyph"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="m7 11 5 5 5-5"/><path d="M20 21H4"/></svg></span>
+          <b>Drop to add audio files</b>
+          <p>8 tracks detected · one per episode</p>
+        </div>
+      </div>
+
+      <div class="step now">
+        <span class="dot">2</span><h3>Review pairing</h3><span class="rule"></span>
+        <span class="aside">7 pairs · matched by episode number</span>
+      </div>
+
+      <div class="notice">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+        <span><b>One episode could not be paired.</b> S01E06 has no matching audio track, and one track is left over. Set a match pattern in settings if your files name episodes differently.</span>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <h4>Pairing preview</h4><span class="sp"></span>
+          <span class="pill pill-neutral">7 pairs</span>
+        </div>
+        <div class="pairs">
+          <div class="pair"><span class="ep">S01E01</span><span class="side">Show.S01E01.1080p.WEB-DL.mkv</span><span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span><span class="side b">Show.1x01.Hindi.mka</span></div>
+          <div class="pair"><span class="ep">S01E02</span><span class="side">Show.S01E02.1080p.WEB-DL.mkv</span><span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span><span class="side b">Show.1x02.Hindi.mka</span></div>
+          <div class="pair"><span class="ep">S01E03</span><span class="side">Show.S01E03.1080p.WEB-DL.mkv</span><span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span><span class="side b">Show.1x03.Hindi.mka</span></div>
+          <div class="pair">
+            <span class="ep">S01E04</span><span class="side">Show.S01E04.1080p.WEB-DL.mkv</span>
+            <span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span>
+            <span class="side b">Show.Ep4.Dual.mka</span>
+            <span class="pill pill-warn">82% name match</span>
+          </div>
+          <div class="pair"><span class="ep">S01E05</span><span class="side">Show.S01E05.1080p.WEB-DL.mkv</span><span class="arrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span><span class="side b">Show.1x05.Hindi.mka</span></div>
+        </div>
+        <div class="card-f" style="color:var(--bad);font-family:var(--sans);font-size:11.5px">
+          Unpaired: Show.S01E06.1080p.WEB-DL.mkv · 1 audio track unused
+        </div>
+      </div>
+
+      <div class="step"><span class="dot">3</span><h3>Analyse</h3><span class="rule"></span></div>
+      <div class="runbar">
+        <button class="btn btn-primary btn-lg"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>Analyse 7 pairs</button>
+        <button class="btn btn-ghost btn-sm">Clear all</button>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Series mode · auto episode matching</span>
+      <span class="keys"><span><kbd>↵</kbd> analyse</span><span><kbd>⌃H</kbd> history</span><span><kbd>⌃,</kbd> settings</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> episode keys become first-class chips; fuzzy pairs show their score where you look; the unmatched warning appears above the list, phrased as what to do rather than what failed.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     4 — ANALYSING
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">04</span>
+  <h2>Analysing</h2>
+  <p>A long-running job on huge files. The current file, the queue behind it, and a real ETA — plus results streaming in underneath as each pair finishes, so the wait is never blank.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark" style="height:600px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist" style="opacity:.45">
+        <button role="tab" aria-selected="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>Movies</button>
+        <button role="tab" aria-selected="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico" data-on><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Select files</h3><span class="rule"></span><span class="aside">3 files · 32.5 GB</span>
+      </div>
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Review pairing</h3><span class="rule"></span><span class="aside">2 pairs</span>
+      </div>
+
+      <div class="step now"><span class="dot">3</span><h3>Analysing</h3><span class="rule"></span><span class="aside">2 workers</span></div>
+
+      <div class="card" style="padding:16px 17px">
+        <div class="prog-top">
+          <span class="spin"></span>
+          <span class="prog-name">Roald.Dahls.Matilda.the.Musical.2022.1080p.REPACK.x264.mkv</span>
+          <span class="prog-eta">2 of 2 · about 2m 25s left</span>
+        </div>
+
+        <div class="bar-row"><span>Overall</span><span class="mono">50%</span></div>
+        <div class="bar"><i style="width:50%"></i></div>
+
+        <div class="bar-row" style="margin-top:13px"><span>Current file</span><span class="mono">100%</span></div>
+        <div class="bar thin"><i style="width:100%"></i></div>
+
+        <div class="queue">
+          <div class="q">
+            <span class="qi" style="color:var(--ok)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+            <span class="qn">Roald.Dahls.Matilda…BluRay.REMUX.mkv</span>
+            <span class="mono" style="font-size:11px">−17592.5 ms</span>
+          </div>
+          <div class="q active">
+            <span class="qi"><span class="spin" style="width:12px;height:12px;border-width:1.8px"></span></span>
+            <span class="qn">Roald.Dahls.Matilda…REPACK.x264.mkv</span>
+            <span class="mono" style="font-size:11px;color:var(--text-4)">measuring…</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="runbar">
+        <button class="btn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+          Stop
+        </button>
+        <span class="note">Press <kbd>esc</kbd> to stop after the current file.</span>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <h4>Results</h4>
+          <span class="pill pill-neutral" style="margin-left:4px">1 of 2 done</span>
+          <span class="sp"></span>
+        </div>
+        <table><colgroup><col class="c-sel"><col><col class="c-delay"><col class="c-drift"><col class="c-conf"></colgroup>
+          <thead><tr><th style="width:34px"></th><th>Pair</th><th class="num">Delay</th><th class="num">Drift</th><th class="center">Confidence</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="center"><span class="cbx"></span></td>
+              <td class="fname"><span>Roald.Dahls.Matilda…BluRay.REMUX.mkv</span><div class="p">Roald_Dahls_Matilda…ORG_Hindi.mka</div></td>
+              <td class="num delay">−17592.5 ms</td>
+              <td class="num"><span style="color:var(--warn)">−0.998 ms/s</span></td>
+              <td class="center"><span class="pill pill-bad">Low</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Movie mode · analysing</span>
+      <span class="keys"><span><kbd>esc</kbd> stop</span><span><kbd>⌃H</kbd> history</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> the queue shows what is done, running and waiting with each finished measurement inline; ETA sits next to the filename rather than at the far edge; results stream in during the run instead of only at the end.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     5 — RESULTS (the payoff screen)
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">05</span>
+  <h2>Results — all confidence levels, drift, failure</h2>
+  <p>The heart of the app. A summary row you can read in a glance, filter tabs, then a table where the delay is the biggest thing in each row. Selection drives one clear payoff action pinned at the bottom.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark" style="height:760px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>Movies</button>
+        <button role="tab" aria-selected="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Select &amp; analyse</h3><span class="rule"></span>
+        <span class="aside">7 pairs · finished in 4m 12s</span>
+      </div>
+
+      <div class="step now"><span class="dot">4</span><h3>Review &amp; fix</h3><span class="rule"></span></div>
+
+      <div class="sumrow">
+        <div class="stat ok">
+          <div class="k"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>High confidence</div>
+          <div class="v">4</div>
+        </div>
+        <div class="stat warn">
+          <div class="k"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>Needs a look</div>
+          <div class="v">2</div>
+        </div>
+        <div class="stat warn">
+          <div class="k"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 7-8.5 8.5-5-5L2 17"/><path d="M16 7h6v6"/></svg>Drifting</div>
+          <div class="v">2</div>
+        </div>
+        <div class="stat bad">
+          <div class="k"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>Failed</div>
+          <div class="v">1</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <h4>Results</h4>
+          <span class="sub" style="margin-left:6px">6 matched · 1 failed</span>
+          <span class="sp"></span>
+          <button class="btn btn-sm btn-ghost">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+            Export
+          </button>
+        </div>
+
+        <div class="tabs">
+          <button class="tab" aria-selected="true">All <span class="n">7</span></button>
+          <button class="tab">High <span class="n">4</span></button>
+          <button class="tab">Medium <span class="n">2</span></button>
+          <button class="tab">Low <span class="n">0</span></button>
+          <button class="tab">Drift <span class="n">2</span></button>
+          <button class="tab">Failed <span class="n">1</span></button>
+        </div>
+
+        <table><colgroup><col class="c-sel"><col><col class="c-delay"><col class="c-drift"><col class="c-conf"><col class="c-time"><col class="c-act"></colgroup>
+          <thead>
+            <tr>
+              <th style="width:34px" class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></th>
+              <th>Pair</th>
+              <th class="num">Delay</th>
+              <th class="num">Drift</th>
+              <th class="center">Confidence</th>
+              <th class="num">Time</th>
+              <th style="width:34px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E01.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x01.Hindi.mka</div></td>
+              <td class="num delay">+412.0 ms</td>
+              <td class="num muted">—</td>
+              <td class="center"><span class="pill pill-ok">High · 96%</span></td>
+              <td class="num muted" style="font-size:11px">38 s</td>
+              <td><button class="rowbtn" title="Copy ffmpeg command"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E02.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x02.Hindi.mka</div></td>
+              <td class="num delay">+408.5 ms</td>
+              <td class="num muted">—</td>
+              <td class="center"><span class="pill pill-ok">High · 94%</span></td>
+              <td class="num muted" style="font-size:11px">41 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E03.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x03.Hindi.mka</div></td>
+              <td class="num delay">−1204.2 ms</td>
+              <td class="num"><span class="pill pill-warn" title="Total drift 2.4 s across the file">↗ +0.412 ms/s</span></td>
+              <td class="center"><span class="pill pill-ok">High · 91%</span></td>
+              <td class="num muted" style="font-size:11px">44 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E04.1080p.WEB-DL.mkv</span><div class="p">→ Show.Ep4.Dual.mka</div></td>
+              <td class="num delay">+389.9 ms</td>
+              <td class="num muted">—</td>
+              <td class="center"><span class="pill pill-ok">High · 88%</span></td>
+              <td class="num muted" style="font-size:11px">39 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr>
+              <td class="center"><span class="cbx"></span></td>
+              <td class="fname"><span>Show.S01E05.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x05.Hindi.mka</div></td>
+              <td class="num delay">−17592.5 ms</td>
+              <td class="num"><span class="pill pill-warn">↘ −0.998 ms/s</span></td>
+              <td class="center"><span class="pill pill-warn">Medium · 62%</span></td>
+              <td class="num muted" style="font-size:11px">1:40</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr>
+              <td class="center"><span class="cbx"></span></td>
+              <td class="fname"><span>Show.S01E07.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x07.Hindi.mka</div></td>
+              <td class="num delay">+6.5 ms</td>
+              <td class="num muted">—</td>
+              <td class="center"><span class="pill pill-warn">Medium · 58%</span></td>
+              <td class="num muted" style="font-size:11px">52 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr>
+              <td class="center"><span class="cbx" style="opacity:.3"></span></td>
+              <td class="fname"><span>Show.S01E08.1080p.WEB-DL.mkv</span><div class="p" style="color:var(--bad)">No audio stream found in the source file</div></td>
+              <td class="num muted">—</td>
+              <td class="num muted">—</td>
+              <td class="center"><span class="pill pill-bad">Failed</span></td>
+              <td class="num muted" style="font-size:11px">2 s</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="applybar">
+          <span class="lead"><b>4 selected</b> — corrected copies are written alongside the originals with <span class="mono">.synced</span>. Source files are never modified.</span>
+          <button class="btn btn-primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 3 1.5 4L11 8.5 6.5 10 5 14l-1.5-4L-1 8.5 3.5 7z" transform="translate(4 1)"/><path d="M18 13l.9 2.4L21 16l-2.1.6L18 19l-.9-2.4L15 16l2.1-.6z"/></svg>
+            Fix 4 files
+          </button>
+        </div>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Series mode · 7 results</span>
+      <span class="keys"><span><kbd>↵</kbd> analyse</span><span><kbd>⌃H</kbd> history</span><span><kbd>⌃,</kbd> settings</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> video and audio collapse into one two-line “pair” cell, freeing width for the numbers; confidence shows its actual percentage instead of a bare word; the failure reason replaces the filename subtitle on failed rows; the apply action is a full-width bar that says exactly what it will write.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     6 — SETTINGS
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">06</span>
+  <h2>Settings</h2>
+  <p>Grouped into Analysis, Matching, Output and About. Every slider keeps its plain-language explanation, and each shows the cost of turning it up — the thing the old dialog never said.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster — Settings</span>
+  </div>
+  <div class="app dark sheet-wrap" style="height:700px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="false">Movies</button>
+        <button role="tab" aria-selected="true">Series</button>
+      </div>
+      <div class="hdr-actions"><button class="ico" data-on><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col" style="opacity:.35">
+      <div class="duo">
+        <div class="card" style="height:130px"></div><div class="card" style="height:130px"></div>
+      </div>
+      <div class="card" style="height:90px"></div>
+    </div></div></div>
+
+    <div class="scrim"></div>
+    <div class="sheet" style="top:52px;left:50%;transform:translateX(-50%);width:560px;max-height:565px">
+      <div class="sheet-h">
+        <div><h4>Settings</h4><div class="sub">Applies to the next analysis</div></div>
+        <span class="sp"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+
+      <div class="sheet-b">
+        <div class="grp">
+          <div class="grp-t">Analysis</div>
+
+          <div class="fld">
+            <span class="lbl">Sample windows</span>
+            <div class="ctl">
+              <span class="range"><i style="width:45%"></i><b style="left:45%"></b></span>
+              <span class="val">6</span>
+            </div>
+            <span class="hint">How many points across each file to measure. More windows detect drift more reliably and resist a window landing on silence — but each one costs time.</span>
+          </div>
+
+          <div class="fld">
+            <span class="lbl">Window length</span>
+            <div class="ctl">
+              <span class="range"><i style="width:21%"></i><b style="left:21%"></b></span>
+              <span class="val">45s</span>
+            </div>
+            <span class="hint">Seconds of audio per window. Longer is more reliable on sparse dialogue, and slower.</span>
+          </div>
+
+          <div class="fld">
+            <span class="lbl">Maximum offset</span>
+            <div class="ctl">
+              <span class="range"><i style="width:19%"></i><b style="left:19%"></b></span>
+              <span class="val">60s</span>
+            </div>
+            <span class="hint">Alignments implying a larger shift than this are rejected. Bounding the search prevents distant false matches.</span>
+          </div>
+
+          <div class="fld">
+            <span class="lbl">Parallel files</span>
+            <div class="ctl">
+              <span class="range"><i style="width:29%"></i><b style="left:29%"></b></span>
+              <span class="val">3</span>
+            </div>
+            <span class="hint">Files analysed at once. Each runs its own decoder, so high values compete for disk and memory.</span>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-t">Matching · Series</div>
+          <div class="fld">
+            <span class="lbl">Match pattern</span>
+            <div class="ctl"><input class="inp ph" value="Automatic" readonly /></div>
+            <span class="hint">Leave empty to detect S01E01, 1x01 and similar automatically. Set a regex with capture groups to override.</span>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-t">Output</div>
+          <div class="fld">
+            <span class="lbl">Output suffix</span>
+            <div class="ctl"><input class="inp" value=".synced" readonly style="width:130px" /></div>
+            <span class="hint">Appended to corrected files. Source files are never modified in place.</span>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-t">Appearance</div>
+          <div class="fld">
+            <span class="lbl">Theme</span>
+            <div class="ctl">
+              <span class="themebtns">
+                <button><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>Light</button>
+                <button aria-selected="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>Dark</button>
+                <button>Auto</button>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="grp-t">About</div>
+          <div class="fld">
+            <span class="lbl">Version 2.0.1</span>
+            <div class="ctl">
+              <button class="btn btn-sm">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+                Check now
+              </button>
+            </div>
+            <span class="hint">Updates are checked automatically on launch.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-f">
+        <button class="btn btn-ghost btn-sm">Reset to defaults</button>
+        <span class="sp"></span>
+        <button class="btn btn-primary btn-sm" style="padding:8px 18px">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> settings gain groups and a Reset; theme moves in from the header (freeing chrome); the version and update check live under About where people look for them.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     7 — HISTORY + CONSOLE
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">07</span>
+  <h2>History drawer &amp; console</h2>
+  <p>Both stay out of the way until summoned. History slides in from the right over the content; the console is a bottom panel with timestamps and severity colour.</p>
+</div>
+
+<div class="frame dark">
+  <div class="titlebar" style="background:#181d23;border-color:#232931">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title" style="color:#7d8792">AudioSyncMaster</span>
+  </div>
+  <div class="app dark sheet-wrap" style="height:620px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="true">Movies</button>
+        <button role="tab" aria-selected="false">Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico" data-on><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico" data-on><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas">
+      <div class="scroll" style="padding-right:290px">
+        <div class="col">
+          <div class="step done">
+            <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+            <h3>Select files</h3><span class="rule"></span>
+          </div>
+          <div class="duo">
+            <div class="card">
+              <div class="card-h"><div><h4>Video files</h4><div class="sub">2 files · 32.0 GB</div></div></div>
+              <div class="files">
+                <div class="f"><span class="ft">Roald.Dahls.Matilda…REMUX.mkv</span><span class="meta">18.0 GB</span></div>
+                <div class="f"><span class="ft">Roald.Dahls.Matilda…x264.mkv</span><span class="meta">14.0 GB</span></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-h"><div><h4>Audio track</h4><div class="sub">1 file · 562 MB</div></div></div>
+              <div class="files">
+                <div class="f"><span class="ft">Roald_Dahls_Matilda…Hindi.mka</span><span class="meta">562 MB</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="runbar">
+            <button class="btn btn-primary btn-lg"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l14 8-14 8z"/></svg>Analyse 2 pairs</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- History drawer -->
+      <aside style="position:absolute;top:0;right:0;bottom:0;width:274px;background:var(--surface);border-left:1px solid var(--line);display:flex;flex-direction:column;box-shadow:-14px 0 34px rgba(0,0,0,.30)">
+        <div style="display:flex;align-items:center;gap:9px;padding:14px 14px;border-bottom:1px solid var(--line)">
+          <div><h4 style="font-size:13px;font-weight:610">History</h4><div style="font-size:11px;color:var(--text-3);margin-top:1px">3 runs</div></div>
+          <span class="sp"></span>
+          <button class="btn btn-ghost btn-sm" style="color:var(--bad)">Clear</button>
+        </div>
+        <div style="flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px">
+
+          <div class="hist-item">
+            <div class="hist-top">
+              <span class="when">Today, 16:09</span>
+              <span class="pill pill-warn">Movie</span>
+            </div>
+            <div class="hist-line">2 files <span>· 0 high confidence</span></div>
+            <div class="hist-acts">
+              <button class="btn btn-sm" style="flex:1">Load</button>
+              <button class="btn btn-sm btn-ghost">Export</button>
+              <button class="btn btn-sm btn-ghost" style="padding:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>
+            </div>
+          </div>
+
+          <div class="hist-item">
+            <div class="hist-top">
+              <span class="when">Today, 14:22</span>
+              <span class="pill pill-accent">Series</span>
+            </div>
+            <div class="hist-line">8 files <span>· 6 high confidence</span></div>
+            <div class="hist-acts">
+              <button class="btn btn-sm" style="flex:1">Load</button>
+              <button class="btn btn-sm btn-ghost">Export</button>
+              <button class="btn btn-sm btn-ghost" style="padding:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>
+            </div>
+          </div>
+
+          <div class="hist-item">
+            <div class="hist-top">
+              <span class="when">Yesterday, 21:40</span>
+              <span class="pill pill-accent">Series</span>
+            </div>
+            <div class="hist-line">12 files <span>· 11 high confidence</span></div>
+            <div class="hist-acts">
+              <button class="btn btn-sm" style="flex:1">Load</button>
+              <button class="btn btn-sm btn-ghost">Export</button>
+              <button class="btn btn-sm btn-ghost" style="padding:6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg></button>
+            </div>
+          </div>
+
+        </div>
+      </aside>
+    </div>
+
+    <!-- Console -->
+    <div>
+      <div style="display:flex;align-items:center;gap:9px;padding:8px 15px;border-top:1px solid var(--line);background:var(--surface-2)">
+        <span style="font-size:11px;font-weight:620;letter-spacing:.05em;text-transform:uppercase;color:var(--text-4)">Console</span>
+        <span class="pill pill-neutral">6 lines</span>
+        <span class="sp"></span>
+        <button class="btn btn-ghost btn-sm">Copy</button>
+        <button class="btn btn-ghost btn-sm">Clear</button>
+        <button class="ico" style="width:24px;height:24px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg></button>
+      </div>
+      <div class="term">
+        <div class="l"><span class="t">16:07:12</span><span class="m">Analysing 2 pair(s) with 2 worker(s).</span></div>
+        <div class="l"><span class="t">16:07:12</span><span class="m">Analysing Roald.Dahls.Matilda.the.Musical.2022.1080p.BluRay.REMUX.AVC.Atmos-TRiToN.mkv</span></div>
+        <div class="l"><span class="t">16:07:13</span><span class="m">Analysing Roald.Dahls.Matilda.the.Musical.2022.1080p.REPACK.Bluray.DD5.1.x264-playHD.mkv</span></div>
+        <div class="l"><span class="t">16:08:52</span><span class="m warn">Low confidence (48%) — only 3 of 6 windows agreed.</span></div>
+        <div class="l"><span class="t">16:09:44</span><span class="m ok">Measured −17592.5 ms, drift −0.998 ms/s.</span></div>
+        <div class="l"><span class="t">16:09:44</span><span class="m bad">ffprobe: no audio stream in Show.S01E08.1080p.WEB-DL.mkv</span></div>
+      </div>
+    </div>
+
+    <footer class="ftr">
+      <span>Movie mode</span>
+      <span class="keys"><span><kbd>↵</kbd> analyse</span><span><kbd>⌃H</kbd> history</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Changes:</b> history entries become clickable cards with the mode as a chip; the console gains timestamps, severity colour and a Copy button so a failure can be pasted into a bug report.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     8 — DIALOGS, TOASTS, EMPTY & ERROR STATES
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">08</span>
+  <h2>Dialogs, toasts &amp; edge states</h2>
+  <p>Update prompt, the writing-files progress, toasts for every outcome, plus the states that are easy to forget: empty history, a run that failed outright, and the browser fallback.</p>
+</div>
+
+<div class="grid2">
+
+  <div>
+    <div class="frame dark" style="border-radius:14px">
+      <div class="app dark" style="padding:26px;display:grid;place-items:center;min-height:300px">
+        <div class="sheet" style="position:static;width:100%;max-width:380px;box-shadow:none;border-radius:var(--r-lg)">
+          <div style="padding:20px 20px 4px">
+            <span style="width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:var(--accent-weak);color:var(--accent);margin-bottom:13px">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="m7 11 5 5 5-5"/><path d="M20 21H4"/></svg>
+            </span>
+            <h4 style="font-size:15px;font-weight:640;letter-spacing:-.01em">Version 2.1.0 is available</h4>
+            <p style="font-size:12.5px;color:var(--text-2);line-height:1.6;margin-top:7px">
+              You have 2.0.1. This release improves drift correction on long files and fixes episode matching for <span class="mono">1x01</span> naming.
+            </p>
+            <div style="margin-top:12px;padding:10px 12px;background:var(--sunken);border-radius:var(--r-sm);border:1px solid var(--line)">
+              <div style="font-size:11px;color:var(--text-3);display:flex;justify-content:space-between">
+                <span>Download</span><span class="mono">18.4 MB</span>
+              </div>
+            </div>
+          </div>
+          <div class="sheet-f" style="border-radius:0 0 var(--r-lg) var(--r-lg)">
+            <button class="btn btn-ghost btn-sm">Later</button>
+            <span class="sp"></span>
+            <button class="btn btn-primary btn-sm" style="padding:8px 16px">Update &amp; restart</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="cap"><b>Update dialog</b> — states both versions, what changed, and the download size before committing.</p>
+  </div>
+
+  <div>
+    <div class="frame dark" style="border-radius:14px">
+      <div class="app dark" style="padding:26px;display:grid;place-items:center;min-height:300px">
+        <div class="sheet" style="position:static;width:100%;max-width:380px;box-shadow:none;border-radius:var(--r-lg)">
+          <div style="padding:20px">
+            <h4 style="font-size:15px;font-weight:640;letter-spacing:-.01em">Writing corrected files</h4>
+            <p style="font-size:12.5px;color:var(--text-2);margin-top:6px">2 of 4 · about 40s left</p>
+
+            <div style="margin-top:16px" class="bar"><i style="width:50%"></i></div>
+
+            <div class="queue" style="border-top:0;padding-top:14px">
+              <div class="q"><span class="qi" style="color:var(--ok)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="qn">Show.S01E01.synced.mkv</span></div>
+              <div class="q"><span class="qi" style="color:var(--ok)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span><span class="qn">Show.S01E02.synced.mkv</span></div>
+              <div class="q active"><span class="qi"><span class="spin" style="width:12px;height:12px;border-width:1.8px"></span></span><span class="qn">Show.S01E03.synced.mkv</span></div>
+              <div class="q" style="opacity:.5"><span class="qi">·</span><span class="qn">Show.S01E04.synced.mkv</span></div>
+            </div>
+          </div>
+          <div class="sheet-f" style="border-radius:0 0 var(--r-lg) var(--r-lg)">
+            <span class="sp"></span>
+            <button class="btn btn-sm">Stop after this file</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="cap"><b>Applying fixes</b> — the old app gave no feedback while writing multi-GB files. This names each output as it lands.</p>
+  </div>
+
+</div>
+
+<div class="grid2" style="margin-top:22px">
+
+  <div>
+    <div class="frame dark" style="border-radius:14px">
+      <div class="app dark" style="padding:26px;min-height:300px;display:flex;flex-direction:column;gap:11px;justify-content:center">
+
+        <div class="toast">
+          <span class="ti" style="background:var(--ok)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <span class="tt"><b>Wrote 4 corrected files</b><span>In D:\Shows\Season 01</span></span>
+          <button class="btn btn-sm btn-ghost">Show</button>
+        </div>
+
+        <div class="toast">
+          <span class="ti" style="background:var(--accent)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 8v5M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+          <span class="tt"><b>Analysed 7 files</b><span>6 matched · 2 with drift</span></span>
+        </div>
+
+        <div class="toast">
+          <span class="ti" style="background:var(--warn)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/></svg></span>
+          <span class="tt"><b>Movie mode uses one audio track</b><span>Kept the first of 3 files.</span></span>
+        </div>
+
+        <div class="toast">
+          <span class="ti" style="background:var(--bad)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></span>
+          <span class="tt"><b>Analysis failed</b><span>ffmpeg is not on PATH.</span></span>
+          <button class="btn btn-sm btn-ghost">Console</button>
+        </div>
+
+      </div>
+    </div>
+    <p class="cap"><b>Toasts</b> — one shape, four intents. Success carries the follow-up action (“Show”), failure carries the diagnosis route (“Console”).</p>
+  </div>
+
+  <div>
+    <div class="frame dark" style="border-radius:14px">
+      <div class="app dark" style="padding:26px;min-height:300px;display:flex;flex-direction:column;gap:14px;justify-content:center">
+
+        <div class="notice bad">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+          <span><b>The analysis engine could not start.</b> ffmpeg was not found on PATH. Install it, or point AudioSyncMaster at a binary in settings.</span>
+        </div>
+
+        <div class="notice">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+          <span><b>Running in a browser.</b> File selection and analysis need the desktop app.</span>
+        </div>
+
+        <div class="card" style="padding:34px 20px;display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center">
+          <span style="width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:var(--sunken);color:var(--text-4)">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg>
+          </span>
+          <b style="font-size:13px">No runs yet</b>
+          <p style="font-size:11.5px;color:var(--text-3);max-width:32ch;line-height:1.55">Completed analyses are saved here so you can reload or export them later.</p>
+        </div>
+
+      </div>
+    </div>
+    <p class="cap"><b>Edge states</b> — engine failure, browser fallback, and empty history. Each says what to do next, not just what went wrong.</p>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     9 — LIGHT THEME
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">09</span>
+  <h2>Light theme</h2>
+  <p>The same tokens inverted. Colour still only carries meaning — the surface stays neutral so the delay figures and confidence chips remain the brightest things on screen.</p>
+</div>
+
+<div class="frame">
+  <div class="titlebar">
+    <div class="tb-dots"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+    <span class="tb-title">AudioSyncMaster</span>
+  </div>
+  <div class="app" style="height:700px">
+
+    <header class="hdr">
+      <div class="brand">
+        <span class="mark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></span>
+        <b>AudioSyncMaster</b>
+      </div>
+      <div class="seg" role="tablist">
+        <button role="tab" aria-selected="false"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 3v18M17 3v18M2 12h20"/></svg>Movies</button>
+        <button role="tab" aria-selected="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>Series</button>
+      </div>
+      <div class="hdr-actions">
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></button>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/></svg></button>
+        <span class="ico-sep"></span>
+        <button class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="canvas"><div class="scroll"><div class="col">
+
+      <div class="step done">
+        <span class="dot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+        <h3>Select &amp; analyse</h3><span class="rule"></span><span class="aside">7 pairs · finished in 4m 12s</span>
+      </div>
+
+      <div class="step now"><span class="dot">4</span><h3>Review &amp; fix</h3><span class="rule"></span></div>
+
+      <div class="sumrow">
+        <div class="stat ok"><div class="k">High confidence</div><div class="v">4</div></div>
+        <div class="stat warn"><div class="k">Needs a look</div><div class="v">2</div></div>
+        <div class="stat warn"><div class="k">Drifting</div><div class="v">2</div></div>
+        <div class="stat bad"><div class="k">Failed</div><div class="v">1</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h">
+          <h4>Results</h4><span class="sub" style="margin-left:6px">6 matched · 1 failed</span>
+          <span class="sp"></span>
+          <button class="btn btn-sm btn-ghost">Export</button>
+        </div>
+        <div class="tabs">
+          <button class="tab" aria-selected="true">All <span class="n">7</span></button>
+          <button class="tab">High <span class="n">4</span></button>
+          <button class="tab">Medium <span class="n">2</span></button>
+          <button class="tab" disabled>Low</button>
+          <button class="tab">Drift <span class="n">2</span></button>
+          <button class="tab">Failed <span class="n">1</span></button>
+        </div>
+        <table><colgroup><col class="c-sel"><col><col class="c-delay"><col class="c-drift"><col class="c-conf"><col class="c-time"><col class="c-act"></colgroup>
+          <thead><tr>
+            <th style="width:34px" class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></th>
+            <th>Pair</th><th class="num">Delay</th><th class="num">Drift</th><th class="center">Confidence</th><th class="num">Time</th><th style="width:34px"></th>
+          </tr></thead>
+          <tbody>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E01.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x01.Hindi.mka</div></td>
+              <td class="num delay">+412.0 ms</td><td class="num muted">—</td>
+              <td class="center"><span class="pill pill-ok">High · 96%</span></td>
+              <td class="num muted" style="font-size:11px">38 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr data-sel>
+              <td class="center"><span class="cbx" data-on><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span></td>
+              <td class="fname"><span>Show.S01E03.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x03.Hindi.mka</div></td>
+              <td class="num delay">−1204.2 ms</td>
+              <td class="num"><span class="pill pill-warn">↗ +0.412 ms/s</span></td>
+              <td class="center"><span class="pill pill-ok">High · 91%</span></td>
+              <td class="num muted" style="font-size:11px">44 s</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr>
+              <td class="center"><span class="cbx"></span></td>
+              <td class="fname"><span>Show.S01E05.1080p.WEB-DL.mkv</span><div class="p">→ Show.1x05.Hindi.mka</div></td>
+              <td class="num delay">−17592.5 ms</td>
+              <td class="num"><span class="pill pill-warn">↘ −0.998 ms/s</span></td>
+              <td class="center"><span class="pill pill-warn">Medium · 62%</span></td>
+              <td class="num muted" style="font-size:11px">1:40</td>
+              <td><button class="rowbtn"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></td>
+            </tr>
+            <tr>
+              <td class="center"><span class="cbx" style="opacity:.3"></span></td>
+              <td class="fname"><span>Show.S01E08.1080p.WEB-DL.mkv</span><div class="p" style="color:var(--bad)">No audio stream found in the source file</div></td>
+              <td class="num muted">—</td><td class="num muted">—</td>
+              <td class="center"><span class="pill pill-bad">Failed</span></td>
+              <td class="num muted" style="font-size:11px">2 s</td><td></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="applybar">
+          <span class="lead"><b>2 selected</b> — corrected copies written alongside the originals with <span class="mono">.synced</span>.</span>
+          <button class="btn btn-primary">Fix 2 files</button>
+        </div>
+      </div>
+
+    </div></div></div>
+
+    <footer class="ftr">
+      <span>Series mode · 7 results</span>
+      <span class="keys"><span><kbd>↵</kbd> analyse</span><span><kbd>⌃H</kbd> history</span><span><kbd>⌃,</kbd> settings</span></span>
+    </footer>
+  </div>
+</div>
+<p class="cap"><b>Note:</b> both themes use the same token names, so the implementation is one CSS variable block per theme — no component-level branching.</p>
+
+<!-- ═══════════════════════════════════════════════════════════
+     10 — SYSTEM REFERENCE
+     ═══════════════════════════════════════════════════════════ -->
+<div class="sec">
+  <span class="num">10</span>
+  <h2>The system, in short</h2>
+  <p>What actually changes, and the rules that keep it consistent as the app grows.</p>
+</div>
+
+<div class="frame">
+  <div class="app" style="padding:26px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:26px">
+
+      <div>
+        <div class="grp-t" style="margin-bottom:12px">Principles</div>
+        <div class="stack" style="gap:13px">
+          <div><b style="font-size:12.5px">One accent, used once per screen.</b><p style="font-size:12px;color:var(--text-2);line-height:1.55;margin-top:3px">Blue marks the single next action. Everything else is neutral, so the eye always lands in the right place.</p></div>
+          <div><b style="font-size:12.5px">Colour means status, never decoration.</b><p style="font-size:12px;color:var(--text-2);line-height:1.55;margin-top:3px">Green/amber/red appear only on confidence, drift and failure — the three things that need judgement.</p></div>
+          <div><b style="font-size:12.5px">Numbers get the weight.</b><p style="font-size:12px;color:var(--text-2);line-height:1.55;margin-top:3px">Delay is the largest text in a row. Filenames truncate; measurements never do.</p></div>
+          <div><b style="font-size:12.5px">Secondary tools live in overlays.</b><p style="font-size:12px;color:var(--text-2);line-height:1.55;margin-top:3px">History, console and settings are summoned, not permanently docked, so the main column stays calm.</p></div>
+          <div><b style="font-size:12.5px">Every dead end explains itself.</b><p style="font-size:12px;color:var(--text-2);line-height:1.55;margin-top:3px">Disabled buttons, failed rows and empty states say what to do next.</p></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="grp-t" style="margin-bottom:12px">Tokens</div>
+        <div class="stack" style="gap:9px">
+          <div class="row" style="gap:7px">
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--accent)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--ok)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--warn)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--bad)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--n900)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--n500)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--n200)"></span>
+            <span style="width:26px;height:26px;border-radius:6px;background:var(--n50);border:1px solid var(--line)"></span>
+          </div>
+          <div style="font-size:11.5px;color:var(--text-3);line-height:1.7;margin-top:6px">
+            <div><span class="mono">radius</span> — 6 / 9 / 13 / 18 px</div>
+            <div><span class="mono">space</span> — 4 · 8 · 12 · 16 · 22 (4px base)</div>
+            <div><span class="mono">type</span> — 11 · 12 · 12.5 · 13 · 14 · 22, system UI</div>
+            <div><span class="mono">mono</span> — all measurements, paths and keys</div>
+            <div><span class="mono">column</span> — 760px max, centred</div>
+          </div>
+          <div class="grp-t" style="margin:14px 0 9px">Kept, unchanged</div>
+          <div style="font-size:11.5px;color:var(--text-2);line-height:1.75">
+            Movie/Series modes · folder + file browse · native drag-drop · probe warnings ·
+            pairing preview with scores · live progress + ETA · cancel · six result filters ·
+            per-row ffmpeg copy · CSV/JSON export · batch fix with suffix · history load/export/delete ·
+            console · settings incl. regex pattern · update check · all keyboard shortcuts
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

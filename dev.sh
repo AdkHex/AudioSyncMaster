@@ -33,14 +33,12 @@ if [[ "$BUILD_SIDECAR" == "1" ]]; then
   echo "[4/5] Building the sidecar"
   "$VENV/bin/pip" install --quiet pyinstaller
 
-  case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64)  TRIPLE="aarch64-apple-darwin" ;;
-    Darwin-x86_64) TRIPLE="x86_64-apple-darwin" ;;
-    Linux-x86_64)  TRIPLE="x86_64-unknown-linux-gnu" ;;
-    *)             TRIPLE="" ;;
-  esac
-
-  "$VENV/bin/pyinstaller" --onefile --clean --noconfirm \
+  # A directory build, NOT --onefile. Onefile re-extracts its whole payload to
+  # a temp folder on every launch, which measured 32-63s per run on macOS.
+  # A directory build starts in ~0.12s because nothing is unpacked.
+  rm -rf src-tauri/resources/engine
+  "$VENV/bin/pyinstaller" --onedir --clean --noconfirm --log-level WARN \
+    --distpath build/engine --workpath build/pyi --specpath build/pyi \
     --name audiosync-cli \
     --paths . \
     --hidden-import audiosync \
@@ -51,15 +49,21 @@ if [[ "$BUILD_SIDECAR" == "1" ]]; then
     --hidden-import audiosync.media \
     --hidden-import audiosync.mux \
     --collect-all numpy \
-    --collect-all scipy \
+    --exclude-module scipy \
+    --exclude-module matplotlib \
+    --exclude-module tkinter \
+    --exclude-module PIL \
+    --exclude-module pandas \
+    --exclude-module pytest \
     python/bridge.py
 
-  mkdir -p src-tauri/bin
-  cp dist/audiosync-cli src-tauri/bin/audiosync-cli
-  if [[ -n "$TRIPLE" ]]; then
-    cp dist/audiosync-cli "src-tauri/bin/audiosync-cli-$TRIPLE"
-  fi
-  echo "  sidecar written to src-tauri/bin/"
+  mkdir -p src-tauri/resources
+  cp -R build/engine/audiosync-cli src-tauri/resources/engine
+  chmod +x src-tauri/resources/engine/audiosync-cli
+
+  echo "  engine written to src-tauri/resources/engine/"
+  echo -n "  smoke test: "
+  echo '{"command":"ping"}' | ./src-tauri/resources/engine/audiosync-cli | head -2 | tail -1
 else
   echo "[4/5] Skipping sidecar build (pass --sidecar to build it)"
 fi

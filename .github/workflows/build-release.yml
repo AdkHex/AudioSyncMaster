@@ -83,16 +83,15 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Stub the sidecar
+      - name: Stub the engine resource
         run: |
-          # Tauri's build script fails if an externalBin is missing, so these
-          # checks cannot compile without one. A stub is enough: nothing here
-          # runs the sidecar. The build job creates the real one and smoke-tests
-          # it before packaging.
-          mkdir -p src-tauri/bin
-          triple="$(rustc -vV | sed -n 's/^host: //p')"
-          printf '#!/bin/sh\nexit 0\n' > "src-tauri/bin/audiosync-cli-${triple}"
-          chmod +x "src-tauri/bin/audiosync-cli-${triple}"
+          # Tauri's build script fails if a declared resource path is missing,
+          # so these checks cannot compile without one. A stub is enough:
+          # nothing here runs the engine. The build job creates the real one and
+          # smoke-tests it before packaging.
+          mkdir -p src-tauri/resources/engine
+          printf '#!/bin/sh\nexit 0\n' > src-tauri/resources/engine/audiosync-cli
+          chmod +x src-tauri/resources/engine/audiosync-cli
 
       - name: Formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
@@ -147,12 +146,16 @@ jobs:
         run: |
           npm ci
           python -m pip install --upgrade pip
-          python -m pip install -r python/requirements.txt pyinstaller
+          python -m pip install -r python/requirements-dev.txt pyinstaller
 
-      - name: Build the sidecar
+      - name: Build the analysis engine
         shell: bash
         run: |
-          pyinstaller --onefile --clean --noconfirm \
+          # --onedir, NOT --onefile. A onefile build re-extracts its entire
+          # payload to a temp directory on every launch; that measured 32-63
+          # seconds per run on macOS. A directory build starts in ~0.12s.
+          pyinstaller --onedir --clean --noconfirm --log-level WARN \
+            --distpath build/engine --workpath build/pyi --specpath build/pyi \
             --name audiosync-cli \
             --paths . \
             --hidden-import audiosync \
@@ -163,25 +166,58 @@ jobs:
             --hidden-import audiosync.media \
             --hidden-import audiosync.mux \
             --collect-all numpy \
-            --collect-all scipy \
+            --exclude-module scipy \
+            --exclude-module matplotlib \
+            --exclude-module tkinter \
+            --exclude-module PIL \
+            --exclude-module pandas \
+            --exclude-module pytest \
             python/bridge.py
-          mkdir -p src-tauri/bin
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp dist/audiosync-cli.exe src-tauri/bin/audiosync-cli.exe
-            cp dist/audiosync-cli.exe "src-tauri/bin/audiosync-cli-${{ matrix.triple }}.exe"
-          else
-            cp dist/audiosync-cli src-tauri/bin/audiosync-cli
-            cp dist/audiosync-cli "src-tauri/bin/audiosync-cli-${{ matrix.triple }}"
-            chmod +x src-tauri/bin/audiosync-cli*
-          fi
 
-      - name: Verify the sidecar starts
+          rm -rf src-tauri/resources/engine
+          mkdir -p src-tauri/resources
+          cp -R build/engine/audiosync-cli src-tauri/resources/engine
+          [ "${{ runner.os }}" = "Windows" ] || chmod +x src-tauri/resources/engine/audiosync-cli
+
+      - name: Verify the engine starts and measures correctly
         shell: bash
         run: |
-          # A sidecar that cannot import its own dependencies is the most common
+          # An engine that cannot import its dependencies is the most common
           # packaging failure, and it is invisible until a user runs the app.
-          echo '{"command":"ping"}' | ./src-tauri/bin/audiosync-cli* | grep -q pong
-          echo "sidecar responds correctly"
+          # Measuring a known fixture also catches a build that starts but
+          # computes garbage.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ENGINE=./src-tauri/resources/engine/audiosync-cli.exe
+          else
+            ENGINE=./src-tauri/resources/engine/audiosync-cli
+          fi
+
+          echo '{"command":"ping"}' | "$ENGINE" | grep -q pong
+          echo "engine responds"
+
+          python tests/make_fixtures.py
+          printf '%s\n' \
+            '{"command":"analyze","mode":"movie","videoFiles":["tests/fixtures/offset_500ms_primary.wav"],"audioFile":"tests/fixtures/offset_500ms_secondary.wav","windowSeconds":8,"windowCount":3}' \
+            '{"command":"shutdown"}' | "$ENGINE" > engine-check.jsonl
+          python - <<'CHECK'
+          import json, sys
+          delay = None
+          for line in open("engine-check.jsonl"):
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if event.get("type") == "result":
+                  delay = event.get("delayMs")
+          if delay is None:
+              sys.exit("packaged engine produced no result")
+          if abs(delay - 500.0) > 10.0:
+              sys.exit(f"packaged engine measured {delay:+.1f}ms, expected +500ms")
+          print(f"engine measured {delay:+.1f}ms on a known +500ms fixture")
+          CHECK
 
       - name: Read version
         id: version

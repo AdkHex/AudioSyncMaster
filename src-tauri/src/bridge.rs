@@ -232,61 +232,48 @@ fn build_command(app: &AppHandle) -> Result<Command, String> {
     Ok(command)
 }
 
+/// Locate the packaged analysis engine.
+///
+/// The engine ships as a PyInstaller *directory* build under
+/// `resources/engine/`, not as a single-file executable. A onefile build
+/// re-extracts its entire ~47MB payload to a temp directory on every launch,
+/// which measured 32-63 seconds per run on macOS once Gatekeeper rescanned the
+/// unpacked copy. The directory build starts in ~0.12s because nothing is
+/// unpacked at all.
 fn find_sidecar(app: &AppHandle) -> Option<PathBuf> {
-    let name = if cfg!(windows) {
+    let exe_name = if cfg!(windows) {
         "audiosync-cli.exe"
     } else {
         "audiosync-cli"
     };
 
-    if let Ok(resource) = app
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Packaged layout: resources/engine/audiosync-cli[.exe]
+    if let Ok(dir) = app
         .path()
-        .resolve(name, tauri::path::BaseDirectory::Resource)
+        .resolve("resources/engine", tauri::path::BaseDirectory::Resource)
     {
-        if resource.is_file() {
-            return Some(resource);
-        }
+        candidates.push(dir.join(exe_name));
+        // PyInstaller >= 6 nests the payload under _internal on some platforms.
+        candidates.push(dir.join("audiosync-cli").join(exe_name));
     }
 
-    // Tauri appends the target triple to external binaries; check both spellings.
-    let triple_name = format!(
-        "audiosync-cli-{}{}",
-        current_triple(),
-        if cfg!(windows) { ".exe" } else { "" }
-    );
-    if let Ok(resource) = app
-        .path()
-        .resolve(&triple_name, tauri::path::BaseDirectory::Resource)
-    {
-        if resource.is_file() {
-            return Some(resource);
-        }
-    }
-
+    // Development layout: built into src-tauri/resources/engine by dev.sh.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in [dir.join(name), dir.join(&triple_name)] {
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
+        let mut cursor = exe.parent().map(PathBuf::from);
+        while let Some(dir) = cursor {
+            candidates.push(
+                dir.join("src-tauri")
+                    .join("resources")
+                    .join("engine")
+                    .join(exe_name),
+            );
+            cursor = dir.parent().map(PathBuf::from);
         }
     }
-    None
-}
 
-fn current_triple() -> &'static str {
-    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        "x86_64-pc-windows-msvc"
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        "x86_64-unknown-linux-gnu"
-    } else {
-        ""
-    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 /// Resolve the project root from the executable location rather than the
