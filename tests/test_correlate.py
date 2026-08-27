@@ -20,6 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from audiosync.correlate import estimate_offset, onset_envelope  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from make_fixtures import _speechlike  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MANIFEST = os.path.join(HERE, "fixtures", "manifest.json")
 
@@ -151,6 +154,78 @@ def test_does_not_mutate_inputs():
 
     assert np.array_equal(primary, before_p), "primary was mutated"
     assert np.array_equal(secondary, before_s), "secondary was mutated"
+
+
+def test_a_dub_is_not_dragged_off_by_waveform_refinement():
+    """A different performance must be measured from onsets, not waveforms.
+
+    The estimator aligns onset envelopes precisely because a dub is not the
+    same recording: different voices, different room, so the raw waveforms
+    carry no usable correlation even though the transients line up exactly.
+
+    A refinement pass then re-correlated the raw waveforms over a +/-60ms
+    window and overwrote the envelope's answer whenever it found any peak
+    above a ratio of 2.0 -- which noise clears easily. The result was a
+    correct measurement replaced by an arbitrary one, silently, on exactly
+    the material this tool exists for.
+
+    Every fixture missed it because they all compared a signal against a
+    copy of itself, where refining is harmless.
+    """
+    sr = 16000
+    seconds = 45
+    n = seconds * sr
+    layout = np.random.default_rng(3)
+    times = np.cumsum(layout.uniform(0.3, 1.2, size=200))
+    times = times[times < seconds - 2]
+
+    def perform(seed: int) -> np.ndarray:
+        """Render the same scene as a different performance."""
+        rng = np.random.default_rng(seed)
+        out = np.zeros(n, dtype=np.float32)
+        for start in times:
+            index = int(start * sr)
+            length = int(rng.uniform(0.15, 0.5) * sr)
+            length = max(1, min(length, n - index))
+            burst = rng.standard_normal(length).astype(np.float32)
+            burst *= np.exp(-np.linspace(0, 4, length)) * rng.uniform(0.5, 1.0)
+            out[index : index + length] += burst
+        return out / (np.max(np.abs(out)) + 1e-9)
+
+    original = perform(11)
+    dub = perform(99)  # same timing, entirely different audio
+
+    true_offset_ms = 250.0
+    shift = int(true_offset_ms / 1000 * sr)
+    dub = np.concatenate([np.zeros(shift, dtype=np.float32), dub])[:n]
+
+    estimate = estimate_offset(original, dub, sr, max_offset_ms=2000.0)
+    assert estimate.matched, "onsets align, so this must match"
+    error = estimate.delay_ms - true_offset_ms
+    assert abs(error) < 1.0, (
+        f"dub measured {estimate.delay_ms:+.2f}ms, want {true_offset_ms:+.1f} "
+        f"(out by {error:+.2f}ms -- refinement locked onto waveform noise)"
+    )
+
+
+def test_refinement_still_sharpens_a_re_encode():
+    """The refinement must survive for the case it was written for.
+
+    Guarding against dubs must not throw away sub-millisecond precision when
+    the two tracks really are the same recording.
+    """
+    sr = 16000
+    signal = _speechlike(30.0, sr, seed=5)
+    true_offset_ms = 250.0
+    shift = int(true_offset_ms / 1000 * sr)
+    shifted = np.concatenate([np.zeros(shift, dtype=np.float32), signal])
+
+    estimate = estimate_offset(signal, shifted, sr, max_offset_ms=2000.0)
+    assert estimate.matched
+    assert abs(estimate.delay_ms - true_offset_ms) < 0.5, (
+        f"identical audio should measure to well under a millisecond, "
+        f"got {estimate.delay_ms:+.3f}ms"
+    )
 
 
 def _run_all():

@@ -35,6 +35,24 @@ MIN_PEAK_RATIO = 12.0
 # A segment with less energy than this contributes nothing but numerical noise.
 MIN_RMS = 1e-4
 
+# How far the waveform refinement may move the envelope's answer. Its only job
+# is to undo envelope quantisation, which is ENVELOPE_HOP frames wide, so a
+# couple of frames either side is all it can legitimately need. The original
+# 60ms let it relocate the answer entirely.
+REFINE_WINDOW_MS = 3.0 * ENVELOPE_HOP / 16000 * 1000.0
+
+# Prominence the raw-waveform peak must clear before it is trusted.
+#
+# The two cases are separated by orders of magnitude, not by a close call.
+# Measured on matched material: the same audio through two codecs scores ~2600,
+# while two different performances of the same scene score ~27. Raw waveforms
+# either agree almost perfectly or not at all, so this sits far above the dub
+# case and far below the re-encode one.
+#
+# The previous bar was 2.0, which every dub cleared -- and clearing it meant
+# a correct answer got replaced by wherever the noise happened to peak.
+MIN_REFINE_PEAK_RATIO = 200.0
+
 
 @dataclass
 class OffsetEstimate:
@@ -262,14 +280,26 @@ def _refine_against_waveform(
     secondary: np.ndarray,
     sr: int,
     coarse_delay_ms: float,
-    window_ms: float = 60.0,
+    window_ms: float = REFINE_WINDOW_MS,
 ) -> Optional[float]:
     """Sharpen a coarse envelope-derived estimate using the full-rate signal.
 
     The envelope search is decimated by ENVELOPE_HOP, so its resolution is
     coarse. Correlating the raw waveform across a narrow window around the
-    coarse answer recovers sample-level precision without reintroducing the
-    global false-peak risk that raw correlation carries.
+    coarse answer recovers sample-level precision.
+
+    Only valid when the two tracks are near-identical recordings. A dub is a
+    different performance -- different voices, different room -- whose raw
+    waveforms do not correlate at all, even though the onsets line up exactly.
+    Refining one of those means correlating noise against noise, so the peak it
+    finds is arbitrary within the search window.
+
+    That made it strictly harmful on the material this tool exists for: it
+    overwrote a correct envelope answer with a wrong one, silently, and the
+    error grew with how different the two performances were. Two guards keep it
+    to the case it was written for -- a search window narrow enough to only
+    correct envelope quantisation, and a prominence bar high enough that noise
+    cannot clear it.
     """
     coarse_shift = int(round(-coarse_delay_ms / 1000.0 * sr))
     search_radius = int(window_ms / 1000.0 * sr)
@@ -300,7 +330,9 @@ def _refine_against_waveform(
     window = corr[lo:hi]
     local_peak = int(np.argmax(window))
     peak_index = lo + local_peak
-    if _peak_ratio(corr, peak_index, sr) < 2.0:
+    if _peak_ratio(corr, peak_index, sr) < MIN_REFINE_PEAK_RATIO:
+        # No real waveform agreement: these are different recordings, and the
+        # envelope's answer is the better one. Leaving it alone is the fix.
         return None
 
     refined_index = _parabolic_vertex(corr, peak_index)

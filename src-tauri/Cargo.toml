@@ -1,6 +1,6 @@
 [package]
 name = "audiosyncmaster"
-version = "2.7.2"
+version = "2.8.0"
 description = "Measure and correct audio/video sync offsets"
 authors = ["Ionicboy"]
 license = ""
