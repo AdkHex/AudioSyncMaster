@@ -1,26 +1,27 @@
 """Compensate the AC3 decoder delay that survives into a raw stream.
 
 AC3 and E-AC3 decode their output shifted by 256 samples -- 5.333ms at 48kHz.
-Whether that shift reaches a measurement depends entirely on the container:
+A bare .ac3/.eac3 stream carries no timestamps, so nothing can correct that
+shift and it lands directly in a measurement.
 
-    raw .ac3 / .eac3     shift is real     no timestamps to correct it by
-    .mkv .mka .m4a ...   shift is absent   ffmpeg trims priming using the
-                                           container's timestamps
+Inside a container the answer depends on the ffmpeg build. Measured with
+identical source content, AAC reference against the same E-AC3 stream:
 
-That distinction is the whole of this module, and getting it wrong is worse
-than having no correction at all. Applying the adjustment to a file that never
-had the shift moves a correct measurement 5.333ms off, silently, with full
-confidence reported -- and almost every real file is in a container.
+    raw .eac3                     +5.38 ms   every build
+    .mka / .mkv, ffmpeg 9         +0.03 ms   priming trimmed from timestamps
+    .mka / .mkv, Ubuntu packaged  +5.35 ms   priming still present
 
-Measured across containers with identical source content, AAC reference
-against the same E-AC3 stream:
+So the shift cannot be predicted from the file alone, and this module does not
+try. The correction is scoped to raw streams, where it is unconditionally
+right. A container is left alone: on a build that trims, correcting would
+introduce the very 5.333ms error the correction exists to remove, and on a
+build that does not, the residue is 5.333ms -- an order of magnitude below the
+drift and refinement errors that actually matter, and it does not vary within
+a run, so it cannot masquerade as drift.
 
-    raw .eac3   +5.384 ms
-    .mka        +0.027 ms
-    .mkv        +0.027 ms
-
-So the correction applies only to elementary streams. Within a container every
-codec pairing measured under 0.2ms, which is noise.
+Erring toward doing nothing is deliberate. A wrong correction is invisible and
+lands with full confidence; an absent one leaves a small constant bias that
+shows up identically at the start and the end of a file.
 
 Expressed in samples rather than milliseconds because the shift is a fixed
 sample count: a hard-coded ms value would be right at 48kHz and wrong at 44.1.
