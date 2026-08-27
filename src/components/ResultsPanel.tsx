@@ -7,7 +7,8 @@ import { cx } from "@/lib/cx";
 import {
   confidenceLevel,
   ffmpegCommandFor,
-  formatDelay,
+  formatPlayerDelay,
+  playerDelayMs,
   formatElapsed,
   frameOffset,
   resultKey,
@@ -211,7 +212,7 @@ export const ResultsPanel = memo(function ResultsPanel({
           const key = resultKey(result);
           const level = confidenceLevel(result);
           const isExpanded = expanded.has(key);
-          const frames = frameOffset(result.delayMs, result.primaryFps);
+          const frames = frameOffset(playerDelayMs(result.delayMs), result.primaryFps);
           const command = ffmpegCommandFor(result);
           const applicable =
             result.delayMs !== null && !result.error && !result.isLikelyCut && !!result.primaryPath;
@@ -266,7 +267,7 @@ export const ResultsPanel = memo(function ResultsPanel({
                   ) : (
                     <>
                       <span className="text-sm font-semibold">
-                        {formatDelay(result.delayMs)}
+                        {formatPlayerDelay(result.delayMs)}
                       </span>
                       {frames !== null && (
                         <span className="block text-[10.5px] text-muted-foreground">

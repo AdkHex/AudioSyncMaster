@@ -246,6 +246,28 @@ export function formatDelay(ms: number | null): string {
   return `${sign}${ms.toFixed(1)} ms`;
 }
 
+/** A measured offset, expressed the way every player and muxer expects it.
+ *
+ *  The engine measures where the audio sits: negative means the dub starts
+ *  before the picture. MKVToolNix, VLC and an Audacity-style manual workflow
+ *  all ask the opposite question -- how much delay do I *add* to fix this --
+ *  so the same situation carries the opposite sign there.
+ *
+ *  Showing the measurement under the label "Delay" invited exactly that
+ *  confusion, so the displayed number is the one you can type straight into
+ *  those tools. The engine's own value is untouched: it drives the correction,
+ *  and flipping it there would break every write path. */
+export function playerDelayMs(ms: number | null): number | null {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  // -0 formats as "-0.0 ms", which reads as a real negative offset.
+  return ms === 0 ? 0 : -ms;
+}
+
+/** Format an offset in the player convention. */
+export function formatPlayerDelay(ms: number | null): string {
+  return formatDelay(playerDelayMs(ms));
+}
+
 export function formatDrift(msPerS: number | null): string {
   if (msPerS === null || !Number.isFinite(msPerS)) return "--";
   const sign = msPerS > 0 ? "+" : "";

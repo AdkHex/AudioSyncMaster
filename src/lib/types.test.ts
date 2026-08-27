@@ -9,6 +9,8 @@ import {
   formatDuration,
   formatElapsed,
   formatSize,
+  formatPlayerDelay,
+  playerDelayMs,
   streamSummary,
   type AudioTrackInfo,
   type SyncResult,
@@ -211,5 +213,29 @@ describe("stream summary", () => {
 
   it("says nothing at all when there is nothing to say", () => {
     expect(streamSummary(undefined, undefined, "audio")).toBeNull();
+  });
+});
+
+
+describe("player delay convention", () => {
+  it("negates the measurement, because the two ask opposite questions", () => {
+    // The engine measures where the audio sits: -1169.7 means the dub starts
+    // that far before the picture. MKVToolNix, VLC and a manual Audacity
+    // workflow all ask what delay to ADD, which is the same fact negated.
+    expect(playerDelayMs(-1169.7)).toBeCloseTo(1169.7, 6);
+    expect(playerDelayMs(1217.2)).toBeCloseTo(-1217.2, 6);
+    expect(formatPlayerDelay(-1169.7)).toBe("+1169.7 ms");
+  });
+
+  it("never renders a signed zero", () => {
+    // -0 formats as "-0.0 ms", which reads as a real negative offset.
+    expect(Object.is(playerDelayMs(0), -0)).toBe(false);
+    expect(formatPlayerDelay(0)).toBe("0.0 ms");
+  });
+
+  it("passes absent and non-finite values straight through", () => {
+    expect(playerDelayMs(null)).toBeNull();
+    expect(playerDelayMs(Number.NaN)).toBeNull();
+    expect(formatPlayerDelay(null)).toBe("--");
   });
 });

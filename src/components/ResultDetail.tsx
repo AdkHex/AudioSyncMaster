@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 
 import {
   formatDelay,
+  formatPlayerDelay,
+  playerDelayMs,
   formatDrift,
   formatDuration,
   frameOffset,
@@ -44,24 +46,24 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
  *  that a single number can never convey on its own.
  */
 export function ResultDetail({ result, actions }: ResultDetailProps) {
-  const frames = frameOffset(result.delayMs, result.primaryFps);
+  const frames = frameOffset(playerDelayMs(result.delayMs), result.primaryFps);
 
   return (
     <div className="border-t border-border bg-primary/[0.055] px-[18px] pb-4 pt-1">
       <div className="grid gap-x-9 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
         <Group title="Measurement">
           <Row label="Delay">
-            {formatDelay(result.delayMs)}
+            {formatPlayerDelay(result.delayMs)}
             {frames !== null && (
               <span className="ml-1.5 font-sans text-[10.5px] text-muted-foreground">
                 &asymp; {frames} frame{Math.abs(frames) === 1 ? "" : "s"}
               </span>
             )}
           </Row>
-          <Row label="At file start">{formatDelay(result.startDelayMs)}</Row>
-          <Row label="At file end">{formatDelay(result.endDelayMs)}</Row>
+          <Row label="At file start">{formatPlayerDelay(result.startDelayMs)}</Row>
+          <Row label="At file end">{formatPlayerDelay(result.endDelayMs)}</Row>
           {result.delayAtStartMs !== null && result.delayAtStartMs !== result.delayMs && (
-            <Row label="Applied from t=0">{formatDelay(result.delayAtStartMs)}</Row>
+            <Row label="Applied from t=0">{formatPlayerDelay(result.delayAtStartMs)}</Row>
           )}
           <Row label="Windows used">
             {result.windowsUsed ?? "--"} of {result.windowsTotal ?? "--"}

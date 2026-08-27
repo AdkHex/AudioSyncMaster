@@ -37,6 +37,15 @@ fn number(value: Option<f64>, decimals: usize) -> String {
     value.map(|v| format!("{v:.decimals$}")).unwrap_or_default()
 }
 
+/// An offset in the convention every player and muxer uses: the delay you add
+/// to the audio to fix it, which is the negation of where the audio sits.
+///
+/// The UI reports offsets this way, so an export that kept the engine's own
+/// sign would hand back the opposite number under the same column name.
+fn player_delay(value: Option<f64>, decimals: usize) -> String {
+    number(value.map(|v| if v == 0.0 { 0.0 } else { -v }), decimals)
+}
+
 pub fn render(results: &[SyncResult]) -> String {
     let mut out = String::from(
         "Video,Audio,Delay (ms),Confidence,Drift (ms/s),Total Drift (ms),\
@@ -64,12 +73,12 @@ pub fn render(results: &[SyncResult]) -> String {
         let row = [
             escape(&result.video_file),
             escape(&result.audio_file),
-            number(result.delay_ms, 1),
+            player_delay(result.delay_ms, 1),
             number(result.confidence, 3),
             number(result.drift_ms_per_s, 4),
             number(result.total_drift_ms, 1),
-            number(result.start_delay_ms, 1),
-            number(result.end_delay_ms, 1),
+            player_delay(result.start_delay_ms, 1),
+            player_delay(result.end_delay_ms, 1),
             number(result.primary_fps, 3),
             result
                 .secondary_track
@@ -171,6 +180,25 @@ mod tests {
             "absent numbers should be blank, not 0: {data_line}"
         );
         assert!(!data_line.contains("0.0"), "absent value rendered as zero");
+    }
+
+    #[test]
+    fn delays_are_exported_in_the_player_convention() {
+        // The engine measures where the audio sits; the UI and every muxer use
+        // the delay you add to fix it. An export under the same column name has
+        // to agree with what the user just read on screen.
+        let mut result = result_with("a.mkv", "b.ac3");
+        result.delay_ms = Some(-1169.7);
+        result.start_delay_ms = Some(-1100.0);
+        result.end_delay_ms = Some(-1200.0);
+        let rendered = render(&[result]);
+        let data = rendered.lines().nth(1).unwrap();
+        assert!(
+            data.contains("1169.7") && !data.contains("-1169.7"),
+            "delay should export as +1169.7, got: {data}"
+        );
+        assert!(data.contains("1100.0") && !data.contains("-1100.0"));
+        assert!(data.contains("1200.0") && !data.contains("-1200.0"));
     }
 
     #[test]
