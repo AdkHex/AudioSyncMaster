@@ -26,6 +26,7 @@ import soundfile as sf  # noqa: E402
 from audiosync.analyze import analyze_pair  # noqa: E402
 from audiosync.codecdelay import (  # noqa: E402
     codec_delay_ms,
+    is_raw_stream,
     describe,
     relative_codec_delay_ms,
 )
@@ -79,8 +80,8 @@ def _encode(source, out, args):
 
 def test_delay_is_expressed_in_samples_not_milliseconds():
     """256 samples is a different number of ms at each rate the format allows."""
-    at_48k = codec_delay_ms("eac3", 48000)
-    at_44k = codec_delay_ms("eac3", 44100)
+    at_48k = codec_delay_ms("eac3", 48000, "eac3")
+    at_44k = codec_delay_ms("eac3", 44100, "eac3")
     assert abs(at_48k - 256 / 48000 * 1000) < 1e-9
     assert abs(at_44k - 256 / 44100 * 1000) < 1e-9
     assert at_48k != at_44k, "a fixed ms value would be wrong at one of these rates"
@@ -88,23 +89,25 @@ def test_delay_is_expressed_in_samples_not_milliseconds():
 
 def test_codecs_without_delay_return_zero():
     for codec in ("aac", "libopus", "flac", "libmp3lame", "pcm_s16le"):
-        assert codec_delay_ms(codec, 48000) == 0.0, f"{codec} should need no correction"
+        assert codec_delay_ms(codec, 48000, "eac3") == 0.0, (
+            f"{codec} should need no correction"
+        )
 
 
 def test_unknown_input_is_left_alone():
     """An unrecognised case must not be guessed at."""
-    assert codec_delay_ms(None, 48000) == 0.0
-    assert codec_delay_ms("eac3", None) == 0.0
-    assert codec_delay_ms("eac3", 0) == 0.0
-    assert codec_delay_ms("some-future-codec", 48000) == 0.0
+    assert codec_delay_ms(None, 48000, "eac3") == 0.0
+    assert codec_delay_ms("eac3", None, "eac3") == 0.0
+    assert codec_delay_ms("eac3", 0, "eac3") == 0.0
+    assert codec_delay_ms("some-future-codec", 48000, "eac3") == 0.0
     # A rate the format cannot actually use means something already resampled it.
-    assert codec_delay_ms("eac3", 16000) == 0.0
+    assert codec_delay_ms("eac3", 16000, "eac3") == 0.0
 
 
 def test_matching_codecs_need_no_correction():
     """The delay is identical on both sides, so it already cancels."""
     for codec in ("eac3", "ac3", "aac"):
-        assert relative_codec_delay_ms(codec, 48000, codec, 48000) == 0.0
+        assert relative_codec_delay_ms(codec, 48000, codec, 48000, "eac3", "eac3") == 0.0
 
 
 def test_correction_direction_matches_measurement():
@@ -113,16 +116,16 @@ def test_correction_direction_matches_measurement():
     Measured at 48kHz over identical content, the offset is +5.318ms, so the
     correction must be positive in that direction and negative when reversed.
     """
-    forward = relative_codec_delay_ms("aac", 48000, "eac3", 48000)
-    reverse = relative_codec_delay_ms("eac3", 48000, "aac", 48000)
+    forward = relative_codec_delay_ms("aac", 48000, "eac3", 48000, "mov,mp4,m4a", "eac3")
+    reverse = relative_codec_delay_ms("eac3", 48000, "aac", 48000, "eac3", "mov,mp4,m4a")
     assert forward > 0, f"expected a positive correction, got {forward:+.3f}"
     assert abs(forward - 5.333) < 0.05, f"expected ~+5.333ms, got {forward:+.3f}"
     assert abs(forward + reverse) < 1e-9, "reversing the pair must negate the correction"
 
 
 def test_description_only_appears_when_a_correction_was_made():
-    assert describe("eac3", 48000, "eac3", 48000) is None
-    text = describe("aac", 48000, "eac3", 48000)
+    assert describe("eac3", 48000, "eac3", 48000, "eac3", "eac3") is None
+    text = describe("aac", 48000, "eac3", 48000, "mov,mp4,m4a", "eac3")
     assert text and "codec delay" in text.lower()
 
 
@@ -193,6 +196,70 @@ def test_correction_is_recorded_on_the_result():
         )
 
 
+def test_no_correction_is_applied_inside_a_container():
+    """The case that shipped broken: E-AC3 in an MKV needs no correction.
+
+    A raw .eac3 stream has no timestamps, so the decoder's 256 priming samples
+    land in the measurement and must be removed. Put the identical stream in a
+    container and ffmpeg trims them itself -- subtracting again moves a correct
+    measurement 5.333ms off, with full confidence, on the pairing that matters
+    most: a disc rip's E-AC3 against a WEB-DL's AAC.
+
+    Every real file is in a container, so this is the common path, and the
+    original coverage exercised only the raw one.
+    """
+    with Workspace() as workspace:
+        base = _speech(45, seed=7)
+        true_offset_ms = 250.0
+        delay = int(true_offset_ms / 1000 * SR)
+
+        reference = workspace.path("ref.wav")
+        dub = workspace.path("dub.wav")
+        sf.write(reference, base, SR)
+        sf.write(dub, np.concatenate([np.zeros(delay, dtype=np.float32), base]), SR)
+
+        aac = _encode(reference, workspace.path("ref.m4a"), CODECS["aac"][0])
+        # Same E-AC3 stream, once bare and once wrapped.
+        raw = _encode(dub, workspace.path("dub.eac3"), CODECS["eac3"][0])
+        wrapped = _encode(dub, workspace.path("dub.mka"), CODECS["eac3"][0])
+
+        in_container = analyze_pair(aac, wrapped, window_s=12, window_count=3)
+        assert in_container.error is None, in_container.error
+        assert in_container.codec_delay_ms == 0.0, (
+            f"a container needs no correction, applied {in_container.codec_delay_ms:+.3f}ms"
+        )
+        assert abs(in_container.delay_ms - true_offset_ms) < 1.0, (
+            f"container measured {in_container.delay_ms:+.3f}ms, want {true_offset_ms:+.3f}"
+        )
+
+        # The bare stream still gets its correction, and lands on the same answer.
+        bare = analyze_pair(aac, raw, window_s=12, window_count=3)
+        assert bare.error is None, bare.error
+        assert bare.codec_delay_ms > 0, "a raw stream still needs the correction"
+        assert abs(bare.delay_ms - true_offset_ms) < 1.0, (
+            f"raw stream measured {bare.delay_ms:+.3f}ms, want {true_offset_ms:+.3f}"
+        )
+
+        # Both routes must agree, since the underlying audio is identical.
+        assert abs(in_container.delay_ms - bare.delay_ms) < 1.0, (
+            f"container {in_container.delay_ms:+.3f} vs raw {bare.delay_ms:+.3f}"
+        )
+
+
+def test_raw_stream_formats_are_recognised():
+    assert is_raw_stream("eac3")
+    assert is_raw_stream("ac3")
+    # ffprobe reports several candidates for ambiguous inputs.
+    assert is_raw_stream("ac3,eac3")
+    # Real containers, including ones that commonly carry AC3.
+    for fmt in ("matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2", "mpegts", "avi", "flac"):
+        assert not is_raw_stream(fmt), f"{fmt} is a container"
+    # Unknown is treated as a container: skipping a needed correction is the
+    # cheaper mistake, since containers vastly outnumber bare streams.
+    assert not is_raw_stream(None)
+    assert not is_raw_stream("")
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
@@ -212,3 +279,4 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+

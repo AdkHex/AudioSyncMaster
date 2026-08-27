@@ -1,35 +1,29 @@
-"""Compensate the constant delay some codecs add to their own output.
+"""Compensate the AC3 decoder delay that survives into a raw stream.
 
-Several codecs emit audio shifted from where the source sat, as a property of
-their transform rather than a property of the file. The shift is invisible in
-metadata -- the container reports ``start_time`` of 0 -- so nothing downstream
-can see it, yet it lands directly in a measured offset.
+AC3 and E-AC3 decode their output shifted by 256 samples -- 5.333ms at 48kHz.
+Whether that shift reaches a measurement depends entirely on the container:
 
-It only matters when the two files use *different* codecs. Both sides in AC3
-cancel exactly; a WEB-DL's AAC against a disc rip's E-AC3 does not, and that is
-the common case for dubbed material.
+    raw .ac3 / .eac3     shift is real     no timestamps to correct it by
+    .mkv .mka .m4a ...   shift is absent   ffmpeg trims priming using the
+                                           container's timestamps
 
-Measured, not assumed. Encoding one signal through two codecs and correlating
-the results against each other gives the difference directly -- with no real
-offset present, whatever is measured *is* the codec difference:
+That distinction is the whole of this module, and getting it wrong is worse
+than having no correction at all. Applying the adjustment to a file that never
+had the shift moves a correct measurement 5.333ms off, silently, with full
+confidence reported -- and almost every real file is in a container.
 
-    codec            delay
-    aac              0 samples
-    libmp3lame       0 samples   (encoder delay is carried in start_time)
-    libopus          0 samples
-    flac             0 samples
-    ac3           +256 samples
-    eac3          +256 samples
+Measured across containers with identical source content, AAC reference
+against the same E-AC3 stream:
 
-The AC3 figure held at 192k/448k/640k, mono/stereo/5.1, and at every sample
-rate the format supports -- always exactly 256 samples, which is 5.333ms at
-48kHz and 5.805ms at 44.1kHz. Expressing it in samples rather than milliseconds
-is what makes the correction exact at any rate.
+    raw .eac3   +5.384 ms
+    .mka        +0.027 ms
+    .mkv        +0.027 ms
 
-The sign is fixed by measurement, not by reasoning about which way a decoder
-shifts its output: with AAC as reference and E-AC3 as secondary over identical
-source content, the measured offset is +5.318ms at 48kHz, so that is what has
-to come back out of a real measurement.
+So the correction applies only to elementary streams. Within a container every
+codec pairing measured under 0.2ms, which is noise.
+
+Expressed in samples rather than milliseconds because the shift is a fixed
+sample count: a hard-coded ms value would be right at 48kHz and wrong at 44.1.
 """
 
 from __future__ import annotations
@@ -47,19 +41,50 @@ CODEC_DELAY_SAMPLES = {
 # been resampled somewhere, and the delay no longer applies cleanly.
 AC3_SAMPLE_RATES = (32000, 44100, 48000)
 
+# ffprobe format names for raw elementary streams -- a bare sequence of frames
+# with no timestamps. Everything else is a real container whose timestamps
+# ffmpeg already uses to trim decoder priming.
+RAW_STREAM_FORMATS = frozenset({"ac3", "eac3"})
 
-def codec_delay_ms(codec: Optional[str], sample_rate: Optional[int]) -> float:
+
+def is_raw_stream(container_format: Optional[str]) -> bool:
+    """Whether this is a bare elementary stream rather than a container.
+
+    ffprobe reports comma-separated candidates for ambiguous inputs, so any
+    listed name matching is enough. An unknown format is treated as a container:
+    that skips the correction, and skipping one that was needed costs 5.333ms,
+    while applying one that was not costs the same in the other direction on
+    far more files.
+    """
+    if not container_format:
+        return False
+    names = {part.strip().lower() for part in container_format.split(",")}
+    return bool(names & RAW_STREAM_FORMATS)
+
+
+def codec_delay_ms(
+    codec: Optional[str],
+    sample_rate: Optional[int],
+    container_format: Optional[str] = None,
+) -> float:
     """Delay this codec adds to its decoded output, in milliseconds.
 
-    Returns 0.0 when the codec is unknown, adds no delay, or is running at a
-    rate where the correction cannot be trusted -- an unrecognised case must
-    leave the measurement untouched rather than guess.
+    Returns 0.0 when the codec is unknown, adds no delay, sits in a container
+    that already compensates it, or runs at a rate where the correction cannot
+    be trusted -- an unrecognised case must leave the measurement untouched
+    rather than guess.
     """
     if not codec or not sample_rate or sample_rate <= 0:
         return 0.0
 
     samples = CODEC_DELAY_SAMPLES.get(codec.lower())
     if samples is None:
+        return 0.0
+
+    # The decisive check. In a container ffmpeg trims the priming samples using
+    # the stream's timestamps, so no shift ever reaches the measurement and
+    # correcting for one introduces the very error it was meant to remove.
+    if not is_raw_stream(container_format):
         return 0.0
 
     if codec.lower() in ("ac3", "eac3") and sample_rate not in AC3_SAMPLE_RATES:
@@ -75,15 +100,18 @@ def relative_codec_delay_ms(
     primary_rate: Optional[int],
     secondary_codec: Optional[str],
     secondary_rate: Optional[int],
+    primary_format: Optional[str] = None,
+    secondary_format: Optional[str] = None,
 ) -> float:
     """How much of a measured offset is pure codec delay rather than real sync.
 
-    Subtract this from a measurement to recover the true offset. Two files using
-    the same codec at the same rate return 0.0, because the delay is identical
-    on both sides and already cancels.
+    Subtract this from a measurement to recover the true offset. Returns 0.0
+    for two files using the same codec at the same rate, because the delay is
+    identical on both sides and already cancels -- and for anything in a real
+    container, where there is no delay to remove.
     """
-    primary = codec_delay_ms(primary_codec, primary_rate)
-    secondary = codec_delay_ms(secondary_codec, secondary_rate)
+    primary = codec_delay_ms(primary_codec, primary_rate, primary_format)
+    secondary = codec_delay_ms(secondary_codec, secondary_rate, secondary_format)
     # A measurement says how far the secondary sits behind the primary, so a
     # delay on the secondary inflates it and one on the primary reduces it.
     return secondary - primary
@@ -94,10 +122,13 @@ def describe(
     primary_rate: Optional[int],
     secondary_codec: Optional[str],
     secondary_rate: Optional[int],
+    primary_format: Optional[str] = None,
+    secondary_format: Optional[str] = None,
 ) -> Optional[str]:
     """Explain a non-zero correction, for the console and the result detail."""
     correction = relative_codec_delay_ms(
-        primary_codec, primary_rate, secondary_codec, secondary_rate
+        primary_codec, primary_rate, secondary_codec, secondary_rate,
+        primary_format, secondary_format,
     )
     if abs(correction) < 0.001:
         return None

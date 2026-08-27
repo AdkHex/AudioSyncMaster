@@ -126,9 +126,10 @@ export function ResultDetail({ result, actions }: ResultDetailProps) {
           <Info className="mt-[3px] h-3 w-3 shrink-0" aria-hidden />
           <span>
             <b className="font-semibold text-foreground">{formatDelay(result.codecDelayMs)}</b> of
-            codec delay was removed. {result.primaryCodec?.toUpperCase()} and{" "}
-            {result.secondaryCodec?.toUpperCase()} decode with different alignment, which would
-            otherwise land in the measurement.
+            codec delay was removed. One side is a raw {result.primaryCodec?.toUpperCase()}/
+            {result.secondaryCodec?.toUpperCase()} stream with no timestamps, so its decoder
+            priming would otherwise land in the measurement. Files in a container carry
+            timestamps and need no such adjustment.
           </span>
         </p>
       )}

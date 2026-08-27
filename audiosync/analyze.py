@@ -236,6 +236,7 @@ def analyze_pair(
         result.codec_delay_ms = relative_codec_delay_ms(
             primary_stream[0], primary_stream[1],
             secondary_stream[0], secondary_stream[1],
+            primary_info.container_format, secondary_info.container_format,
         )
 
         if not primary_duration or primary_duration <= 0:

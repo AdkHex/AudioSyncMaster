@@ -246,6 +246,11 @@ class MediaInfo:
     a 25fps PAL master drifts steadily against a 23.976fps source, and naming
     that cause is far more actionable than reporting the drift alone."""
 
+    container_format: Optional[str] = None
+    """ffprobe's format_name. Tells a real container from a raw elementary
+    stream, which is what decides whether AC3 decoder priming survives into a
+    measurement."""
+
 
 def _parse_frame_rate(raw: Optional[str]) -> Optional[float]:
     """Parse ffprobe's ``num/den`` frame rate.
@@ -276,7 +281,9 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
 
     command = [
         ffprobe_path(), "-v", "error",
-        "-show_entries", "format=duration",
+        # format_name distinguishes a real container from a raw elementary
+        # stream, which decides whether codec priming reaches a measurement.
+        "-show_entries", "format=duration,format_name",
         "-show_streams", "-of", "json", path,
     ]
     stdout = _run(command, PROBE_TIMEOUT_S, token, what=f"probe {os.path.basename(path)}")
@@ -370,6 +377,7 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
         channels,
         audio_tracks=tracks,
         fps=fps,
+        container_format=(payload.get("format") or {}).get("format_name"),
     )
 
 
