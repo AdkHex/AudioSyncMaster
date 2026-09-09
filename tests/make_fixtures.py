@@ -157,6 +157,39 @@ def build() -> list[dict]:
         }
     )
 
+    # --- Local cut: a chunk exists in one track but not the other, partway
+    # through an otherwise-constant offset. This must not be averaged away
+    # into a slightly-wrong single number; it must be reported as a cut. ---
+    splice_at_s = 20.0
+    splice_len_s = 2.0
+    lead_offset_ms = 300.0
+    lead_samples = int(round(lead_offset_ms / 1000.0 * SR))
+    splice_at_sample = int(splice_at_s * SR)
+    splice_len_samples = int(splice_len_s * SR)
+    inserted = _speechlike(splice_len_s, SR, seed=42)
+    secondary_with_cut = np.concatenate(
+        [
+            base[:splice_at_sample],
+            inserted,
+            base[splice_at_sample:],
+        ]
+    )
+    cases.append(
+        {
+            "name": "local_cut",
+            "primary": _write("local_cut_primary.wav", base),
+            "secondary": _write(
+                "local_cut_secondary.wav", _shift(secondary_with_cut, lead_samples)
+            ),
+            "true_offset_ms": lead_offset_ms,
+            "expect_match": True,
+            "kind": "local_cut",
+            "tolerance_ms": 20.0,
+            "cut_position_s": splice_at_s,
+            "cut_magnitude_ms": splice_len_s * 1000.0,
+        }
+    )
+
     # --- Quiet secondary: correlation must survive a large level difference ---
     cases.append(
         {

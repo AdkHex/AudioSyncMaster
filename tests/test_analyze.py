@@ -114,12 +114,60 @@ def test_drift_pair_reports_both_midpoint_and_start_offsets():
     )
 
 
-def test_no_drift_means_start_equals_midpoint():
+def test_no_drift_means_start_agrees_with_midpoint():
+    """Without drift the two offsets describe the same thing, so they must agree.
+
+    Not to the bit: delay_ms is the median of the windows and delay_at_start_ms
+    is now a fitted intercept, so on a constant-offset pair they are two
+    estimators of one number and differ by measurement noise. Requiring them to
+    be identical is what made the intercept conditional on the drift threshold
+    in the first place, and that is the bug below.
+    """
     case = _case("offset_500ms")
     result = analyze_pair(case["primary"], case["secondary"], window_s=8.0, window_count=5)
     assert result.error is None
-    assert result.delay_at_start_ms == result.delay_ms, (
-        "without drift the two offsets must be the same value"
+    assert abs(result.delay_at_start_ms - result.delay_ms) < 5.0, (
+        f"without drift the two offsets must agree: "
+        f"{result.delay_at_start_ms:.2f} vs {result.delay_ms:.2f}"
+    )
+
+
+def test_start_offset_ignores_drift_too_small_to_report():
+    """Sub-threshold drift must not leak into the offset used for corrections.
+
+    DRIFT_SIGNIFICANT_MS_PER_S decides whether drift is worth reporting, not
+    whether it exists. While delay_at_start_ms was gated on it, anything below
+    the threshold was reported as the median across the file -- the value at its
+    middle -- and the error was the drift times half the duration. On a
+    40-minute episode drifting a tenth of the threshold that is 6ms, which is
+    what this reconstructs: windows lying exactly on a known line, so the offset
+    at t=0 is known to the millisecond.
+    """
+    from audiosync.analyze import (  # noqa: PLC0415
+        DRIFT_SIGNIFICANT_MS_PER_S,
+        PairResult,
+        WindowResult,
+        _reconcile,
+    )
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    duration_s = 2400.0
+    true_at_zero = 4785.0
+    drift = DRIFT_SIGNIFICANT_MS_PER_S / 10.0
+
+    positions = plan_windows(duration_s, 45.0, 6)
+    result = PairResult("primary.mkv", "secondary.eac3")
+    result.primary_duration_s = duration_s
+    for position in positions:
+        offset = true_at_zero + drift * position
+        result.windows.append(WindowResult(position, OffsetEstimate(offset, 0.9, 500.0)))
+
+    _reconcile(result)
+
+    assert not result.has_significant_drift, "this drift is deliberately below the bar"
+    assert abs(result.delay_at_start_ms - true_at_zero) < 0.5, (
+        f"offset at t=0 is {result.delay_at_start_ms:.1f}ms, should be "
+        f"{true_at_zero:.1f}ms -- the mid-file value has leaked into it"
     )
 
 

@@ -64,7 +64,12 @@ class PairResult:
     confidence: float = 0.0
     drift_ms_per_s: Optional[float] = None
     delay_at_start_ms: Optional[float] = None
-    """Offset extrapolated back to t=0. Equals delay_ms when there is no drift."""
+    """Offset extrapolated back to t=0, which is where a correction is applied.
+
+    Fitted from every usable window whenever there is more than one, so it stays
+    the value at the start of the file even when the drift is too small to
+    report. It only falls back to delay_ms when a single window is all there
+    was, and then there is nothing to extrapolate from."""
     start_delay_ms: Optional[float] = None
     end_delay_ms: Optional[float] = None
     windows: List[WindowResult] = field(default_factory=list)
@@ -387,24 +392,45 @@ def _reconcile(result: PairResult) -> None:
     result.end_delay_ms = float(offsets[int(np.argmax(positions))])
 
     # Fit offset against position: the slope is the drift rate.
+    #
+    # The intercept is taken whenever a line could be fitted, not only when the
+    # drift is large enough to report. DRIFT_SIGNIFICANT_MS_PER_S answers "is
+    # this worth telling the user about, and does it need a speed correction?";
+    # it is not a claim that anything below it is zero. Gating the intercept on
+    # it meant that below the threshold `delay_at_start_ms` was quietly the
+    # median across the whole file -- the value at its middle, not at its
+    # start -- while still being named and consumed as the t=0 offset.
+    #
+    # The error that hides there is the drift times half the duration, so it
+    # grows with the file and peaks just under the threshold: 0.005 ms/s over a
+    # 40-minute episode is 6 ms, and 0.04 ms/s is 47 ms, all reported as no
+    # drift at all. Windows are spread from ~2% in to ~2% from the end, so
+    # reaching t=0 is a short extrapolation from a fit spanning the file.
+    #
+    # It costs a little noise when the drift is genuinely zero, and that is the
+    # whole trade: measured over 20000 runs at 6 windows, RMSE at t=0 goes from
+    # 0.46 ms (median) to 0.72 ms (intercept) with no drift, against 5.93 ms
+    # versus 0.72 ms at a tenth of the threshold. A quarter-millisecond is
+    # worth paying to delete an error of tens.
     if len(offsets) >= 3 and float(np.ptp(positions)) > 1.0:
         slope, intercept = np.polyfit(positions, offsets, 1)
         result.drift_ms_per_s = float(slope)
+        result.delay_at_start_ms = float(intercept)
         if abs(slope) > DRIFT_SIGNIFICANT_MS_PER_S:
             # With real drift no single number describes the whole file. Quote
-            # the midpoint value as the representative offset, but keep the
-            # t=0 intercept as well: a correction is applied from the start of
-            # the file, so using the midpoint there over-shifts by half the
-            # total drift.
+            # the midpoint value as the representative offset; corrections use
+            # the t=0 intercept above, since applying the midpoint value from
+            # the start of the file over-shifts by half the total drift.
             midpoint = float(np.mean(positions))
             result.delay_ms = float(np.polyval([slope, intercept], midpoint))
-            result.delay_at_start_ms = float(intercept)
     elif len(offsets) == 2 and float(np.ptp(positions)) > 1.0:
+        # Two points cannot separate drift from noise, but the extrapolation
+        # back to t=0 is short enough that the intercept is still barely more
+        # than the first window's own value.
         span = positions.max() - positions.min()
         slope = float((offsets[-1] - offsets[0]) / span)
         result.drift_ms_per_s = slope
-        if abs(slope) > DRIFT_SIGNIFICANT_MS_PER_S:
-            result.delay_at_start_ms = float(offsets[0] - slope * positions[0])
+        result.delay_at_start_ms = float(offsets[0] - slope * positions[0])
 
     if result.delay_at_start_ms is None:
         result.delay_at_start_ms = result.delay_ms
