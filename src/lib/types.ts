@@ -38,12 +38,16 @@ export interface AudioTrackInfo {
 
 /** Why a file drifts: a frame-rate conversion, or a different cut. */
 export interface RateDiagnosis {
-  driftMsPerS: number;
+  /** Null when a cut left too few windows on one side to fit a line through. */
+  driftMsPerS: number | null;
   speedRatio: number;
   sourceFps: number | null;
   targetFps: number | null;
   isRateMismatch: boolean;
   isLikelyCut: boolean;
+  /** Where the offset jumps and by how much, once a splice has been located. */
+  cutPositionS: number | null;
+  cutMagnitudeMs: number | null;
   explanation: string;
   correctionRatio: number | null;
 }
@@ -94,6 +98,11 @@ export interface SyncResult {
   primaryFps?: number | null;
   secondaryFps?: number | null;
   isLikelyCut?: boolean | null;
+  /** Where the cut is in the video's timeline, how tightly that was pinned
+   *  down, and how far the offset jumps there. Present only when isLikelyCut. */
+  cutPositionS?: number | null;
+  cutUncertaintyS?: number | null;
+  cutMagnitudeMs?: number | null;
   isRateMismatch?: boolean | null;
   /** Codec delay already removed from delayMs, so the figure is not silent. */
   codecDelayMs?: number | null;
@@ -205,6 +214,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outputSuffix: ".synced",
   theme: "dark",
 };
+
+/** A frame rate as people write it, from the exact rational the engine reports.
+ *
+ *  The engine holds 23.976 as 24000/1001, because a correction ratio built from
+ *  the decimal is wrong by 1e-6. Printed raw that arrives as
+ *  "23.976023976023978 fps", so the shorthand is restored at the last moment --
+ *  for display only, never for arithmetic.
+ */
+export function formatFps(fps: number): string {
+  return fps.toFixed(3).replace(/\.?0+$/, "");
+}
 
 export type ResultStatus = "ok" | "drift" | "rate-mismatch" | "cut" | "failed";
 

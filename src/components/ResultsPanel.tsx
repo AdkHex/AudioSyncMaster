@@ -15,6 +15,7 @@ import {
   type ConfidenceLevel,
   type RunSummary,
   type SyncResult,
+  formatFps,
 } from "@/lib/types";
 
 type Filter = "all" | ConfidenceLevel | "drift" | "cut" | "failed";
@@ -284,7 +285,8 @@ export const ResultsPanel = memo(function ResultsPanel({
                     <Tag tone="destructive">Different cut</Tag>
                   ) : result.isRateMismatch && result.rateDiagnosis?.sourceFps ? (
                     <Tag tone="warning">
-                      {result.rateDiagnosis.sourceFps} &rarr; {result.rateDiagnosis.targetFps} fps
+                      {formatFps(result.rateDiagnosis.sourceFps)} &rarr;{" "}
+                      {formatFps(result.rateDiagnosis.targetFps ?? 0)} fps
                     </Tag>
                   ) : result.hasSignificantDrift ? (
                     <Tag tone="warning" className="tabular font-mono">

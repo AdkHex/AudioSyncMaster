@@ -30,10 +30,35 @@ from typing import List, Optional
 import numpy as np
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".ts", ".wmv", ".flv"}
+# Every extension an external dub actually arrives as. Deliberately generous:
+# this only decides what a folder scan offers to pair up, and probing rejects
+# anything that turns out not to carry audio. Being short here is the worse
+# failure -- a .ec3 or .thd track was simply invisible, with nothing to explain
+# why. Kept in step with AUDIO_EXTENSIONS in MkvBatchMux's shared/lib/extensions.ts.
 AUDIO_EXTENSIONS = {
-    ".wav", ".mp3", ".aac", ".flac", ".ogg", ".opus", ".m4a",
-    ".eac3", ".ac3", ".dts", ".wma", ".mka",
+    # Dolby
+    ".ac3", ".eac3", ".ec3", ".thd", ".truehd", ".mlp",
+    # DTS
+    ".dts", ".dtsma", ".dtshd",
+    # MPEG and friends
+    ".aac", ".m4a", ".m4b", ".mp3", ".mp2", ".mpa",
+    # Lossless and open formats
+    ".flac", ".wav", ".w64", ".aiff", ".aif", ".caf", ".alac",
+    ".ogg", ".oga", ".opus", ".ape", ".tak", ".tta", ".wv",
+    # Containers that commonly hold nothing but audio
+    ".mka", ".wma",
 }
+
+# ffprobe format names that are a bare sequence of frames rather than a real
+# container. These carry no duration field, so ffprobe either divides the file
+# size by a nominal bitrate or gives up: raw ADTS AAC came back 14% short of a
+# 57.5s file, and raw TrueHD came back "N/A" and failed the pair outright. A
+# duration that wrong makes a PAL speedup look like nothing in particular, and
+# the pair then cannot be measured at all -- and bare .eac3/.ac3/.aac/.thd is
+# exactly the shape an external dub arrives in.
+ELEMENTARY_STREAM_FORMATS = frozenset({
+    "aac", "ac3", "eac3", "dts", "truehd", "mlp", "mp3", "spdif",
+})
 
 DECODE_TIMEOUT_S = 300
 PROBE_TIMEOUT_S = 60
@@ -368,6 +393,15 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
                 except (TypeError, ValueError):
                     continue
 
+    container_format = (payload.get("format") or {}).get("format_name")
+    if duration is None or _is_elementary_stream(container_format):
+        # Read where the last packet actually ends. Demuxing only, no decoding,
+        # so it costs a tenth of a second on the files that need it and is
+        # exact rather than inferred from a bitrate.
+        exact = _packet_duration(path, token)
+        if exact is not None:
+            duration = exact
+
     return MediaInfo(
         duration,
         has_audio,
@@ -377,8 +411,50 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
         channels,
         audio_tracks=tracks,
         fps=fps,
-        container_format=(payload.get("format") or {}).get("format_name"),
+        container_format=container_format,
     )
+
+
+def _is_elementary_stream(container_format: Optional[str]) -> bool:
+    """Whether ffprobe can only estimate this format's duration."""
+    if not container_format:
+        return False
+    names = {part.strip().lower() for part in container_format.split(",")}
+    return bool(names & ELEMENTARY_STREAM_FORMATS)
+
+
+def _packet_duration(
+    path: str, token: Optional[CancellationToken] = None
+) -> Optional[float]:
+    """Where the audio actually ends, from the last packet rather than a guess.
+
+    Returns None on any failure: an unreliable duration is still better than no
+    analysis, so this only ever improves on what ffprobe reported.
+    """
+    command = [
+        ffprobe_path(), "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "packet=pts_time,duration_time",
+        "-of", "csv=p=0", path,
+    ]
+    try:
+        stdout = _run(
+            command, PROBE_TIMEOUT_S, token,
+            what=f"measure {os.path.basename(path)}",
+        )
+    except MediaError:
+        return None
+
+    for line in reversed(stdout.decode("utf-8", errors="replace").splitlines()):
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            end = float(parts[0]) + float(parts[1])
+        except ValueError:
+            continue
+        if end > 0:
+            return end
+    return None
 
 
 def get_duration(path: str, token: Optional[CancellationToken] = None) -> Optional[float]:

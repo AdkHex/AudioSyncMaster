@@ -9,6 +9,7 @@ import {
   formatDuration,
   frameOffset,
   type SyncResult,
+  formatFps,
 } from "@/lib/types";
 
 interface ResultDetailProps {
@@ -102,13 +103,13 @@ export function ResultDetail({ result, actions }: ResultDetailProps) {
           <Row label="Video">
             {result.primaryCodec?.toUpperCase() ?? "--"}
             {result.primaryFps
-              ? ` · ${result.primaryFps.toFixed(3).replace(/\.?0+$/, "")} fps`
+              ? ` · ${formatFps(result.primaryFps)} fps`
               : ""}
           </Row>
           <Row label="Audio">
             {result.secondaryCodec?.toUpperCase() ?? "--"}
             {result.secondaryFps
-              ? ` · ${result.secondaryFps.toFixed(3).replace(/\.?0+$/, "")} fps`
+              ? ` · ${formatFps(result.secondaryFps)} fps`
               : ""}
           </Row>
           {(result.primaryTrack ?? 0) > 0 && (

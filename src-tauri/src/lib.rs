@@ -820,13 +820,17 @@ mod tests {
             "secondaryFps": null,
             "rateDiagnosis": {
                 "driftMsPerS": -0.998,
-                "speedRatio": 1.001001001001001,
-                "sourceFps": 23.976,
-                "targetFps": 24.0,
+                "speedRatio": 1.001,
+                // As the engine sends them: 23.976 is 24000/1001, and the
+                // correction ratio is 1000/1001 rather than a rounding of it.
+                "sourceFps": 24.0,
+                "targetFps": 23.976023976023978,
                 "isRateMismatch": true,
                 "isLikelyCut": false,
-                "explanation": "The drift matches a 23.976fps to 24fps conversion.",
-                "correctionRatio": 0.999
+                "cutPositionS": null,
+                "cutMagnitudeMs": null,
+                "explanation": "The audio was timed against a 24fps source, but this video is 23.976fps. Resampling the audio corrects it exactly.",
+                "correctionRatio": 0.999000999000999
             }
         });
 
@@ -836,13 +840,13 @@ mod tests {
             .rate_diagnosis
             .as_ref()
             .expect("rateDiagnosis must not be dropped");
-        assert_eq!(diagnosis["sourceFps"], 23.976);
-        assert_eq!(diagnosis["targetFps"], 24.0);
+        assert_eq!(diagnosis["sourceFps"], 24.0);
+        assert_eq!(diagnosis["targetFps"], 23.976023976023978);
         assert_eq!(diagnosis["isRateMismatch"], true);
 
         // And it must still be there once re-serialized for the frontend.
         let out = serde_json::to_value(&result).expect("should serialize");
-        assert_eq!(out["rateDiagnosis"]["sourceFps"], 23.976);
+        assert_eq!(out["rateDiagnosis"]["targetFps"], 23.976023976023978);
     }
 
     /// A result with no diagnosis is normal, not an error.

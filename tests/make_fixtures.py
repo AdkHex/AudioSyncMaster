@@ -190,6 +190,62 @@ def build() -> list[dict]:
         }
     )
 
+    # --- Minor cut: one frame of content, the smallest splice that can exist.
+    # Large cuts are easy; this is the size the reconciliation has to survive,
+    # because it is small enough to fit a gentle slope through and be reported
+    # as a frame-rate conversion instead. ---
+    one_frame_s = 1.0 / (24000.0 / 1001.0)
+    frame_samples = int(round(one_frame_s * SR))
+    secondary_one_frame = np.concatenate(
+        [
+            base[:splice_at_sample],
+            _speechlike(one_frame_s, SR, seed=77)[:frame_samples],
+            base[splice_at_sample:],
+        ]
+    )
+    cases.append(
+        {
+            "name": "minor_cut",
+            "primary": _write("minor_cut_primary.wav", base),
+            "secondary": _write(
+                "minor_cut_secondary.wav", _shift(secondary_one_frame, lead_samples)
+            ),
+            "true_offset_ms": lead_offset_ms,
+            "expect_match": True,
+            "kind": "local_cut",
+            "tolerance_ms": 20.0,
+            "cut_position_s": splice_at_s,
+            "cut_magnitude_ms": frame_samples / SR * 1000.0,
+        }
+    )
+
+    # --- Frame-rate conversions: the audio is the same content timed against a
+    # different rate, which is what a dub laid on the wrong master is. The PAL
+    # pair is the one that matters -- at 4.27% the offset moves further inside
+    # a single window than the correlation can resolve, so the speed has to be
+    # taken off before the pair can be measured at all. ---
+    video_fps = 24000.0 / 1001.0
+    for audio_fps, tag in ((25.0, "rate_pal"), (24.0, "rate_film")):
+        # Content of N frames occupies N/fps seconds, so audio timed at a
+        # higher rate runs correspondingly short against the same video.
+        timed = _resample_linear(base, video_fps / audio_fps)
+        cases.append(
+            {
+                "name": tag,
+                "primary": _write(f"{tag}_primary.wav", base),
+                "secondary": _write(f"{tag}_secondary.wav", _shift(timed, lead_samples)),
+                "true_offset_ms": lead_offset_ms,
+                "expect_match": True,
+                "kind": "rate_change",
+                "tolerance_ms": 20.0,
+                "audio_fps": audio_fps,
+                "video_fps": video_fps,
+                # How fast the offset moves: a window at video time t finds its
+                # content at video_fps/audio_fps of the way in.
+                "drift_ms_per_s": (video_fps / audio_fps - 1.0) * 1000.0,
+            }
+        )
+
     # --- Quiet secondary: correlation must survive a large level difference ---
     cases.append(
         {
