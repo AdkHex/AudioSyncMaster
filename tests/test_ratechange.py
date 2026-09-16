@@ -124,6 +124,19 @@ def test_the_narrowest_conversion_is_still_named():
     )
 
 
+def test_the_fast_pass_leaves_short_files_to_the_survey():
+    """A file too short for the fast window still gets the full survey, so a
+    PAL pair is found even when the app asked for the fast route."""
+    case = _case("rate_pal")
+    result = analyze_pair(
+        case["primary"], case["secondary"], window_s=10.0, window_count=5,
+        max_offset_ms=3000.0, prefer_fast=True,
+    )
+    assert result.error is None, f"rate_pal failed to measure: {result.error}"
+    named = _named(result)
+    assert named is not None, f"no conversion named; drift {result.drift_ms_per_s} ms/s"
+
+
 def test_the_correction_offered_is_the_exact_conversion():
     """The ratio is what gets applied to every timestamp, so it is not enough
     for it to be close: it has to be the conversion itself."""

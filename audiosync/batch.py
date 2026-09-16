@@ -29,6 +29,7 @@ class BatchOptions:
     window_count: int = 6
     max_offset_ms: float = 60000.0
     max_workers: int = DEFAULT_MAX_WORKERS
+    fast: bool = False
 
 
 class BatchEvents:
@@ -94,6 +95,7 @@ def run_batch(
                 token=token,
                 primary_track=pair.primary_track,
                 secondary_track=pair.secondary_track,
+                prefer_fast=options.fast,
                 progress=(
                     (lambda percent: events.on_pair_progress(name, percent))
                     if events.on_pair_progress

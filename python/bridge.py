@@ -117,6 +117,7 @@ def handle_analyze(request: dict) -> None:
         window_count=int(request.get("windowCount", 6)),
         max_offset_ms=float(request.get("maxOffsetMs", 60000.0)),
         max_workers=int(request.get("maxWorkers", 3)),
+        fast=bool(request.get("fast", False)),
     )
 
     # A pairing the user corrected by hand wins outright. Re-matching here

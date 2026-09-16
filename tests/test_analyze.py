@@ -320,6 +320,45 @@ def test_the_search_range_covers_the_offset_the_user_asked_for():
     assert abs(result.delay_ms - case["true_offset_ms"]) < 20.0
 
 
+def _speechlike(seconds: float, sr: int, seed: int) -> "np.ndarray":
+    """Synthesize a broadband speech-like signal, as in make_fixtures.py."""
+    import numpy as np  # noqa: PLC0415
+
+    rng = np.random.default_rng(seed)
+    n = int(seconds * sr)
+    noise = rng.standard_normal(n)
+    voiced = np.convolve(noise, np.ones(24) / 24.0, mode="same")
+    envelope = np.zeros(n)
+    pos = 0
+    while pos < n:
+        burst = int(rng.uniform(0.25, 0.9) * sr)
+        gap = int(rng.uniform(0.1, 0.5) * sr)
+        end = min(n, pos + burst)
+        envelope[pos:end] = rng.uniform(0.4, 1.0)
+        pos = end + gap
+    envelope = np.convolve(envelope, np.ones(128) / 128.0, mode="same")
+    signal = voiced * envelope
+    peak = np.max(np.abs(signal))
+    if peak > 0:
+        signal = signal / peak * 0.7
+    return signal.astype(np.float32)
+
+
+def _write_intro_pair(tmp: str, intro_s: float, content_s: float):
+    """A video with a recap the dub lacks: primary = intro + content, secondary = content."""
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    content = _speechlike(content_s, sr, seed=1)
+    primary = np.concatenate([_speechlike(intro_s, sr, seed=2), content])
+    primary_path = os.path.join(tmp, "primary.wav")
+    secondary_path = os.path.join(tmp, "secondary.wav")
+    sf.write(primary_path, primary, sr)
+    sf.write(secondary_path, content, sr)
+    return primary_path, secondary_path, sr
+
+
 def test_a_dub_missing_the_videos_recap_is_measured_not_stretched():
     """The reported failure: a video with a recap the dub does not carry.
 
@@ -334,42 +373,9 @@ def test_a_dub_missing_the_videos_recap_is_measured_not_stretched():
     """
     import tempfile  # noqa: PLC0415
 
-    import numpy as np  # noqa: PLC0415
-    import soundfile as sf  # noqa: PLC0415
-
-    sr = 16000
     intro_s = 92.4
-    content_s = 300.0
-
-    def speechlike(seconds: float, seed: int) -> np.ndarray:
-        rng = np.random.default_rng(seed)
-        n = int(seconds * sr)
-        noise = rng.standard_normal(n)
-        voiced = np.convolve(noise, np.ones(24) / 24.0, mode="same")
-        envelope = np.zeros(n)
-        pos = 0
-        while pos < n:
-            burst = int(rng.uniform(0.25, 0.9) * sr)
-            gap = int(rng.uniform(0.1, 0.5) * sr)
-            end = min(n, pos + burst)
-            envelope[pos:end] = rng.uniform(0.4, 1.0)
-            pos = end + gap
-        envelope = np.convolve(envelope, np.ones(128) / 128.0, mode="same")
-        signal = voiced * envelope
-        peak = np.max(np.abs(signal))
-        if peak > 0:
-            signal = signal / peak * 0.7
-        return signal.astype(np.float32)
-
-    content = speechlike(content_s, seed=1)
-    primary = np.concatenate([speechlike(intro_s, seed=2), content])
-    secondary = content
-
     with tempfile.TemporaryDirectory() as tmp:
-        primary_path = os.path.join(tmp, "primary.wav")
-        secondary_path = os.path.join(tmp, "secondary.wav")
-        sf.write(primary_path, primary, sr)
-        sf.write(secondary_path, secondary, sr)
+        primary_path, secondary_path, _ = _write_intro_pair(tmp, intro_s, 300.0)
         result = analyze_pair(
             primary_path, secondary_path,
             window_s=30.0, window_count=6, max_offset_ms=120000.0,
@@ -390,6 +396,64 @@ def test_a_dub_missing_the_videos_recap_is_measured_not_stretched():
         f"misdiagnosed a plain length difference: "
         f"{result.rate_diagnosis.explanation if result.rate_diagnosis else None}"
     )
+
+
+def test_the_fast_pass_measures_a_large_offset_with_two_windows():
+    """The same geometry through the fast route.
+
+    The fast route exists because decoding the whole offset range around every
+    survey window re-reads the file over and over: six windows at a five-minute
+    offset decode an hour of audio. One long window plus an end check finds the
+    same offset in two decodes, which is what makes a large search range usable
+    in a batch.
+    """
+    import tempfile  # noqa: PLC0415
+
+    intro_s = 92.4
+    with tempfile.TemporaryDirectory() as tmp:
+        primary_path, secondary_path, _ = _write_intro_pair(tmp, intro_s, 300.0)
+        result = analyze_pair(
+            primary_path, secondary_path,
+            window_s=45.0, window_count=6, max_offset_ms=300000.0, prefer_fast=True,
+        )
+
+    assert result.error is None, f"fast pair failed to measure: {result.error}"
+    assert len(result.windows) == 2, (
+        f"the fast pass should measure two windows, got {len(result.windows)}"
+    )
+    assert result.speed_compensation == 1.0, (
+        f"the dub was stretched by {result.speed_compensation:.4f}"
+    )
+    assert result.delay_ms is not None
+    assert abs(result.delay_ms - (-intro_s * 1000.0)) < 200.0, (
+        f"delay {result.delay_ms:.1f}ms, want {-intro_s * 1000.0:.1f}ms"
+    )
+    assert not result.is_rate_mismatch and not result.is_likely_cut
+
+
+def test_the_fast_pass_withholds_an_answer_when_the_end_check_disagrees():
+    """A drifting or cut pair must not quietly report one offset: the end check
+    disagrees with the long window and hands over to the full survey."""
+    import audiosync.analyze as analyze_module  # noqa: PLC0415
+
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    def fake_measure(primary_path, secondary_path, position_s, window_s, *args):
+        # The long window matches one thing, the end check another.
+        if window_s > 100.0:
+            return OffsetEstimate(-92400.0, 0.9, 500.0)
+        return OffsetEstimate(-1000.0, 0.9, 500.0)
+
+    original = analyze_module._measure_window
+    analyze_module._measure_window = fake_measure
+    try:
+        fast = analyze_module._fast_pair(
+            "primary.mkv", "secondary.m4a", 2400.0, 2300.0,
+            300000.0, None, 0, 0, 45.0,
+        )
+    finally:
+        analyze_module._measure_window = original
+    assert fast is None, "disagreeing windows must not yield a fast answer"
 
 
 def test_confidence_is_high_for_true_match():

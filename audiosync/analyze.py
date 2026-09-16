@@ -61,6 +61,28 @@ DECISIVE_PEAK_RATIO = 30.0
 # was never going to match can take.
 MAX_SPEED_TRIALS = 6
 
+# The fast route: one long window for the offset, one short check near the end.
+# Decoding the whole offset range as padding around every survey window
+# re-reads the file over and over -- six windows at a five-minute offset
+# decode an hour of audio -- so a large search range gets this instead: a
+# single long window finds the offset, and a short window near the end of the
+# file, decoded around the predicted position rather than the whole range,
+# catches a false lock or a drifting pair by disagreeing with it.
+FAST_WINDOW_S = 300.0
+# Below this span the fast window leaves no room for a separate end check, and
+# the survey is cheap anyway because short files cap the decode naturally.
+FAST_MIN_SPAN_S = 180.0
+# Slack the end check gives the predicted offset, in seconds. Absorbs
+# measurement noise; real drift is far larger and pushes the check's answer
+# out of agreement instead.
+FAST_VERIFY_MARGIN_S = 5.0
+# If the end check disagrees with the long window by more than this, the pair
+# is drifting or cut and the full survey takes over.
+FAST_AGREEMENT_MS = 500.0
+# How long the end check is. The survey's window length is calibrated for the
+# correlation threshold, so it is reused rather than invented.
+FAST_CHECK_WINDOW_S = 45.0
+
 
 @dataclass
 class WindowResult:
@@ -234,6 +256,7 @@ def analyze_pair(
     primary_track: int = 0,
     secondary_track: int = 0,
     cut_probes: int = 6,
+    prefer_fast: bool = False,
 ) -> PairResult:
     """Measure the offset between two media files.
 
@@ -247,6 +270,9 @@ def analyze_pair(
         cut_probes: how many extra short windows may be spent narrowing down a
             suspected cut. Zero skips it, which also means a cut resting on a
             single window can no longer be corroborated and is not reported.
+        prefer_fast: try the fast route first. One long window and an end check
+            replace the survey when they agree; anything they cannot settle
+            falls through to the full survey unchanged.
     """
     result = PairResult(
         primary_path,
@@ -323,24 +349,39 @@ def analyze_pair(
             return length, measured
 
         report(5)
-        effective_window, windows = sweep(secondary_rate)
-
-        # Too little to work with, which is what a rate conversion looks like
-        # when the durations did not predict it -- and they often cannot, since
-        # a dub that starts late or an episode with different credits moves the
-        # ratio further than the conversion does. Ask the audio instead.
-        if sum(1 for w in windows if w.usable) < MIN_USABLE_WINDOWS:
-            alternative = _search_speed(
-                primary_path, secondary_path, effective_window, max_offset_ms,
-                token, primary_track, secondary_track,
-                speed_candidates(primary_duration, secondary_duration),
-                secondary_rate, primary_duration,
+        fast = None
+        if prefer_fast:
+            fast = _fast_pair(
+                primary_path, secondary_path, primary_duration, secondary_duration,
+                max_offset_ms, token, primary_track, secondary_track, window_s,
             )
-            if alternative is not None and alternative != secondary_rate:
-                secondary_rate = alternative
-                effective_window, windows = sweep(secondary_rate)
+            if fast is not None:
+                report(50)
 
-        result.speed_compensation = secondary_rate / ANALYSIS_SR
+        if fast is not None:
+            effective_window, windows = fast
+            result.speed_compensation = 1.0
+        else:
+            effective_window, windows = sweep(secondary_rate)
+
+            # Too little to work with, which is what a rate conversion looks
+            # like when the durations did not predict it -- and they often
+            # cannot, since a dub that starts late or an episode with different
+            # credits moves the ratio further than the conversion does. Ask the
+            # audio instead.
+            if sum(1 for w in windows if w.usable) < MIN_USABLE_WINDOWS:
+                alternative = _search_speed(
+                    primary_path, secondary_path, effective_window, max_offset_ms,
+                    token, primary_track, secondary_track,
+                    speed_candidates(primary_duration, secondary_duration),
+                    secondary_rate, primary_duration,
+                )
+                if alternative is not None and alternative != secondary_rate:
+                    secondary_rate = alternative
+                    effective_window, windows = sweep(secondary_rate)
+
+            result.speed_compensation = secondary_rate / ANALYSIS_SR
+
         result.window_s = effective_window
         result.windows = windows
 
@@ -495,6 +536,64 @@ def _measure_window(
         confidence=estimate.confidence,
         peak_ratio=estimate.peak_ratio,
     )
+
+
+def _fast_pair(
+    primary_path: str,
+    secondary_path: str,
+    primary_duration: float,
+    secondary_duration: float,
+    max_offset_ms: float,
+    token: Optional[CancellationToken],
+    primary_track: int,
+    secondary_track: int,
+    window_s: float,
+):
+    """One long window plus an end check: the script-speed route.
+
+    A single long window finds the offset with the same correlation as the
+    survey, in one decode instead of six. The end check exists because one
+    window is not an answer: a window that locked onto a repeated musical
+    phrase looks exactly like a real match until another position disagrees
+    with it. The check decodes only around the predicted position -- a small
+    margin, not the whole offset range -- so it costs seconds.
+
+    Returns:
+        (window_s, windows) when the fast route settled the pair, or None to
+        hand over to the full survey.
+    """
+    span = min(primary_duration, secondary_duration)
+    if span < FAST_MIN_SPAN_S:
+        return None
+
+    length = min(FAST_WINDOW_S, span)
+    first_pos = min(5.0, span * 0.02)
+    first = _measure_window(
+        primary_path, secondary_path, first_pos, length,
+        max_offset_ms, token, primary_track, secondary_track, ANALYSIS_SR,
+    )
+    if not first.matched:
+        return None
+
+    # Near the end, where any drift or cut has moved the offset furthest. The
+    # inset matches the survey's, so the check never sits in the credits
+    # themselves.
+    check_length = min(FAST_CHECK_WINDOW_S, window_s)
+    check_pos = max(span - check_length - min(span * 0.02, 5.0), first_pos + 60.0)
+    if check_pos <= first_pos:
+        return None
+
+    margin_s = abs(first.delay_ms) / 1000.0 + FAST_VERIFY_MARGIN_S
+    check = _measure_window(
+        primary_path, secondary_path, check_pos, check_length,
+        margin_s * 1000.0, token, primary_track, secondary_track, ANALYSIS_SR,
+    )
+    if not check.matched:
+        return None
+    if abs(check.delay_ms - first.delay_ms) > FAST_AGREEMENT_MS:
+        return None
+
+    return length, [WindowResult(first_pos, first), WindowResult(check_pos, check)]
 
 
 def _search_speed(
