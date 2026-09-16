@@ -33,7 +33,6 @@ from .correlate import OffsetEstimate, estimate_offset
 from .framerate import (
     RateDiagnosis,
     diagnose,
-    plan_speed_compensation,
     speed_candidates,
 )
 from .media import CancellationToken, MediaError, load_audio, probe
@@ -295,18 +294,14 @@ def analyze_pair(
             result.error = f"Could not read duration of {result.secondary_name}"
             return result
 
-        # A large speed difference has to come off before anything is
-        # correlated: past about half a percent the alignment moves further
-        # inside a single window than the correlation can resolve, and the pair
-        # reports itself as unrelated rather than as a rate mismatch.
-        #
-        # ffmpeg needs an integer output rate, so what actually gets applied is
-        # the rounded one. Deriving the ratio back from that rate rather than
-        # carrying the ideal keeps every later conversion exact.
-        compensation = plan_speed_compensation(primary_duration, secondary_duration)
+        # Measure at the files' own speed first. A duration ratio can sit
+        # inside the tolerance of a standard conversion without being one -- a
+        # dub that lacks the video's recap runs ~4% shorter, which lands on
+        # 25/24 -- and stretching before measuring turns that pair into a
+        # confident wrong answer. A real conversion is taken off below, in
+        # `_search_speed`, only after the native measurement has failed and the
+        # audio itself confirms the rate.
         secondary_rate = ANALYSIS_SR
-        if compensation is not None:
-            secondary_rate = max(1, int(round(ANALYSIS_SR * float(compensation))))
 
         def sweep(rate: int):
             """Measure every window with the secondary running at this speed."""
@@ -431,7 +426,13 @@ def _measure_window(
     # How much of the primary's clock one second of decoded secondary covers.
     speed = secondary_rate / ANALYSIS_SR
 
-    margin_s = min(max_offset_ms / 1000.0, 30.0)
+    # The full head start the user asked for, with no cap of its own. Capping
+    # the margin below max_offset_ms quietly made every offset beyond the cap
+    # invisible: the matching audio was never decoded, so the correlation ran
+    # on unrelated audio and produced a confident wrong answer. The UI bounds
+    # max_offset_ms, so this is only ever as large as the user explicitly
+    # asked to search.
+    margin_s = max_offset_ms / 1000.0
     secondary_start = max(0.0, position_s - margin_s)
     secondary_window = window_s + margin_s + (position_s - secondary_start)
 

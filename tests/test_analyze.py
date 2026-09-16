@@ -320,6 +320,78 @@ def test_the_search_range_covers_the_offset_the_user_asked_for():
     assert abs(result.delay_ms - case["true_offset_ms"]) < 20.0
 
 
+def test_a_dub_missing_the_videos_recap_is_measured_not_stretched():
+    """The reported failure: a video with a recap the dub does not carry.
+
+    The dub is 92.4s shorter than the video, which puts its duration ratio
+    inside the tolerance of a 25/24 conversion -- the signature a duration
+    guess used to treat as a PAL speedup and "correct" by stretching the dub
+    4.17% before correlating. That produced a confident wrong delay. Two bugs
+    had to come out together: the pre-emptive stretch (the measurement must
+    run at the files' own speed, with a conversion taken off only on evidence),
+    and the 30s cap on the search margin, which made an offset this large
+    physically invisible no matter what the slider said.
+    """
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    intro_s = 92.4
+    content_s = 300.0
+
+    def speechlike(seconds: float, seed: int) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        n = int(seconds * sr)
+        noise = rng.standard_normal(n)
+        voiced = np.convolve(noise, np.ones(24) / 24.0, mode="same")
+        envelope = np.zeros(n)
+        pos = 0
+        while pos < n:
+            burst = int(rng.uniform(0.25, 0.9) * sr)
+            gap = int(rng.uniform(0.1, 0.5) * sr)
+            end = min(n, pos + burst)
+            envelope[pos:end] = rng.uniform(0.4, 1.0)
+            pos = end + gap
+        envelope = np.convolve(envelope, np.ones(128) / 128.0, mode="same")
+        signal = voiced * envelope
+        peak = np.max(np.abs(signal))
+        if peak > 0:
+            signal = signal / peak * 0.7
+        return signal.astype(np.float32)
+
+    content = speechlike(content_s, seed=1)
+    primary = np.concatenate([speechlike(intro_s, seed=2), content])
+    secondary = content
+
+    with tempfile.TemporaryDirectory() as tmp:
+        primary_path = os.path.join(tmp, "primary.wav")
+        secondary_path = os.path.join(tmp, "secondary.wav")
+        sf.write(primary_path, primary, sr)
+        sf.write(secondary_path, secondary, sr)
+        result = analyze_pair(
+            primary_path, secondary_path,
+            window_s=30.0, window_count=6, max_offset_ms=120000.0,
+        )
+
+    assert result.error is None, f"intro pair failed to measure: {result.error}"
+    assert result.speed_compensation == 1.0, (
+        f"the dub was stretched by {result.speed_compensation:.4f} -- its "
+        "shorter duration was mistaken for a PAL conversion"
+    )
+    # Negative: the dub's content sits earlier in its own file than in the
+    # video, which starts with the recap.
+    assert result.delay_ms is not None
+    assert abs(result.delay_ms - (-intro_s * 1000.0)) < 200.0, (
+        f"delay {result.delay_ms:.1f}ms, want {-intro_s * 1000.0:.1f}ms"
+    )
+    assert not result.is_rate_mismatch and not result.is_likely_cut, (
+        f"misdiagnosed a plain length difference: "
+        f"{result.rate_diagnosis.explanation if result.rate_diagnosis else None}"
+    )
+
+
 def test_confidence_is_high_for_true_match():
     case = _case("offset_50ms")
     result = analyze_pair(case["primary"], case["secondary"], window_s=8.0, window_count=4)

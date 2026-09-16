@@ -26,7 +26,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from audiosync.analyze import analyze_pair  # noqa: E402
 from audiosync.framerate import (  # noqa: E402
     diagnose,
-    plan_speed_compensation,
     speed_ratio_for,
 )
 
@@ -75,33 +74,6 @@ def test_the_speed_ratio_is_inverted_exactly():
 def test_an_impossible_drift_does_not_divide_by_zero():
     assert speed_ratio_for(-1000.0) == 0.0
     assert speed_ratio_for(-2000.0) == 0.0
-
-
-# --- Deciding whether to take the speed off before measuring --------------
-
-
-def test_a_pal_length_difference_is_recognised_from_the_durations():
-    """4.27% short is the signature, and it has to be caught before measuring."""
-    ratio = 25.0 / NTSC_FILM
-    plan = plan_speed_compensation(2700.0, 2700.0 / ratio)
-    assert plan is not None, "a PAL speedup was not recognised from the durations"
-    assert abs(float(plan) - ratio) < 1e-9
-
-
-def test_a_conversion_small_enough_to_correlate_is_left_alone():
-    """24 -> 23.976 needs no help, and the durations could not resolve it anyway:
-    0.1% is inside what a trimmed logo is worth."""
-    assert plan_speed_compensation(2700.0, 2700.0 / (24.0 / NTSC_FILM)) is None
-
-
-def test_a_plain_length_difference_is_not_treated_as_a_speed_change():
-    """Half a minute of extra credits on a 45-minute episode is 1.1% -- large
-    enough to notice and nothing to do with frame rate. Snapping to a standard
-    conversion is what tells the two apart."""
-    assert plan_speed_compensation(2700.0, 2730.0) is None
-    assert plan_speed_compensation(2700.0, 2700.0) is None
-    assert plan_speed_compensation(None, 2700.0) is None
-    assert plan_speed_compensation(2700.0, 0.0) is None
 
 
 # --- End to end -----------------------------------------------------------

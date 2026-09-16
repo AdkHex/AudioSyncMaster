@@ -54,13 +54,6 @@ FPS_TOLERANCE = 0.01
 # "tracks appear unrelated" at every useful window length.
 MAX_UNCOMPENSATED_RATIO = 0.005
 
-# How far a ratio of two durations may sit from a standard conversion and still
-# be taken as one. Far looser than RATIO_TOLERANCE because durations differ for
-# reasons that have nothing to do with frame rate -- a trimmed logo, trailing
-# silence, encoder padding -- and it only has to be tight enough that an
-# ordinary length difference is not mistaken for a conversion.
-DURATION_TOLERANCE = 0.005
-
 # How close a measured speed ratio must sit to a known conversion before it is
 # named. Real conversions are widely spaced -- the smallest, 24 -> 23.976, is
 # 0.1% -- so this must be tighter than that gap or neighbouring rates get
@@ -122,68 +115,18 @@ class RateDiagnosis:
         }
 
 
-def plan_speed_compensation(
-    primary_duration: Optional[float],
-    secondary_duration: Optional[float],
-) -> Optional[Fraction]:
-    """The playback-speed difference to undo before correlating, if any.
-
-    A PAL-sped dub runs 4.27% short, and that is far too much to correlate
-    through: the alignment moves further inside one window than the window can
-    resolve. The speed has to come off before the measurement, not after it.
-
-    The estimate comes from the two durations rather than from a measurement,
-    because a measurement is exactly what is not available yet. That is a crude
-    signal -- but crude in precisely the right place. It cannot separate 24 from
-    23.976 (0.1% apart, inside the noise of a trimmed logo), and it does not
-    need to: those correlate perfectly well uncompensated. What it separates
-    easily is 25 from 23.976, 4.27% apart, which is the case that fails.
-
-    Snapping to a standard conversion rather than using the raw ratio is the
-    safeguard. Two files whose lengths differ because one has extra credits
-    would otherwise be "compensated" for a speed change that never happened;
-    a length difference has no reason to land on 25/23.976.
-
-    Returns:
-        The exact ratio to undo, or None to measure the files as they are.
-    """
-    if not primary_duration or not secondary_duration:
-        return None
-    if primary_duration <= 0 or secondary_duration <= 0:
-        return None
-
-    # How much faster the secondary runs than the primary. Content of N frames
-    # occupies N/fps seconds, so this ratio is the audio's rate over the
-    # video's -- the same quantity a measured drift resolves to.
-    ratio = primary_duration / secondary_duration
-    if abs(ratio - 1.0) <= MAX_UNCOMPENSATED_RATIO:
-        return None
-
-    best: Optional[tuple] = None
-    for audio_rate in COMMON_RATES:
-        for video_rate in COMMON_RATES:
-            if audio_rate == video_rate:
-                continue
-            candidate = audio_rate / video_rate
-            error = abs(float(candidate) - ratio) / ratio
-            if error <= DURATION_TOLERANCE and (best is None or error < best[0]):
-                best = (error, candidate)
-
-    return best[1] if best is not None else None
-
-
 def speed_candidates(
     primary_duration: Optional[float],
     secondary_duration: Optional[float],
 ) -> List[Fraction]:
     """Every conversion worth trying to correlate through, likeliest first.
 
-    `plan_speed_compensation` believes the durations. This does not: it only
-    uses them to decide what to try first. Two files differ in length for
-    reasons that have nothing to do with speed -- a dub that starts later, an
-    episode with a different set of credits -- and half a percent of that is
-    enough to stop the ratio landing on a conversion, which leaves a PAL pair
-    unmeasurable for a reason unrelated to why it is hard to measure.
+    The durations are used only to order the search, never to decide it: two
+    files differ in length for reasons that have nothing to do with speed -- a
+    dub that starts later, an episode with a different set of credits -- and
+    half a percent of that is enough to stop the ratio landing on a conversion,
+    which leaves a PAL pair unmeasurable for a reason unrelated to why it is
+    hard to measure.
 
     Ordering by the durations keeps the search short in the cases where they
     were roughly right, without depending on them being right.
