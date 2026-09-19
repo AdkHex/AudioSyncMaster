@@ -25,7 +25,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import numpy as np
 
@@ -534,6 +534,109 @@ def load_audio(
         raise MediaError(f"No audio samples in {os.path.basename(path)}")
     # Copy off the read-only buffer so downstream code may write freely.
     return np.array(samples, dtype=np.float32)
+
+
+def stream_audio(
+    path: str,
+    sr: int,
+    track: int = 0,
+    channels: int = 1,
+    token: Optional[CancellationToken] = None,
+    block_s: float = 4.0,
+    audio_filter: Optional[str] = None,
+) -> Iterator[np.ndarray]:
+    """Decode a whole stream from t=0 in fixed blocks, without ever seeking.
+
+    ``load_audio`` holds a decoded window in memory and seeks to reach it. For
+    a whole feature film neither is acceptable: two hours at 16 kHz mono is
+    half a gigabyte per track, and a seek is only exact for some codecs --
+    measured with an impulse, an input ``-ss`` through AAC lands 8 samples
+    early, while a decode from the start lands on the sample for every codec.
+    Reading the file once from the top and handing out blocks keeps memory
+    flat and makes every position exact by construction, which is what lets
+    the dub-sync analysis and the dub-sync render agree to the sample: both
+    see each file through this one path.
+
+    Yields float32 arrays shaped ``(samples, channels)`` (``(samples,)`` when
+    mono). The final block is whatever is left. Cancelling stops the decode
+    mid-file and kills ffmpeg.
+
+    Args:
+        audio_filter: an ffmpeg ``-af`` chain applied before the format
+            conversion, for the callers that need a time-stretch.
+    """
+    if not os.path.isfile(path):
+        raise MediaError(f"File not found: {path}")
+    if token:
+        token.raise_if_cancelled()
+
+    command = [ffmpeg_path(), "-nostdin", "-v", "error", "-i", path,
+               "-map", f"0:a:{max(0, track)}", "-vn", "-sn", "-dn"]
+    if audio_filter:
+        command.extend(["-af", audio_filter])
+    command.extend([
+        "-f", "f32le", "-acodec", "pcm_f32le",
+        "-ar", str(sr), "-ac", str(max(1, channels)), "-",
+    ])
+
+    frame_bytes = 4 * max(1, channels)
+    block_bytes = max(frame_bytes, int(block_s * sr) * frame_bytes)
+    what = f"decode {os.path.basename(path)}"
+
+    try:
+        process = subprocess.Popen(command, **_popen_kwargs())
+    except FileNotFoundError as exc:
+        raise MediaError(
+            f"{os.path.basename(command[0])} not found. Install FFmpeg or bundle it "
+            f"in src-tauri/resources/ffmpeg."
+        ) from exc
+    except OSError as exc:
+        raise MediaError(f"Could not start {os.path.basename(command[0])}: {exc}") from exc
+
+    # stderr is drained on its own thread: ffmpeg blocks once the pipe fills,
+    # and a decoder that prints a warning per frame would otherwise stall a
+    # two-hour decode after the first few kilobytes of complaints.
+    stderr_chunks: list[bytes] = []
+    drain = threading.Thread(
+        target=lambda: stderr_chunks.append(process.stderr.read()), daemon=True
+    )
+    drain.start()
+    if token:
+        token.register(process)
+
+    produced = 0
+    try:
+        assert process.stdout is not None
+        pending = b""
+        while True:
+            if token:
+                token.raise_if_cancelled()
+            chunk = process.stdout.read(block_bytes)
+            if not chunk:
+                break
+            pending += chunk
+            usable = len(pending) - (len(pending) % frame_bytes)
+            if usable == 0:
+                continue
+            block = np.frombuffer(pending[:usable], dtype=np.float32)
+            pending = pending[usable:]
+            produced += usable // frame_bytes
+            yield block.reshape(-1, channels) if channels > 1 else block.copy()
+        process.wait()
+        drain.join(timeout=5)
+        if token and token.cancelled:
+            raise Cancelled("operation cancelled")
+        if process.returncode != 0:
+            detail = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+            tail = detail.splitlines()[-1] if detail else f"exit code {process.returncode}"
+            raise MediaError(f"Failed to {what}: {tail}")
+        if produced == 0:
+            raise MediaError(f"No audio decoded from {os.path.basename(path)}")
+    finally:
+        if token:
+            token.unregister(process)
+        if process.poll() is None:
+            _terminate(process)
 
 
 def _run(

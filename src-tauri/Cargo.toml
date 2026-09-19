@@ -17,6 +17,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
 
+[dev-dependencies]
+# The mock runtime lets the end-to-end test call a command exactly as the
+# webview would, with the real Python engine behind it.
+tauri = { version = "2.9.5", features = ["test"] }
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

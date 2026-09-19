@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
 import tempfile
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if hasattr(sys, "_MEIPASS"):
@@ -39,11 +41,16 @@ try:
         MatchPair,
         list_media,
         match_folders,
+        match_lists,
         pair_every_combination,
         pair_movie_mode,
         validate_pattern,
     )
-    from audiosync.media import CancellationToken, MediaError, has_ffmpeg, probe
+    from audiosync.dubrender import RenderOptions, default_output_path, resolve_codec
+    from audiosync.dubrender import mux as mux_dub
+    from audiosync.dubrender import render as render_dub
+    from audiosync.dubsync import DubSyncPlan, build_envelope, plan_dubsync, verify_output
+    from audiosync.media import Cancelled, CancellationToken, MediaError, has_ffmpeg, probe
     from audiosync.mux import (
         apply_correction,
         choose_preview_position,
@@ -332,6 +339,19 @@ def handle_preview_pairs(request: dict) -> None:
         )
         return
 
+    if mode == "dubsync":
+        # Each episode or movie against its own dub: episode numbers where the
+        # names carry them, filename similarity otherwise.
+        videos = [p for p in (request.get("videoFiles") or []) if os.path.isfile(p)]
+        dubs = [p for p in (request.get("audioFiles") or []) if os.path.isfile(p)]
+        if not videos and request.get("videoFolder"):
+            videos = list_media(request["videoFolder"], "video")
+        if not dubs and request.get("audioFolder"):
+            dubs = list_media(request["audioFolder"])
+        report = match_lists(videos, dubs)
+        emit({"type": "pairs", **report.to_dict()})
+        return
+
     audio_file = request.get("audioFile") or ""
     video_files = request.get("videoFiles") or list_media(
         request.get("videoFolder") or "", "video"
@@ -508,13 +528,273 @@ def handle_apply(request: dict) -> None:
           "cancelled": token.cancelled})
 
 
-def handle_cancel(_request: dict) -> None:
+def handle_dubsync(request: dict) -> None:
+    """Lay a cut dub onto its video and write the result.
+
+    Plans, renders, verifies and optionally muxes in one command, reporting
+    each stage. A ``plan`` in the request skips the analysis and renders
+    that plan, which is how an edited plan comes back from the app.
+    """
+    if not has_ffmpeg():
+        emit_error("FFmpeg was not found.", fatal=True)
+        emit({"type": "dubsyncDone", "error": "FFmpeg was not found"})
+        return
+
+    token = CancellationToken()
+    _set_token(token)
+    started = {"plan": None}
+
+    def progress(percent: int, stage: str) -> None:
+        emit({"type": "dubsyncProgress", "percent": percent, "stage": stage})
+
+    try:
+        envelopes: dict = {}
+        if request.get("plan"):
+            plan = DubSyncPlan.from_dict(request["plan"])
+        else:
+            video = request.get("videoPath")
+            dub = request.get("dubPath")
+            if not video or not dub or not os.path.isfile(video) or not os.path.isfile(dub):
+                emit_error("A video and a dub are needed.", fatal=True)
+                emit({"type": "dubsyncDone", "error": "A video and a dub are needed"})
+                return
+            plan = plan_dubsync(
+                video, dub,
+                video_track=int(request.get("videoTrack", 0) or 0),
+                dub_track=int(request.get("dubTrack", 0) or 0),
+                search_s=float(request.get("searchSeconds", 120.0) or 120.0),
+                speed=request.get("speed"),
+                fill_gain_db=request.get("fillGainDb"),
+                keep_unmatched_dub=not bool(request.get("fillUnmatched")),
+                token=token, progress=progress, log=emit_log, envelopes=envelopes,
+            )
+        started["plan"] = plan
+        emit({"type": "dubsyncPlan", "plan": plan.to_dict(), "description": plan.describe()})
+        if plan.error:
+            emit({"type": "dubsyncDone", "plan": plan.to_dict(), "error": plan.error})
+            return
+        if request.get("planOnly"):
+            emit({"type": "dubsyncDone", "plan": plan.to_dict(), "output": None})
+            return
+
+        codec = resolve_codec(request.get("codec") or "same", plan, token)
+        output = request.get("outputPath") or default_output_path(plan, codec, request.get("outputDir"))
+        if os.path.exists(output) and not request.get("overwrite"):
+            raise MediaError(f"Output already exists: {os.path.basename(output)}")
+        options = RenderOptions(
+            codec=codec,
+            bitrate=request.get("bitrate"),
+            sample_rate=request.get("sampleRate"),
+            channels=request.get("channels"),
+            xfade_s=float(request.get("xfadeMs", 10.0) or 10.0) / 1000.0,
+            stretch=request.get("stretch") or "resample",
+        )
+        result = render_dub(plan, output, options, token=token, progress=progress, log=emit_log)
+        for warning in result.warnings:
+            emit_log(warning)
+
+        verification = None
+        if request.get("verify", True):
+            stage = "checking the finished track"
+            progress(0, stage)
+            primary = envelopes.get("primary") or build_envelope(
+                plan.video_path, plan.video_track, token,
+                lambda f: progress(int(50 * f), stage), plan.video_duration_s,
+            )
+            finished = build_envelope(
+                output, token=token,
+                progress=lambda f: progress(50 + int(45 * f), stage),
+                expected_duration_s=plan.video_duration_s,
+            )
+            verification = verify_output(primary, finished, plan, token)
+            progress(100, stage)
+            emit_log(verification.describe())
+
+        muxed = None
+        if request.get("mux"):
+            progress(0, "muxing")
+            muxed = mux_dub(
+                plan, output, request.get("muxPath"),
+                language=request.get("language"), title=request.get("title"),
+                token=token, overwrite=bool(request.get("overwrite")),
+            )
+        emit({
+            "type": "dubsyncDone",
+            "plan": plan.to_dict(),
+            "output": result.to_dict(),
+            "verification": verification.to_dict() if verification else None,
+            "verificationText": verification.describe() if verification else None,
+            "muxedPath": muxed,
+            "cancelled": token.cancelled,
+        })
+    except Cancelled:
+        emit({"type": "dubsyncDone", "plan": started["plan"].to_dict() if started["plan"] else None,
+              "cancelled": True})
+    except (MediaError, OSError) as exc:
+        emit_error(str(exc))
+        emit({"type": "dubsyncDone", "plan": started["plan"].to_dict() if started["plan"] else None,
+              "error": str(exc)})
+    finally:
+        _set_token(None)
+
+
+def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken) -> dict:
+    """One pair of the batch: plan, render, verify, optionally mux.
+
+    Runs on its own pool thread; every event carries the job index so the
+    app can route it to the right queue row.
+    """
+    video = job.get("videoPath")
+    dub = job.get("dubPath")
+
+    def progress(percent: int, stage: str) -> None:
+        emit({"type": "dubsyncJobProgress", "job": index, "percent": percent, "stage": stage})
+
+    def log(message: str) -> None:
+        emit({"type": "dubsyncJobLog", "job": index, "message": message})
+
+    def outcome(**extra) -> dict:
+        payload = {"job": index}
+        payload.update(extra)
+        return payload
+
+    emit({
+        "type": "dubsyncJobStart", "job": index,
+        "name": os.path.basename(video), "dub": os.path.basename(dub),
+    })
+    if token.cancelled:
+        return outcome(cancelled=True)
+
+    envelopes: dict = {}
+    try:
+        plan = plan_dubsync(
+            video, dub,
+            video_track=int(job.get("videoTrack", 0) or 0),
+            dub_track=int(job.get("dubTrack", 0) or 0),
+            search_s=float(options.get("searchSeconds", 120.0) or 120.0),
+            speed=options.get("speed"),
+            fill_gain_db=options.get("fillGainDb"),
+            keep_unmatched_dub=not bool(options.get("fillUnmatched")),
+            token=token, progress=progress, log=log, envelopes=envelopes,
+        )
+    except Cancelled:
+        return outcome(cancelled=True)
+    except (MediaError, OSError) as exc:
+        return outcome(error=str(exc))
+
+    emit({"type": "dubsyncJobPlan", "job": index, "plan": plan.to_dict(),
+          "description": plan.describe()})
+    if plan.error:
+        return outcome(plan=plan.to_dict(), error=plan.error)
+    if options.get("planOnly"):
+        return outcome(plan=plan.to_dict())
+
+    try:
+        codec = resolve_codec(options.get("codec") or "same", plan, token)
+        output = job.get("outputPath") or default_output_path(
+            plan, codec, options.get("outputDir"))
+        if os.path.exists(output) and not options.get("overwrite"):
+            raise MediaError(f"Output already exists: {os.path.basename(output)}")
+        render_options = RenderOptions(
+            codec=codec,
+            bitrate=options.get("bitrate"),
+            sample_rate=options.get("sampleRate"),
+            channels=options.get("channels"),
+            xfade_s=float(options.get("xfadeMs", 10.0) or 10.0) / 1000.0,
+            stretch=options.get("stretch") or "resample",
+        )
+        result = render_dub(plan, output, render_options, token=token,
+                            progress=progress, log=log)
+        for warning in result.warnings:
+            log(warning)
+
+        verification = None
+        if options.get("verify", True):
+            stage = "checking the finished track"
+            progress(0, stage)
+            primary = envelopes.get("primary") or build_envelope(
+                plan.video_path, plan.video_track, token,
+                lambda f: progress(int(50 * f), stage), plan.video_duration_s,
+            )
+            finished = build_envelope(
+                output, token=token,
+                progress=lambda f: progress(50 + int(45 * f), stage),
+                expected_duration_s=plan.video_duration_s,
+            )
+            verification = verify_output(primary, finished, plan, token)
+            progress(100, stage)
+            log(verification.describe())
+
+        muxed = None
+        if options.get("mux"):
+            progress(0, "muxing")
+            muxed = mux_dub(
+                plan, output, job.get("muxPath"),
+                language=options.get("language"), title=options.get("title"),
+                token=token, overwrite=bool(options.get("overwrite")),
+            )
+        return outcome(
+            plan=plan.to_dict(),
+            output=result.to_dict(),
+            verification=verification.to_dict() if verification else None,
+            verificationText=verification.describe() if verification else None,
+            muxedPath=muxed,
+        )
+    except Cancelled:
+        return outcome(plan=plan.to_dict(), cancelled=True)
+    except (MediaError, OSError) as exc:
+        return outcome(plan=plan.to_dict(), error=str(exc))
+
+
+def handle_dubsync_batch(request: dict) -> None:
+    """Sync a queue of pairs in parallel: a season of episodes, or several
+    movies at once. Each pair runs the full dub sync (plan, write, check,
+    optional mux) on its own thread; the app routes events by job index."""
+    if not has_ffmpeg():
+        emit_error("FFmpeg was not found.", fatal=True)
+        emit({"type": "dubsyncBatchDone", "outcomes": [], "error": "FFmpeg was not found"})
+        return
+
+    jobs = [j for j in (request.get("jobs") or []) if j.get("videoPath") and j.get("dubPath")]
+    if not jobs:
+        emit_error("No pairs to sync.", fatal=True)
+        emit({"type": "dubsyncBatchDone", "outcomes": [], "error": "No pairs to sync"})
+        return
+
+    token = CancellationToken()
+    _set_token(token)
+    max_workers = int(request.get("maxWorkers", 3) or 3)
+    max_workers = max(1, min(max_workers, 8, len(jobs)))
+    outcomes: dict = {}
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dubsync") as pool:
+            futures = {
+                pool.submit(_run_dub_job, index, job, request, token): index
+                for index, job in enumerate(jobs)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    outcomes[index] = future.result()
+                except Exception as exc:  # noqa: BLE001 - one job must not sink the batch
+                    outcomes[index] = {"job": index, "error": f"{type(exc).__name__}: {exc}"}
+                    emit_log(f"Job {index + 1} failed: {exc}")
+                emit({"type": "dubsyncJobDone", **outcomes[index]})
+    finally:
+        _set_token(None)
+
+    ordered = [outcomes.get(i) or {"job": i, "error": "No outcome was produced"} for i in range(len(jobs))]
+    emit({"type": "dubsyncBatchDone", "outcomes": ordered, "cancelled": token.cancelled})
+
+
+def handle_cancel(request: dict) -> None:
     with _token_lock:
         token = _active_token
     if token:
         token.cancel()
         emit_log("Cancellation requested.")
-    emit({"type": "cancelAck"})
+    if request.get("command") == "cancel":
+        emit({"type": "cancelAck"})
 
 
 HANDLERS = {
@@ -524,6 +804,8 @@ HANDLERS = {
     "listTracks": handle_list_tracks,
     "preview": handle_preview,
     "apply": handle_apply,
+    "dubsync": handle_dubsync,
+    "dubsyncBatch": handle_dubsync_batch,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }
@@ -542,8 +824,27 @@ def dispatch(request: dict) -> None:
         traceback.print_exc(file=sys.stderr)
 
 
+def _serve(requests: "queue.Queue[dict | None]") -> None:
+    """Run commands one at a time, in the order they arrived."""
+    while True:
+        request = requests.get()
+        if request is None:
+            return
+        dispatch(request)
+
+
 def main() -> int:
     emit({"type": "ready", "ffmpeg": has_ffmpeg()})
+
+    # Commands run on a worker thread so this loop is always reading. It
+    # used to run them here, which meant a ``cancel`` written during a run
+    # sat unread in the pipe until the run it was meant to stop had
+    # finished on its own -- the Stop button did nothing, on every command,
+    # for as long as the work took. Everything but cancel and shutdown is
+    # queued, so commands still execute one at a time in order.
+    requests: "queue.Queue[dict | None]" = queue.Queue()
+    worker = threading.Thread(target=_serve, args=(requests,), daemon=True, name="commands")
+    worker.start()
 
     for line in sys.stdin:
         line = line.strip()
@@ -558,14 +859,22 @@ def main() -> int:
         if request.get("command") == "shutdown":
             break
 
-        # Cancel must be handled inline so it is not queued behind the run it
-        # is trying to stop.
+        # Handled here, on the reading thread, so it reaches the run in
+        # flight rather than queueing behind it.
         if request.get("command") == "cancel":
             handle_cancel(request)
             continue
 
-        dispatch(request)
+        requests.put(request)
 
+    # Shutdown means "no more commands", not "stop": whatever was sent
+    # before it still runs to completion, as it did when commands ran on
+    # this thread and the shutdown line was only read afterwards. A caller
+    # that pipes a request and a shutdown together -- the CI smoke test, a
+    # shell script -- relies on that. To abort instead, send cancel first;
+    # the host kills the process outright when its window closes.
+    requests.put(None)
+    worker.join()
     return 0
 
 

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { AppHeader } from "@/components/AppHeader";
 import { ApplyProgressDialog, type ApplyState } from "@/components/ApplyProgressDialog";
 import { ConsolePanel } from "@/components/ConsolePanel";
+import { DubQueuePanel } from "@/components/DubQueuePanel";
 import { HistoryPanel } from "@/components/HistoryPanel";
 import { LiveAnnouncer } from "@/components/LiveAnnouncer";
 import { PairingPreview } from "@/components/PairingPreview";
@@ -23,6 +24,7 @@ import {
   saveRecentFolders,
   saveSettings,
 } from "@/lib/storage";
+import { dubQueueReducer, initialDubQueueState } from "@/lib/dubQueueReducer";
 import {
   estimateRemainingMs,
   initialSyncState,
@@ -66,6 +68,9 @@ export default function Index() {
   const desktop = api.isDesktop();
 
   const [state, dispatch] = useReducer(syncReducer, initialSyncState);
+  // The dub sync run is a queue: a season of episodes, or several movies,
+  // each pair moving through its own stages to a plan and a verification.
+  const [dub, dubDispatch] = useReducer(dubQueueReducer, initialDubQueueState);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [recentFolders, setRecentFolders] = useState(() => loadRecentFolders());
@@ -104,6 +109,8 @@ export default function Index() {
    *  the previous configuration. */
   const stateRef = useRef(state);
   stateRef.current = state;
+  const dubRef = useRef(dub);
+  dubRef.current = dub;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   // Read through refs: buildRequest must not be re-created on every track
@@ -176,6 +183,23 @@ export default function Index() {
           dispatch({ type: "fileProgress", file: event.file, percent: event.percent }),
         onResult: (result) => dispatch({ type: "result", result }),
         onPairs: (pairing) => dispatch({ type: "setPairing", pairing }),
+        onDubQueueJobStart: (event) => dubDispatch({ type: "jobStart", job: event.job }),
+        onDubQueueJobProgress: (event) =>
+          dubDispatch({ type: "jobProgress", job: event.job, percent: event.percent, stage: event.stage }),
+        onDubQueueJobPlan: (event) => dubDispatch({ type: "jobPlan", job: event.job, plan: event.plan }),
+        onDubQueueJobDone: (event) =>
+          dubDispatch({
+            type: "jobDone",
+            outcome: {
+              job: event.job,
+              plan: event.plan ?? null,
+              output: event.output ?? null,
+              verification: event.verification ?? null,
+              muxedPath: event.muxedPath ?? null,
+              cancelled: event.cancelled,
+              error: event.error ?? null,
+            },
+          }),
         onApplyProgress: (event) => {
           if (event.file) {
             dispatch({ type: "log", message: `Writing ${event.file}` });
@@ -309,6 +333,8 @@ export default function Index() {
           toast.info("Movie mode uses one audio track. Kept the first.");
         }
       } else {
+        // Dub sync pairs lists: a season of episodes against their dubs, or
+        // several movies against theirs.
         dispatch({ type: "addFiles", kind, files, folder, explicit: !folder });
       }
 
@@ -327,12 +353,14 @@ export default function Index() {
         return;
       }
       try {
-        const wantsSingleAudio = kind === "audio" && stateRef.current.mode === "movie";
-        const response = wantsSingleAudio
-          ? await api.pickAudioFile()
-          : kind === "audio"
-            ? await api.pickAudioFolder()
-            : await api.pickVideoFolder();
+        const mode = stateRef.current.mode;
+        const wantsSingleAudio = kind === "audio" && mode === "movie";
+        const response =
+          wantsSingleAudio
+            ? await api.pickAudioFile()
+            : kind === "audio"
+              ? await api.pickAudioFolder()
+              : await api.pickVideoFolder();
 
         if (response.files.length === 0) return;
 
@@ -347,9 +375,7 @@ export default function Index() {
           setRecentFolders((prev) => ({ ...prev, [kind]: response.folder }));
         }
         void probeFiles(response.files.map((file) => file.path));
-        toast.success(
-          `Added ${response.files.length} ${kind} file${response.files.length === 1 ? "" : "s"}`,
-        );
+        toast.success(`Added ${response.files.length} ${kind} file${response.files.length === 1 ? "" : "s"}`);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Could not open the picker");
       }
@@ -367,8 +393,9 @@ export default function Index() {
       .subscribeToFileDrop(
         (paths) => {
           const kind: "video" | "audio" = dragTargetRef.current ?? "video";
+          const accept = stateRef.current.mode === "dubsync" ? "media" : kind;
           void api
-            .resolveDroppedPaths(paths, kind)
+            .resolveDroppedPaths(paths, kind, accept)
             .then((files) => {
               if (files.length === 0) {
                 toast.error("No supported media files in that drop.");
@@ -409,7 +436,7 @@ export default function Index() {
     return {
       mode: current.mode,
       videoFolder: current.videoFolder,
-      audioFolder: current.mode === "series" ? current.audioFolder : null,
+      audioFolder: current.mode === "series" || current.mode === "dubsync" ? current.audioFolder : null,
       audioFile: current.mode === "movie" ? (current.audioFiles[0]?.path ?? null) : null,
       videoFiles: current.videoFiles.map((file) => file.path),
       audioFiles: current.audioFiles.map((file) => file.path),
@@ -485,9 +512,98 @@ export default function Index() {
 
   // ---------------------------------------------------------------- the run
 
+  /** Lay the dubs onto their videos and write every result, in one queue.
+   *
+   *  The pairs are the engine's own matching, plus any correction made by
+   *  hand; each is synced in parallel (up to the configured worker count).
+   *  Everything streams: each job's plan arrives as soon as its analysis is
+   *  done and shows while its track is still being written, and the checks
+   *  of the written files come back per job as they finish. */
+  const handleDubSyncBatch = useCallback(async () => {
+    const config = settingsRef.current;
+    const pairing = effectivePairingRef.current;
+    const pairs = pairing?.pairs ?? [];
+    if (pairs.length === 0) {
+      toast.error("No pairs to sync. Add episodes on both sides.");
+      return;
+    }
+
+    const jobs = pairs.map((pair) => ({
+      videoPath: pair.primaryPath,
+      dubPath: pair.secondaryPath,
+      videoTrack: trackChoicesRef.current[pair.primaryPath] ?? pair.primaryTrack ?? 0,
+      dubTrack: trackChoicesRef.current[pair.secondaryPath] ?? pair.secondaryTrack ?? 0,
+    }));
+
+    dubDispatch({
+      type: "queueStarted",
+      jobs: jobs.map((job) => ({
+        name: job.videoPath.replace(/^.*[\\/]/, ""),
+        dubName: job.dubPath.replace(/^.*[\\/]/, ""),
+      })),
+    });
+    dispatch({ type: "clearLogs" });
+    setAnnouncement({
+      message: `Syncing ${jobs.length} dub${jobs.length === 1 ? "" : "s"}.`,
+      politeness: "polite",
+    });
+
+    try {
+      const batch = await api.startDubSyncBatch({
+        jobs,
+        codec: config.dubCodec,
+        mux: config.dubMux,
+        language: config.dubMux && config.dubLanguage.trim() ? config.dubLanguage.trim() : null,
+        fillUnmatched: config.dubFillUnmatched,
+        // The outputs are this app's own files, named after the dubs; a re-run
+        // is meant to replace them.
+        overwrite: true,
+        maxWorkers: config.maxWorkers,
+      });
+      dubDispatch({ type: "batchDone", outcomes: batch.outcomes, cancelled: batch.cancelled });
+
+      const done = batch.outcomes.filter(
+        (outcome) => !outcome.cancelled && !outcome.error && !outcome.plan?.error && outcome.output,
+      ).length;
+      const failed = batch.outcomes.length - done;
+      if (batch.cancelled) {
+        toast.info("Dub sync stopped.");
+        setAnnouncement({ message: "Dub sync stopped.", politeness: "polite" });
+      } else if (failed > 0) {
+        toast.error(`${failed} dub${failed === 1 ? "" : "s"} could not be synced`, {
+          description: `${done} written. Open the console for the failures.`,
+        });
+        setAnnouncement(
+          {
+            message: `${done} dub${done === 1 ? "" : "s"} written, ${failed} failed.`,
+            politeness: "assertive",
+          },
+        );
+        setShowConsole(true);
+      } else if (done > 0) {
+        toast.success(`${done} synced track${done === 1 ? "" : "s"} written`, {
+          action: {
+            label: "Show",
+            onClick: () => {
+              const first = batch.outcomes.find((outcome) => outcome.output)?.output?.outputPath;
+              if (first) void api.revealPath(first).catch(() => undefined);
+            },
+          },
+        });
+        setAnnouncement({ message: `${done} synced track${done === 1 ? "" : "s"} written.`, politeness: "polite" });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      dubDispatch({ type: "batchFailed", message });
+      setAnnouncement({ message: `Dub sync failed: ${message}`, politeness: "assertive" });
+      toast.error("Dub sync failed", { description: message });
+      setShowConsole(true);
+    }
+  }, []);
+
   const handleStart = useCallback(async () => {
     const current = stateRef.current;
-    if (current.status === "processing") return;
+    if (current.status === "processing" || dubRef.current.status === "running") return;
 
     const check = validateSelection(current);
     if (!check.ok) {
@@ -496,6 +612,10 @@ export default function Index() {
     }
     if (!desktop) {
       toast.error("Analysis needs the desktop app.");
+      return;
+    }
+    if (current.mode === "dubsync") {
+      await handleDubSyncBatch();
       return;
     }
 
@@ -550,7 +670,7 @@ export default function Index() {
       toast.error("Analysis failed", { description: message });
       setShowConsole(true);
     }
-  }, [desktop, buildRequest, history, persistHistory]);
+  }, [desktop, buildRequest, history, persistHistory, handleDubSyncBatch]);
 
   const handleCancel = useCallback(async () => {
     try {
@@ -702,11 +822,15 @@ export default function Index() {
       } else if (meta && event.key.toLowerCase() === ",") {
         event.preventDefault();
         setShowSettings(true);
-      } else if (event.key === "Enter" && stateRef.current.status !== "processing") {
+      } else if (
+        event.key === "Enter" &&
+        stateRef.current.status !== "processing" &&
+        dubRef.current.status !== "running"
+      ) {
         event.preventDefault();
         void handleStart();
       } else if (event.key === "Escape") {
-        if (stateRef.current.status === "processing") {
+        if (stateRef.current.status === "processing" || dubRef.current.status === "running") {
           event.preventDefault();
           void handleCancel();
         }
@@ -739,7 +863,8 @@ export default function Index() {
   // Count what will actually run, not what the matcher first proposed: an
   // excluded video must disappear from the button too.
   const pairCount = effectivePairing?.pairs.length ?? 0;
-  const busy = state.status === "processing";
+  const dubsync = state.mode === "dubsync";
+  const busy = state.status === "processing" || dub.status === "running";
   const hasResults = state.results.length > 0;
 
   /** Choose which audio stream of one file to compare. Index 0 is the file's
@@ -771,12 +896,19 @@ export default function Index() {
 
   const setMode = useCallback((mode: SyncMode) => {
     dispatch({ type: "setMode", mode });
+    dubDispatch({ type: "reset" });
     setSelectedKeys(new Set());
     setProbes({});
   }, []);
 
   /** What the run button says, so the sidebar does not have to know the modes. */
-  const runLabel = pairCount > 0 ? `Analyse ${pairCount} pair${pairCount === 1 ? "" : "s"}` : "Analyse";
+  const runLabel = dubsync
+    ? pairCount > 0
+      ? `Sync ${pairCount} dub${pairCount === 1 ? "" : "s"}`
+      : "Sync the dubs"
+    : pairCount > 0
+      ? `Analyse ${pairCount} pair${pairCount === 1 ? "" : "s"}`
+      : "Analyse";
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -809,6 +941,8 @@ export default function Index() {
           onRemove={(kind, id) => dispatch({ type: "removeFiles", kind, ids: [id] })}
           onClear={(kind) => dispatch({ type: "clearFiles", kind })}
           onDragEnter={setDragTarget}
+          dubOptions={settings}
+          onDubOptionsChange={(patch) => setSettings((current) => ({ ...current, ...patch }))}
           runLabel={runLabel}
           canRun={selection.ok && desktop}
           runBlockedReason={
@@ -819,6 +953,49 @@ export default function Index() {
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
+          {dubsync ? (
+            dub.status === "idle" ? (
+              <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-[18px]">
+                {!desktop ? (
+                  <EmptyState
+                    title="Running in a browser"
+                    body="File selection and dub sync need the desktop app."
+                  />
+                ) : state.videoFiles.length === 0 && state.audioFiles.length === 0 ? (
+                  <EmptyState
+                    title="Sync a season of dubs onto its episodes"
+                    body="Add the episodes (or the movies) and their dubs. Each one is matched to its own dub by season and episode number — or filename, for movies — and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
+                  />
+                ) : state.pairing || pairingLoading ? (
+                  <PairingPreview
+                    pairing={effectivePairing}
+                    loading={pairingLoading}
+                    audioFiles={state.audioFiles}
+                    videoFiles={state.videoFiles}
+                    manualCount={manualPairCount}
+                    disabled={busy}
+                    onRepair={(videoPath, audioPath) =>
+                      setPairOverrides((current) => ({ ...current, [videoPath]: audioPath }))
+                    }
+                    onResetRepairs={() => setPairOverrides({})}
+                  />
+                ) : (
+                  <EmptyState
+                    title="Ready to sync"
+                    body="Run the sync to lay each dub onto its video."
+                  />
+                )}
+              </div>
+            ) : (
+              <DubQueuePanel
+                state={dub}
+                onReveal={(path) => void api.revealPath(path).catch(() => toast.error("That file no longer exists."))}
+                onOpen={(path) => void api.openPath(path).catch(() => toast.error("Could not open the file."))}
+                onOpenConsole={() => setShowConsole(true)}
+              />
+            )
+          ) : (
+            <>
           {busy && (
             <ProgressPanel
               processed={state.progress.processed}
@@ -913,6 +1090,8 @@ export default function Index() {
                 />
               )}
             </div>
+          )}
+            </>
           )}
         </main>
 

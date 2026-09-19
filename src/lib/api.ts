@@ -12,6 +12,13 @@ import type {
   AnalyzeRequest,
   ApplyResult,
   CorrectionItem,
+  DubSyncBatchRequest,
+  DubSyncBatchResult,
+  DubSyncOutcome,
+  DubSyncPlan,
+  DubSyncRequest,
+  DubOutput,
+  DubVerification,
   FileItem,
   MediaProbe,
   PairingReport,
@@ -66,15 +73,30 @@ export async function pickAudioFile(): Promise<{ folder: string | null; files: F
   return { folder: response.folder, files: withIds(response.files, "audio") };
 }
 
-/** Turn dropped OS paths into usable file entries, expanding folders. */
+/** One file of any media kind, for a slot that takes either: the "video" of
+ *  a dub sync may be a bare original-language track, and its dub an MKV. */
+export async function pickMediaFile(
+  kind: "video" | "audio",
+): Promise<{ folder: string | null; files: FileItem[] }> {
+  requireDesktop("Choosing a file");
+  const response = await invoke<PickResponse>("pick_media_file", { kind });
+  return { folder: response.folder, files: withIds(response.files, kind) };
+}
+
+/** Turn dropped OS paths into usable file entries, expanding folders.
+ *
+ *  `accept` says what a dropped folder contributes: the side's own kind, or
+ *  "media" for a slot that takes video and audio alike. */
 export async function resolveDroppedPaths(
   paths: string[],
   kind: "video" | "audio",
+  accept: "video" | "audio" | "media" = kind,
 ): Promise<FileItem[]> {
   requireDesktop("Drag and drop");
   const files = await invoke<Omit<FileItem, "id">[]>("resolve_dropped_paths", {
     paths,
     kind,
+    accept,
   });
   return files.map((file) => ({ ...file, id: nextId(kind) }));
 }
@@ -120,6 +142,23 @@ export async function previewPairs(request: Partial<AnalyzeRequest>): Promise<Pa
 export async function startSync(request: AnalyzeRequest): Promise<SyncRun> {
   requireDesktop("Analysis");
   return invoke<SyncRun>("start_sync", { request });
+}
+
+/** Lay a cut dub onto its video. Resolves with the whole outcome once the
+ *  track is written and checked; progress and the plan stream as events. */
+export async function startDubSync(request: DubSyncRequest): Promise<DubSyncOutcome> {
+  requireDesktop("Dub sync");
+  return invoke<DubSyncOutcome>("start_dubsync", { request });
+}
+
+/** Sync a queue of pairs (a season of episodes, several movies) in parallel.
+ *  Per-job progress and plans stream as events; resolves once the whole
+ *  batch is written and checked. */
+export async function startDubSyncBatch(
+  request: DubSyncBatchRequest,
+): Promise<DubSyncBatchResult> {
+  requireDesktop("Dub sync");
+  return invoke<DubSyncBatchResult>("start_dubsync_batch", { request });
 }
 
 export async function cancelSync(): Promise<void> {
@@ -178,6 +217,44 @@ export interface ApplyProgressEvent {
   total?: number;
 }
 
+export interface DubSyncProgressEvent {
+  percent: number;
+  stage: string;
+}
+
+export interface DubSyncPlanEvent {
+  plan: DubSyncPlan;
+  description: string;
+}
+
+export interface DubQueueJobStartEvent {
+  job: number;
+  name: string;
+  dub: string;
+}
+
+export interface DubQueueJobProgressEvent {
+  job: number;
+  percent: number;
+  stage: string;
+}
+
+export interface DubQueueJobPlanEvent {
+  job: number;
+  plan: DubSyncPlan;
+  description: string;
+}
+
+export interface DubQueueJobDoneEvent {
+  job: number;
+  plan?: DubSyncPlan | null;
+  output?: DubOutput | null;
+  verification?: DubVerification | null;
+  muxedPath?: string | null;
+  cancelled?: boolean;
+  error?: string | null;
+}
+
 export interface SyncListeners {
   onLog?: (message: string) => void;
   onProgress?: (event: ProgressEvent) => void;
@@ -187,6 +264,12 @@ export interface SyncListeners {
   onDone?: (run: SyncRun) => void;
   onPairs?: (report: PairingReport) => void;
   onApplyProgress?: (event: ApplyProgressEvent) => void;
+  onDubSyncProgress?: (event: DubSyncProgressEvent) => void;
+  onDubSyncPlan?: (event: DubSyncPlanEvent) => void;
+  onDubQueueJobStart?: (event: DubQueueJobStartEvent) => void;
+  onDubQueueJobProgress?: (event: DubQueueJobProgressEvent) => void;
+  onDubQueueJobPlan?: (event: DubQueueJobPlanEvent) => void;
+  onDubQueueJobDone?: (event: DubQueueJobDoneEvent) => void;
 }
 
 /** Subscribe to engine events. Returns a disposer that removes every listener,
@@ -216,6 +299,16 @@ export async function subscribeToSync(listeners: SyncListeners): Promise<Unliste
     add<SyncRun>("sync-done", (payload) => listeners.onDone?.(payload)),
     add<PairingReport>("sync-pairs", (payload) => listeners.onPairs?.(payload)),
     add<ApplyProgressEvent>("sync-apply-progress", (p) => listeners.onApplyProgress?.(p)),
+    add<DubSyncProgressEvent>("dubsync-progress", (p) => listeners.onDubSyncProgress?.(p)),
+    add<DubSyncPlanEvent>("dubsync-plan", (p) => listeners.onDubSyncPlan?.(p)),
+    add<DubQueueJobStartEvent>("dubsync-job-start", (p) =>
+      listeners.onDubQueueJobStart?.(p),
+    ),
+    add<DubQueueJobProgressEvent>("dubsync-job-progress", (p) =>
+      listeners.onDubQueueJobProgress?.(p),
+    ),
+    add<DubQueueJobPlanEvent>("dubsync-job-plan", (p) => listeners.onDubQueueJobPlan?.(p)),
+    add<DubQueueJobDoneEvent>("dubsync-job-done", (p) => listeners.onDubQueueJobDone?.(p)),
   ]);
 
   return () => {

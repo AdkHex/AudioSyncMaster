@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from audiosync.matching import (  # noqa: E402
     match_folders,
+    match_lists,
     pair_movie_mode,
     validate_pattern,
 )
@@ -130,6 +131,38 @@ def test_movie_mode_pairs_all_videos_to_one_audio():
     pairs = pair_movie_mode(["/v/a.mkv", "/v/b.mkv", "/v/c.mkv"], "/a/track.eac3")
     assert len(pairs) == 3
     assert {p.secondary_path for p in pairs} == {"/a/track.eac3"}
+
+
+def test_match_lists_pairs_each_episode_with_its_own_dub():
+    """The dub queue pairs explicit lists the same way folders pair."""
+    with Folders(
+        ["Show.S01E01.1080p.mkv", "Show.S01E02.1080p.mkv", "Show.S01E03.1080p.mkv"],
+        ["Show.S01E03.dub.eac3", "Show.S01E01.dub.eac3", "Show.S01E02.dub.eac3"],
+    ) as f:
+        videos = [os.path.join(f.primary, n) for n in os.listdir(f.primary)]
+        dubs = [os.path.join(f.secondary, n) for n in os.listdir(f.secondary)]
+        report = match_lists(videos, dubs)
+        assert len(report.pairs) == 3, f"got {len(report.pairs)} pairs"
+        keys = sorted(p.key for p in report.pairs)
+        assert keys == ["s01e001", "s01e002", "s01e003"], keys
+        # Order in the lists does not matter: each video lands on its own dub.
+        for pair in report.pairs:
+            assert pair.primary_name[:11] == pair.secondary_name[:11], (
+                f"mismatched: {pair.primary_name} <-> {pair.secondary_name}"
+            )
+
+
+def test_match_lists_reports_unmatched_on_either_side():
+    with Folders(
+        ["Movie.A.mkv", "Movie.B.mkv", "Movie.C.mkv"],
+        ["Movie.A.dub.ac3"],
+    ) as f:
+        videos = [os.path.join(f.primary, n) for n in os.listdir(f.primary)]
+        dubs = [os.path.join(f.secondary, n) for n in os.listdir(f.secondary)]
+        report = match_lists(videos, dubs)
+        assert len(report.pairs) == 1
+        assert len(report.unmatched_primary) == 2, report.unmatched_primary
+        assert report.unmatched_secondary == []
 
 
 def test_duplicate_keys_produce_warning():

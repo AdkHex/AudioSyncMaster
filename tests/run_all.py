@@ -28,6 +28,7 @@ MODULES = [
     "test_preview",
     "test_mux",
     "test_bridge",
+    "test_dubsync",
 ]
 
 

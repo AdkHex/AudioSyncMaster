@@ -35,6 +35,11 @@ const MODES: { id: SyncMode; label: string; hint: string }[] = [
     label: "Find match",
     hint: "Tests every video against every track to find which release a dub was timed for.",
   },
+  {
+    id: "dubsync",
+    label: "Dub sync",
+    hint: "Lays a dub with scenes missing onto the video, filling every gap with the original audio at the same moment.",
+  },
 ];
 
 /** Wordmark, mode switch, and the panels that are not part of the main flow. */

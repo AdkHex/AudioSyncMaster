@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -33,7 +33,7 @@ pub struct Bridge {
 
 impl Bridge {
     /// Start the bridge, preferring the bundled sidecar over a dev interpreter.
-    pub fn spawn(app: &AppHandle) -> Result<Self, String> {
+    pub fn spawn<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
         let mut command = build_command(app)?;
         command
             .stdin(Stdio::piped())
@@ -151,9 +151,9 @@ pub struct BridgeHandle(Arc<Mutex<Option<Bridge>>>);
 
 impl BridgeHandle {
     /// Run `action` against a live bridge, starting one if necessary.
-    pub fn with<T>(
+    pub fn with<T, R: Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         action: impl FnOnce(&mut Bridge) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut guard = self
@@ -199,7 +199,7 @@ impl BridgeHandle {
 }
 
 /// Locate the sidecar, falling back to a development Python interpreter.
-fn build_command(app: &AppHandle) -> Result<Command, String> {
+fn build_command<R: Runtime>(app: &AppHandle<R>) -> Result<Command, String> {
     if let Some(sidecar) = find_sidecar(app) {
         let _ = app.emit("sync-log", format!("Engine: {}", sidecar.to_string_lossy()));
         return Ok(Command::new(sidecar));
@@ -240,7 +240,7 @@ fn build_command(app: &AppHandle) -> Result<Command, String> {
 /// which measured 32-63 seconds per run on macOS once Gatekeeper rescanned the
 /// unpacked copy. The directory build starts in ~0.12s because nothing is
 /// unpacked at all.
-fn find_sidecar(app: &AppHandle) -> Option<PathBuf> {
+fn find_sidecar<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
     let exe_name = if cfg!(windows) {
         "audiosync-cli.exe"
     } else {
@@ -279,7 +279,7 @@ fn find_sidecar(app: &AppHandle) -> Option<PathBuf> {
 /// Resolve the project root from the executable location rather than the
 /// process CWD, which the original code depended on and which is whatever
 /// directory the app happened to be launched from.
-fn project_root(app: &AppHandle) -> PathBuf {
+pub(crate) fn project_root<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     if let Ok(dir) = std::env::var("AUDIOSYNC_PROJECT_ROOT") {
         let path = PathBuf::from(dir);
         if path.join("python").join("bridge.py").is_file() {
@@ -307,7 +307,7 @@ fn project_root(app: &AppHandle) -> PathBuf {
     PathBuf::from(".")
 }
 
-fn find_python(root: &Path) -> PathBuf {
+pub(crate) fn find_python(root: &Path) -> PathBuf {
     let venv = if cfg!(windows) {
         root.join("python")
             .join(".venv")

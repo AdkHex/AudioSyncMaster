@@ -221,6 +221,24 @@ describe("logs", () => {
 });
 
 describe("validation", () => {
+  it("wants at least one file on each side of a dub sync", () => {
+    const dub = { ...initialSyncState, mode: "dubsync" as const };
+    expect(validateSelection(dub).reason).toMatch(/video and the dub/);
+    expect(validateSelection({ ...dub, videoFiles: [file("a.mkv")] }).reason).toMatch(/dub/);
+    expect(validateSelection({ ...dub, audioFiles: [file("a.eac3", "audio")] }).reason).toMatch(/video/);
+    expect(
+      validateSelection({ ...dub, videoFiles: [file("a.mkv")], audioFiles: [file("a.eac3", "audio")] }).ok,
+    ).toBe(true);
+    // A season of episodes is fine: the queue pairs them, the run does not.
+    expect(
+      validateSelection({
+        ...dub,
+        videoFiles: [file("a.mkv"), file("b.mkv")],
+        audioFiles: [file("a.eac3", "audio"), file("b.eac3", "audio")],
+      }).ok,
+    ).toBe(true);
+  });
+
   it("requires video files", () => {
     expect(validateSelection(initialSyncState).ok).toBe(false);
   });

@@ -1,0 +1,194 @@
+{
+  "plan": {
+    "version": 1,
+    "videoPath": "/tmp/dubtest/mc/video.mkv",
+    "dubPath": "/tmp/dubtest/mc/dub.ac3",
+    "videoTrack": 0,
+    "dubTrack": 0,
+    "speed": 1.0,
+    "fillGainDb": 4.353906212067626,
+    "videoDurationS": 300.01,
+    "dubDurationS": 285.312,
+    "segments": [
+      {
+        "kind": "fill",
+        "startS": 0.0,
+        "endS": 0.735,
+        "sourceStartS": 0.0,
+        "offsetS": null,
+        "match": null,
+        "note": "dub starts late",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "dub",
+        "startS": 0.735,
+        "endS": 59.796,
+        "sourceStartS": 1.541,
+        "offsetS": 0.806,
+        "match": 0.07730045350738261,
+        "note": "",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "fill",
+        "startS": 59.796,
+        "endS": 75.01,
+        "sourceStartS": 59.796,
+        "offsetS": null,
+        "match": null,
+        "note": "dub is cut here",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "dub",
+        "startS": 75.01,
+        "endS": 179.996,
+        "sourceStartS": 60.815,
+        "offsetS": -14.194,
+        "match": 0.0705363399055095,
+        "note": "",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "fill",
+        "startS": 179.996,
+        "endS": 182.495,
+        "sourceStartS": 179.996,
+        "offsetS": null,
+        "match": null,
+        "note": "dub is cut here",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "dub",
+        "startS": 182.495,
+        "endS": 240.0,
+        "sourceStartS": 165.801,
+        "offsetS": -16.694,
+        "match": 0.13158518609594702,
+        "note": "",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "dub",
+        "startS": 240.0,
+        "endS": 297.0,
+        "sourceStartS": 228.306,
+        "offsetS": -11.694,
+        "match": 0.11727544648804777,
+        "note": "",
+        "uncertaintyS": 0.01
+      },
+      {
+        "kind": "fill",
+        "startS": 297.0,
+        "endS": 300.01,
+        "sourceStartS": 297.0,
+        "offsetS": null,
+        "match": null,
+        "note": "past dub end",
+        "uncertaintyS": 0.01
+      }
+    ],
+    "warnings": [],
+    "error": null,
+    "filledS": 21.45799999999999
+  },
+  "output": {
+    "outputPath": "/tmp/dubtest/mc/dub.dubsynced.ac3",
+    "sampleRate": 48000,
+    "channels": 6,
+    "seconds": 300.01,
+    "clippedSamples": 0,
+    "muxedPath": null,
+    "warnings": []
+  },
+  "verification": {
+    "spots": [
+      {
+        "positionS": 5.0,
+        "residualMs": -0.34548296794309863,
+        "match": 0.08920041567163658,
+        "note": ""
+      },
+      {
+        "positionS": 28.637272727272727,
+        "residualMs": -0.29989612999997917,
+        "match": 0.09810516233316084,
+        "note": ""
+      },
+      {
+        "positionS": 52.27454545454545,
+        "residualMs": null,
+        "match": 0.0,
+        "note": "filled from the original"
+      },
+      {
+        "positionS": 75.91181818181818,
+        "residualMs": 0.08596881295670755,
+        "match": 0.13070953624706846,
+        "note": ""
+      },
+      {
+        "positionS": 99.5490909090909,
+        "residualMs": 0.004288113719667308,
+        "match": 0.09300570796013706,
+        "note": ""
+      },
+      {
+        "positionS": 123.18636363636364,
+        "residualMs": -0.02118756581330672,
+        "match": 0.11149354440011505,
+        "note": ""
+      },
+      {
+        "positionS": 146.82363636363635,
+        "residualMs": 0.0814423443225678,
+        "match": 0.15850744440677964,
+        "note": ""
+      },
+      {
+        "positionS": 170.4609090909091,
+        "residualMs": null,
+        "match": 0.0,
+        "note": "filled from the original"
+      },
+      {
+        "positionS": 194.0981818181818,
+        "residualMs": -0.19329382633441128,
+        "match": 0.08797724520325569,
+        "note": ""
+      },
+      {
+        "positionS": 217.73545454545453,
+        "residualMs": -0.22625332925235853,
+        "match": 0.09513171906907494,
+        "note": ""
+      },
+      {
+        "positionS": 241.37272727272727,
+        "residualMs": -0.3797992230684031,
+        "match": 0.11475819189303212,
+        "note": ""
+      },
+      {
+        "positionS": 265.01,
+        "residualMs": -0.4203066863119602,
+        "match": 0.08845017617064775,
+        "note": ""
+      }
+    ],
+    "typicalMs": 0.2097735777933849,
+    "worstMs": 0.4203066863119602,
+    "sweepWindows": 23,
+    "sweepMeasured": 10,
+    "sweepWithinAudible": 9,
+    "sweepTypicalMs": 0.8879699260978668,
+    "sweepWorstMs": 360.1717116870532,
+    "stretches": []
+  },
+  "verificationText": "the finished track sits 0ms from the original typically and 0ms at its worst, measured at 10 spots. Lip-sync starts to show around 100ms; the measurement resolves 2ms.\n  at 0:00:05.000: 0ms early, match 0.09\n  at 0:00:28.637: 0ms early, match 0.10\n  at 0:00:52.275: filled from the original\n  at 0:01:15.912: 0ms late, match 0.13\n  at 0:01:39.549: 0ms late, match 0.09\n  at 0:02:03.186: 0ms early, match 0.11\n  at 0:02:26.824: 0ms late, match 0.16\n  at 0:02:50.461: filled from the original\n  at 0:03:14.098: 0ms early, match 0.09\n  at 0:03:37.735: 0ms early, match 0.10\n  at 0:04:01.373: 0ms early, match 0.11\n  at 0:04:25.010: 0ms early, match 0.09\nswept the whole runtime: 10 of 23 windows could be measured (the rest are silence, music-only, or filled from the original), and 90% of them are within 100ms of the original (typically 1ms, worst 360ms)\nno stretch is more than 200ms out",
+  "muxedPath": null,
+  "cancelled": false
+}

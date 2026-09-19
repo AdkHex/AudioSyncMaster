@@ -255,6 +255,25 @@ export function SettingsDialog({
         </Group>
       )}
 
+      {mode === "dubsync" && (
+        <Group title="Dub sync">
+          <Field
+            label="Replace stretches that did not correlate"
+            htmlFor={`${ids}-fill-unmatched`}
+            hint="Off, a passage where the dub is audible but its music and effects could not be matched is kept as the dub, provided the offset is the same either side, and the plan warns you where. On, it is filled from the original instead, and the plan marks those fills Replaced so they can be told from real cuts. Keep this off unless the result plays the wrong scene."
+            control={
+              <input
+                id={`${ids}-fill-unmatched`}
+                type="checkbox"
+                checked={settings.dubFillUnmatched}
+                onChange={(event) => update({ dubFillUnmatched: event.target.checked })}
+                className="h-[15px] w-[15px] accent-primary"
+              />
+            }
+          />
+        </Group>
+      )}
+
       <Group title="Output">
         <Field
           label="Output suffix"

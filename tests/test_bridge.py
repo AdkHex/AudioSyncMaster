@@ -20,6 +20,10 @@ PYTHON = os.path.join(ROOT, "python", ".venv", "bin", "python")
 if not os.path.isfile(PYTHON):
     PYTHON = sys.executable
 
+# The dub batch test builds its pairs with test_dubsync's fixture writer.
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
 MANIFEST = os.path.join(HERE, "fixtures", "manifest.json")
 
 
@@ -199,6 +203,140 @@ def test_unknown_command_is_reported():
     events, process = run_bridge([{"command": "definitely-not-a-command"}])
     assert process.returncode == 0
     assert any(e["type"] == "error" for e in events)
+
+
+def test_cancel_reaches_a_run_in_flight():
+    """Stop has to work while the work is happening.
+
+    Commands used to run on the thread that reads stdin, so a cancel written
+    during a run sat unread in the pipe until the run finished on its own.
+    The Stop button did nothing, on every command, for as long as the work
+    took. Here the cancel goes in while a dub sync is decoding, and the
+    bridge must acknowledge it at once, end the run as cancelled, and still
+    answer the next command.
+    """
+    import time
+
+    case = _case("offset_0ms")
+    process = subprocess.Popen(
+        [PYTHON, BRIDGE],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=ROOT,
+        text=True,
+    )
+    try:
+        assert json.loads(process.stdout.readline())["type"] == "ready"
+        # A dub sync of a 30s fixture against itself: a second or two of work,
+        # long enough to cancel inside.
+        process.stdin.write(json.dumps({
+            "command": "dubsync",
+            "videoPath": case["primary"],
+            "dubPath": case["secondary"],
+            "planOnly": True,
+        }) + "\n")
+        process.stdin.flush()
+        # Give the run time to start decoding before pulling the plug.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            event = json.loads(process.stdout.readline())
+            if event["type"] == "dubsyncProgress":
+                break
+            assert event["type"] != "dubsyncDone", "the run finished before it could be cancelled"
+
+        sent_at = time.monotonic()
+        process.stdin.write(json.dumps({"command": "cancel"}) + "\n")
+        process.stdin.flush()
+
+        acknowledged = finished = None
+        while acknowledged is None or finished is None:
+            event = json.loads(process.stdout.readline())
+            if event["type"] == "cancelAck":
+                acknowledged = time.monotonic() - sent_at
+            elif event["type"] == "dubsyncDone":
+                finished = event
+        assert acknowledged < 2.0, f"cancel took {acknowledged:.1f}s to be acknowledged"
+        assert finished.get("cancelled") is True, f"the run did not end as cancelled: {finished}"
+
+        process.stdin.write(json.dumps({"command": "ping"}) + "\n")
+        process.stdin.flush()
+        assert json.loads(process.stdout.readline())["type"] == "pong", "bridge stopped serving after a cancel"
+    finally:
+        process.stdin.write(json.dumps({"command": "shutdown"}) + "\n")
+        process.stdin.flush()
+        process.wait(timeout=30)
+
+
+def test_shutdown_lets_queued_work_finish():
+    """A request followed at once by shutdown still completes: that is how a
+    script -- and the CI smoke test -- talks to the engine."""
+    case = _case("offset_500ms")
+    events, process = run_bridge([{
+        "command": "analyze",
+        "mode": "movie",
+        "videoFiles": [case["primary"]],
+        "audioFile": case["secondary"],
+        "windowSeconds": 8,
+        "windowCount": 3,
+    }])
+    assert process.returncode == 0
+    done = [e for e in events if e["type"] == "done"]
+    assert done and not done[0].get("cancelled"), "the run was cut short by the shutdown"
+    assert done[0]["results"] and done[0]["results"][0]["delayMs"] is not None
+
+
+def test_dubsync_batch_plans_every_pair_and_reports_by_job():
+    """A queue of pairs is planned in parallel, each under its own job index,
+    and the batch ends with one outcome per job, in queue order."""
+    import shutil
+    import tempfile
+
+    from test_dubsync import Workspace, build_pair
+
+    jobs = []
+    workspaces = []
+    try:
+        # One clean pair and one with a cut the engine must fill. The engine
+        # needs ~2 minutes of material to pin an offset.
+        pieces = [
+            [("org", 0, 120)],
+            [("org", 0, 60), ("extra", 3.0), ("org", 60, 120)],
+        ]
+        for piece_set in pieces:
+            workspace = Workspace()
+            workspace.__enter__()
+            workspaces.append(workspace)
+            build_pair(workspace, 120, piece_set)
+            jobs.append({"videoPath": workspace.path("org.wav"),
+                         "dubPath": workspace.path("dub.wav")})
+
+        events, process = run_bridge(
+            [{"command": "dubsyncBatch", "jobs": jobs, "planOnly": True, "maxWorkers": 2}],
+            timeout=600,
+        )
+        assert process.returncode == 0, process.stderr.decode()[:600]
+
+        starts = sorted(e["job"] for e in events if e["type"] == "dubsyncJobStart")
+        plans = sorted(e["job"] for e in events if e["type"] == "dubsyncJobPlan")
+        assert starts == [0, 1], f"jobs not started individually: {starts}"
+        assert plans == [0, 1], f"jobs not planned individually: {plans}"
+
+        done = [e for e in events if e["type"] == "dubsyncBatchDone"]
+        assert len(done) == 1, "the batch did not end with one dubsyncBatchDone"
+        outcomes = done[0]["outcomes"]
+        assert [o["job"] for o in outcomes] == [0, 1], "outcomes are not in queue order"
+        for outcome in outcomes:
+            assert outcome.get("plan") and not outcome.get("error"), (
+                f"job {outcome['job']} did not produce a clean plan: {outcome}"
+            )
+            assert outcome["plan"]["segments"], f"job {outcome['job']} planned nothing"
+            assert outcome["plan"]["videoPath"] != outcome["plan"]["dubPath"]
+        assert not done[0].get("cancelled")
+    finally:
+        for workspace in workspaces:
+            workspace.__exit__(None, None, None)
+        shutil.rmtree(os.path.dirname(jobs[0]["videoPath"]), ignore_errors=True)
 
 
 def _run_all():

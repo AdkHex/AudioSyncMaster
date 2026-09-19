@@ -1,7 +1,7 @@
 /** Shared types. Field names match the Rust structs and the Python engine
  *  exactly -- all three layers speak camelCase across the wire. */
 
-export type SyncMode = "movie" | "series" | "compare";
+export type SyncMode = "movie" | "series" | "compare" | "dubsync";
 
 /** Upper bound per side in compare mode. The work is the product of both
  *  sides, so five against five is already 25 analyses. */
@@ -195,6 +195,20 @@ export interface HistoryEntry {
   fileCount: number;
 }
 
+/** Output codecs the dub sync renderer can write. "same" follows the dub's
+ *  own codec where an encoder exists for it, and falls back to FLAC. */
+export type DubCodec = "same" | "flac" | "eac3" | "ac3" | "aac" | "opus" | "wav";
+
+export const DUB_CODECS: { id: DubCodec; label: string }[] = [
+  { id: "same", label: "Same as the dub" },
+  { id: "flac", label: "FLAC (lossless)" },
+  { id: "eac3", label: "E-AC3" },
+  { id: "ac3", label: "AC3" },
+  { id: "aac", label: "AAC" },
+  { id: "opus", label: "Opus" },
+  { id: "wav", label: "WAV (24-bit)" },
+];
+
 export interface AppSettings {
   windowSeconds: number;
   windowCount: number;
@@ -203,6 +217,17 @@ export interface AppSettings {
   matchPattern: string;
   outputSuffix: string;
   theme: "light" | "dark" | "system";
+  /** Dub sync output. */
+  dubCodec: DubCodec;
+  /** Also write a copy of the video with the synced track added. */
+  dubMux: boolean;
+  /** ISO 639-2 tag for the muxed track, e.g. "hin". Empty leaves it untagged. */
+  dubLanguage: string;
+  /** Replace stretches the dub did not correlate on even when its offset is
+   *  unchanged either side. Off by default: a weakly correlating scene is
+   *  still the dub, and swapping it for the original puts the wrong language
+   *  over a scene that had the right one. */
+  dubFillUnmatched: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -213,7 +238,182 @@ export const DEFAULT_SETTINGS: AppSettings = {
   matchPattern: "",
   outputSuffix: ".synced",
   theme: "dark",
+  dubCodec: "same",
+  dubMux: false,
+  dubLanguage: "",
+  dubFillUnmatched: false,
 };
+
+// ------------------------------------------------------------------ dub sync
+
+/** One piece of the synced track, on the video's timeline. */
+export interface DubSegment {
+  kind: "dub" | "fill";
+  startS: number;
+  endS: number;
+  /** Where it is read from: the dub's timeline for "dub", the video's own
+   *  audio for "fill". */
+  sourceStartS: number;
+  /** dub time minus video time, for "dub" pieces. */
+  offsetS: number | null;
+  /** Envelope correlation across the stretch, 0-1, for "dub" pieces. */
+  match: number | null;
+  note: string;
+  /** How far either edge might really sit from where it was placed. */
+  uncertaintyS: number;
+}
+
+export interface DubSyncPlan {
+  videoPath: string;
+  dubPath: string;
+  videoTrack: number;
+  dubTrack: number;
+  /** Playback-speed factor the dub was decoded at; 1 when it matched as is. */
+  speed: number;
+  /** Gain applied to the original where it fills a gap. */
+  fillGainDb: number;
+  videoDurationS: number;
+  dubDurationS: number;
+  segments: DubSegment[];
+  /** Things to check: a fill, a drift, a stretch replaced. */
+  warnings: string[];
+  /** Things worth knowing that need no checking: the dub kept across a
+   *  span it did not correlate in. Absent from plans made before it was
+   *  added. */
+  notes?: string[];
+  error: string | null;
+  /** Seconds of the output taken from the original. */
+  filledS: number;
+}
+
+export interface DubSpotCheck {
+  positionS: number;
+  /** Null where the spot could not be measured (silence, or a fill). */
+  residualMs: number | null;
+  match: number;
+  note: string;
+}
+
+export interface DubStretch {
+  startS: number;
+  endS: number;
+  residualMs: number;
+  windows: number;
+}
+
+/** How the finished track sits against the video, measured after writing. */
+export interface DubVerification {
+  spots: DubSpotCheck[];
+  typicalMs: number | null;
+  worstMs: number | null;
+  sweepWindows: number;
+  sweepMeasured: number;
+  sweepWithinAudible: number;
+  sweepTypicalMs: number | null;
+  sweepWorstMs: number | null;
+  stretches: DubStretch[];
+}
+
+export interface DubOutput {
+  outputPath: string;
+  sampleRate: number;
+  channels: number;
+  seconds: number;
+  clippedSamples: number;
+  warnings: string[];
+}
+
+export interface DubSyncRequest {
+  videoPath: string;
+  dubPath: string;
+  videoTrack: number;
+  dubTrack: number;
+  codec: DubCodec;
+  mux: boolean;
+  language: string | null;
+  fillUnmatched: boolean;
+  overwrite: boolean;
+}
+
+/** One pair of the dub sync queue: an episode or a movie and its own dub. */
+export interface DubSyncJob {
+  videoPath: string;
+  dubPath: string;
+  videoTrack: number;
+  dubTrack: number;
+}
+
+/** A queue of pairs, synced in parallel by the engine. Output options are
+ *  shared: a season of episodes is written the same way throughout. */
+export interface DubSyncBatchRequest {
+  jobs: DubSyncJob[];
+  codec: DubCodec;
+  mux: boolean;
+  language: string | null;
+  fillUnmatched: boolean;
+  overwrite: boolean;
+  maxWorkers: number;
+}
+
+/** The engine's final word on one job of a batch. */
+export interface DubJobOutcome {
+  job: number;
+  plan: DubSyncPlan | null;
+  output: DubOutput | null;
+  verification: DubVerification | null;
+  verificationText?: string | null;
+  muxedPath: string | null;
+  cancelled?: boolean;
+  error?: string | null;
+}
+
+export interface DubSyncBatchResult {
+  outcomes: DubJobOutcome[];
+  cancelled: boolean;
+}
+
+/** The engine's final word on a dub sync. */
+export interface DubSyncOutcome {
+  plan: DubSyncPlan | null;
+  output: DubOutput | null;
+  verification: DubVerification | null;
+  verificationText: string | null;
+  muxedPath: string | null;
+  cancelled?: boolean;
+  error?: string | null;
+}
+
+/** h:mm:ss.mmm, as the engine prints positions. Milliseconds matter here:
+ *  a cut placed at 1:23:45.317 is a different claim from one at 1:23:45. */
+export function formatClock(seconds: number): string {
+  const ms = Math.max(0, Math.round(seconds * 1000));
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  const rest = (ms % 60_000) / 1000;
+  return `${hours}:${String(minutes).padStart(2, "0")}:${rest.toFixed(3).padStart(6, "0")}`;
+}
+
+/** A span's length as people say it: "2m 30.0s", "0.7s". */
+export function formatSpan(seconds: number): string {
+  if (seconds >= 60) {
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m ${(seconds - minutes * 60).toFixed(1).padStart(4, "0")}s`;
+  }
+  return `${seconds.toFixed(1)}s`;
+}
+
+/** Lip-sync error becomes visible around here. */
+export const AUDIBLE_MS = 100;
+
+/** The note the engine puts on a fill that replaced dub which was audible but
+ *  could not be matched -- the "Replace stretches that did not correlate"
+ *  setting at work. A different claim from "dub is cut here": nothing showed
+ *  the dub lacks the scene. One string, shared with the engine. */
+export const UNMATCHED_FILL_NOTE = "dub audible but did not correlate; replaced";
+
+export function isUnmatchedFill(segment: DubSegment): boolean {
+  return segment.kind === "fill" && segment.note === UNMATCHED_FILL_NOTE;
+}
 
 /** A frame rate as people write it, from the exact rational the engine reports.
  *

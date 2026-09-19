@@ -264,6 +264,18 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
 
 /** Whether the current selection can be analysed, and why not if it cannot. */
 export function validateSelection(state: SyncState): { ok: boolean; reason?: string } {
+  if (state.mode === "dubsync") {
+    if (state.videoFiles.length === 0 && state.audioFiles.length === 0) {
+      return { ok: false, reason: "Add the video and the dub." };
+    }
+    if (state.videoFiles.length === 0) {
+      return { ok: false, reason: "Add the video, or its original-language audio." };
+    }
+    if (state.audioFiles.length === 0) {
+      return { ok: false, reason: "Add the dub to lay onto it." };
+    }
+    return { ok: true };
+  }
   if (state.videoFiles.length === 0) {
     return { ok: false, reason: "Add at least one video file." };
   }

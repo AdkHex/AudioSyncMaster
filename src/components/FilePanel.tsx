@@ -13,6 +13,10 @@ import {
 
 interface FilePanelProps {
   kind: "video" | "audio";
+  /** What a file in this slot must contain. Defaults to the kind; the video
+   *  slot of a dub sync only needs audio, since a bare original-language
+   *  track serves as well as the video itself. */
+  needs?: "video" | "audio";
   title: string;
   hint: string;
   files: FileItem[];
@@ -38,6 +42,7 @@ interface FilePanelProps {
  *  same job. */
 export const FilePanel = memo(function FilePanel({
   kind,
+  needs = kind,
   title,
   hint,
   files,
@@ -96,7 +101,7 @@ export const FilePanel = memo(function FilePanel({
               : "border-border-strong text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground",
           )}
         >
-          {dragActive ? `Drop to add ${kind} files` : hint}
+          {dragActive ? `Drop to add ${needs === kind ? kind : "the"} file${needs === kind ? "s" : ""}` : hint}
         </button>
       ) : (
         <>
@@ -104,7 +109,7 @@ export const FilePanel = memo(function FilePanel({
             {files.map((file) => {
               const probe = probes[file.path];
               const missing =
-                probe && (kind === "video" ? !probe.hasVideo : !probe.hasAudio);
+                probe && (needs === "video" ? !probe.hasVideo : !probe.hasAudio);
               const listing = listings[file.path];
               const tracks = listing?.tracks ?? [];
               const chosen = trackChoices[file.path] ?? 0;
@@ -122,7 +127,7 @@ export const FilePanel = memo(function FilePanel({
 
                     {missing ? (
                       <span className="shrink-0 text-[11px] text-destructive">
-                        no {kind === "video" ? "video" : "audio"}
+                        no {needs === "video" ? "video" : "audio"}
                       </span>
                     ) : probe?.duration ? (
                       <span className="tabular shrink-0 font-mono text-[11px] text-muted-foreground">

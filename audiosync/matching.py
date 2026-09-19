@@ -165,6 +165,28 @@ def match_folders(
     if not secondaries:
         return MatchReport([], primaries, [], "none", None, "No media files in the audio folder")
 
+    return match_lists(primaries, secondaries, custom_pattern, fuzzy_threshold)
+
+
+def match_lists(
+    primaries: Sequence[str],
+    secondaries: Sequence[str],
+    custom_pattern: Optional[str] = None,
+    fuzzy_threshold: float = 0.72,
+) -> MatchReport:
+    """Pair two lists of paths, preferring the most reliable method.
+
+    The same pairing `match_folders` does, for selections that are not whole
+    folders: the dub tab pairs a folder of episodes with a folder of episode
+    dubs, or a handful of individually dropped movies with their dubs.
+    """
+    primaries = list(primaries)
+    secondaries = list(secondaries)
+    if not primaries:
+        return MatchReport([], [], secondaries, "none", None, "No media files on the video side")
+    if not secondaries:
+        return MatchReport([], primaries, [], "none", None, "No media files on the dub side")
+
     if custom_pattern:
         valid, problem = validate_pattern(custom_pattern)
         if not valid:

@@ -48,6 +48,8 @@ if [[ "$BUILD_SIDECAR" == "1" ]]; then
     --hidden-import audiosync.matching \
     --hidden-import audiosync.media \
     --hidden-import audiosync.mux \
+    --hidden-import audiosync.dubsync \
+    --hidden-import audiosync.dubrender \
     --collect-all numpy \
     --exclude-module scipy \
     --exclude-module matplotlib \

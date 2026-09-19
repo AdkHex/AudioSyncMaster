@@ -125,7 +125,7 @@ struct MediaProbe {
 
 // ---------------------------------------------------------------- file pickers
 
-async fn pick_folder(window: Window) -> Option<PathBuf> {
+async fn pick_folder<R: tauri::Runtime>(window: Window<R>) -> Option<PathBuf> {
     let (tx, rx) = std::sync::mpsc::channel();
     window.dialog().file().pick_folder(move |path| {
         let _ = tx.send(path.and_then(|p| p.into_path().ok()));
@@ -136,7 +136,7 @@ async fn pick_folder(window: Window) -> Option<PathBuf> {
         .flatten()
 }
 
-async fn pick_file(window: Window) -> Option<PathBuf> {
+async fn pick_file<R: tauri::Runtime>(window: Window<R>) -> Option<PathBuf> {
     let (tx, rx) = std::sync::mpsc::channel();
     window.dialog().file().pick_file(move |path| {
         let _ = tx.send(path.and_then(|p| p.into_path().ok()));
@@ -147,7 +147,10 @@ async fn pick_file(window: Window) -> Option<PathBuf> {
         .flatten()
 }
 
-async fn pick_save_path(window: Window, default_name: &str) -> Option<PathBuf> {
+async fn pick_save_path<R: tauri::Runtime>(
+    window: Window<R>,
+    default_name: &str,
+) -> Option<PathBuf> {
     let (tx, rx) = std::sync::mpsc::channel();
     window
         .dialog()
@@ -165,11 +168,77 @@ async fn pick_save_path(window: Window, default_name: &str) -> Option<PathBuf> {
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "webm", "avi", "mov", "m4v", "ts", "wmv", "flv",
 ];
+/// Every extension an external dub actually arrives as. Kept in step with
+/// AUDIO_EXTENSIONS in audiosync/media.py: a `.ec3` or `.thd` dropped on the
+/// window used to vanish without a word because only this shorter list was
+/// consulted, while the engine itself would have decoded it happily.
+#[rustfmt::skip]
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "wav", "mp3", "aac", "flac", "ogg", "opus", "m4a", "eac3", "ac3", "dts", "wma", "mka",
+    // Dolby
+    "ac3", "eac3", "ec3", "thd", "truehd", "mlp",
+    // DTS
+    "dts", "dtsma", "dtshd",
+    // MPEG and friends
+    "aac", "m4a", "m4b", "mp3", "mp2", "mpa",
+    // Lossless and open formats
+    "flac", "wav", "w64", "aiff", "aif", "caf", "alac",
+    "ogg", "oga", "opus", "ape", "tak", "tta", "wv",
+    // Containers that commonly hold nothing but audio
+    "mka", "wma",
 ];
 
-fn list_files(folder: &Path, extensions: Option<&[&str]>, kind: &str) -> Vec<FileItem> {
+fn is_media_extension(ext: &str) -> bool {
+    VIDEO_EXTENSIONS.contains(&ext) || AUDIO_EXTENSIONS.contains(&ext)
+}
+
+/// Which files a picker or a drop accepts.
+#[derive(Clone, Copy)]
+enum Accept {
+    Video,
+    Audio,
+    /// Either: a dub is as likely to arrive inside an MKV as a bare .eac3.
+    Media,
+    Any,
+}
+
+impl Accept {
+    fn from_name(name: &str) -> Self {
+        match name {
+            "video" => Accept::Video,
+            "audio" => Accept::Audio,
+            "media" => Accept::Media,
+            _ => Accept::Any,
+        }
+    }
+
+    fn allows(self, path: &Path) -> bool {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        match self {
+            Accept::Video => VIDEO_EXTENSIONS.contains(&ext.as_str()),
+            Accept::Audio => AUDIO_EXTENSIONS.contains(&ext.as_str()),
+            Accept::Media => is_media_extension(&ext),
+            Accept::Any => true,
+        }
+    }
+}
+
+fn file_item(path: &Path, kind: &str) -> FileItem {
+    FileItem {
+        name: path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        path: path.to_string_lossy().to_string(),
+        file_type: kind.to_string(),
+        size: fs::metadata(path).map(|m| m.len()).ok(),
+    }
+}
+
+fn list_files(folder: &Path, accept: Accept, kind: &str) -> Vec<FileItem> {
     let mut items = Vec::new();
     let Ok(entries) = fs::read_dir(folder) else {
         return items;
@@ -186,15 +255,8 @@ fn list_files(folder: &Path, extensions: Option<&[&str]>, kind: &str) -> Vec<Fil
         {
             continue;
         }
-        if let Some(allowed) = extensions {
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_lowercase();
-            if !allowed.contains(&ext.as_str()) {
-                continue;
-            }
+        if !accept.allows(&path) {
+            continue;
         }
         items.push(FileItem {
             name: path
@@ -211,14 +273,14 @@ fn list_files(folder: &Path, extensions: Option<&[&str]>, kind: &str) -> Vec<Fil
 }
 
 #[tauri::command]
-async fn pick_video_folder(window: Window) -> Result<PickResponse, String> {
+async fn pick_video_folder<R: tauri::Runtime>(window: Window<R>) -> Result<PickResponse, String> {
     let Some(folder) = pick_folder(window).await else {
         return Ok(PickResponse {
             folder: None,
             files: Vec::new(),
         });
     };
-    let files = list_files(&folder, Some(VIDEO_EXTENSIONS), "video");
+    let files = list_files(&folder, Accept::Video, "video");
     Ok(PickResponse {
         folder: Some(folder.to_string_lossy().to_string()),
         files,
@@ -226,17 +288,17 @@ async fn pick_video_folder(window: Window) -> Result<PickResponse, String> {
 }
 
 #[tauri::command]
-async fn pick_audio_folder(window: Window) -> Result<PickResponse, String> {
+async fn pick_audio_folder<R: tauri::Runtime>(window: Window<R>) -> Result<PickResponse, String> {
     let Some(folder) = pick_folder(window).await else {
         return Ok(PickResponse {
             folder: None,
             files: Vec::new(),
         });
     };
-    let mut files = list_files(&folder, Some(AUDIO_EXTENSIONS), "audio");
+    let mut files = list_files(&folder, Accept::Audio, "audio");
     if files.is_empty() {
         // Dub tracks are often delivered inside video containers.
-        files = list_files(&folder, None, "audio");
+        files = list_files(&folder, Accept::Media, "audio");
     }
     Ok(PickResponse {
         folder: Some(folder.to_string_lossy().to_string()),
@@ -245,7 +307,24 @@ async fn pick_audio_folder(window: Window) -> Result<PickResponse, String> {
 }
 
 #[tauri::command]
-async fn pick_audio_file(window: Window) -> Result<PickResponse, String> {
+async fn pick_audio_file<R: tauri::Runtime>(window: Window<R>) -> Result<PickResponse, String> {
+    pick_single(window, "audio").await
+}
+
+/// One file of either kind, for the sides of a dub sync: the "video" may be
+/// a bare original-language track, and the dub may live inside an MKV.
+#[tauri::command]
+async fn pick_media_file<R: tauri::Runtime>(
+    window: Window<R>,
+    kind: String,
+) -> Result<PickResponse, String> {
+    pick_single(window, &kind).await
+}
+
+async fn pick_single<R: tauri::Runtime>(
+    window: Window<R>,
+    kind: &str,
+) -> Result<PickResponse, String> {
     let Some(file) = pick_file(window).await else {
         return Ok(PickResponse {
             folder: None,
@@ -254,15 +333,7 @@ async fn pick_audio_file(window: Window) -> Result<PickResponse, String> {
     };
     Ok(PickResponse {
         folder: file.parent().map(|p| p.to_string_lossy().to_string()),
-        files: vec![FileItem {
-            name: file
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            path: file.to_string_lossy().to_string(),
-            file_type: "audio".into(),
-            size: fs::metadata(&file).map(|m| m.len()).ok(),
-        }],
+        files: vec![file_item(&file, kind)],
     })
 }
 
@@ -270,29 +341,28 @@ async fn pick_audio_file(window: Window) -> Result<PickResponse, String> {
 /// Drag-and-drop could never work before: the frontend read `File.path`, which
 /// does not exist in a Tauri v2 webview, so every dropped file arrived as a
 /// bare filename that no backend could open.
+///
+/// `accept` narrows what a dropped folder contributes: the side's own kind by
+/// default, or "media" for a slot that takes either, as both sides of a dub
+/// sync do. A file dropped on its own only has to be media at all -- a dub
+/// arrives inside an MKV as often as a bare .eac3, and the audio folder
+/// picker already takes video containers for the same reason -- but it does
+/// have to be media: a stray .srt used to land in the list as if it were audio.
 #[tauri::command]
-fn resolve_dropped_paths(paths: Vec<String>, kind: String) -> Result<Vec<FileItem>, String> {
-    let extensions = match kind.as_str() {
-        "video" => Some(VIDEO_EXTENSIONS),
-        "audio" => Some(AUDIO_EXTENSIONS),
-        _ => None,
-    };
+fn resolve_dropped_paths(
+    paths: Vec<String>,
+    kind: String,
+    accept: Option<String>,
+) -> Result<Vec<FileItem>, String> {
+    let in_folders = Accept::from_name(accept.as_deref().unwrap_or(kind.as_str()));
 
     let mut items = Vec::new();
     for raw in paths {
         let path = PathBuf::from(&raw);
         if path.is_dir() {
-            items.extend(list_files(&path, extensions, &kind));
-        } else if path.is_file() {
-            items.push(FileItem {
-                name: path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                path: path.to_string_lossy().to_string(),
-                file_type: kind.clone(),
-                size: fs::metadata(&path).map(|m| m.len()).ok(),
-            });
+            items.extend(list_files(&path, in_folders, &kind));
+        } else if path.is_file() && Accept::Media.allows(&path) {
+            items.push(file_item(&path, &kind));
         }
     }
     items.sort_by(|a, b| a.name.cmp(&b.name));
@@ -307,8 +377,8 @@ fn resolve_dropped_paths(paths: Vec<String>, kind: String) -> Result<Vec<FileIte
 /// Results accumulate as they stream, so a run that ends badly still returns
 /// everything it managed to measure. The original returned `Err` on a non-zero
 /// exit and discarded the entire batch.
-fn drain_events(
-    app: &AppHandle,
+fn drain_events<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     bridge: &mut bridge::Bridge,
     terminal: &str,
 ) -> Result<(Vec<SyncResult>, Option<Value>, bool), String> {
@@ -408,8 +478,8 @@ fn drain_events(
 }
 
 #[tauri::command]
-async fn start_sync(
-    app: AppHandle,
+async fn start_sync<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<SyncRun, String> {
@@ -443,8 +513,8 @@ async fn start_sync(
 /// without this the UI cannot offer a choice and every comparison silently
 /// uses the first stream.
 #[tauri::command]
-async fn list_audio_tracks(
-    app: AppHandle,
+async fn list_audio_tracks<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     paths: Vec<String>,
 ) -> Result<Value, String> {
@@ -485,8 +555,8 @@ async fn list_audio_tracks(
 }
 
 #[tauri::command]
-async fn preview_pairs(
-    app: AppHandle,
+async fn preview_pairs<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
@@ -528,8 +598,8 @@ async fn preview_pairs(
 ///
 /// A confidence score is an argument; hearing the audio land settles it.
 #[tauri::command]
-async fn render_preview(
-    app: AppHandle,
+async fn render_preview<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Option<String>, String> {
@@ -570,8 +640,8 @@ async fn render_preview(
 }
 
 #[tauri::command]
-async fn apply_corrections(
-    app: AppHandle,
+async fn apply_corrections<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
@@ -617,6 +687,135 @@ async fn apply_corrections(
     .map_err(|err| err.to_string())?
 }
 
+/// Lay a cut dub onto its video: plan, write, verify, and optionally mux.
+///
+/// The engine streams its progress and the plan as it goes, and the whole
+/// outcome comes back at the end. Cancellation reaches it through
+/// `cancel_sync`, the same as a batch.
+#[tauri::command]
+async fn start_dubsync<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, BridgeHandle>,
+    request: Value,
+) -> Result<Value, String> {
+    let handle = handle.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String("dubsync".into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(EVENT_TIMEOUT) {
+                    Ok(event) => {
+                        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+                        match kind {
+                            "dubsyncDone" => return Ok(event),
+                            "dubsyncProgress" => {
+                                let _ = app_for_task.emit("dubsync-progress", &event);
+                            }
+                            "dubsyncPlan" => {
+                                let _ = app_for_task.emit("dubsync-plan", &event);
+                            }
+                            "log" => {
+                                if let Some(m) = event.get("message").and_then(Value::as_str) {
+                                    let _ = app_for_task.emit("sync-log", m);
+                                }
+                            }
+                            "error" => {
+                                let message = event
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Unknown engine error");
+                                let _ = app_for_task.emit("sync-log", format!("Error: {message}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err("The analysis engine stopped responding.".into());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("The analysis engine exited unexpectedly.".into());
+                    }
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Sync a queue of dub pairs in parallel: a season of episodes, or several
+/// movies at once. Each job streams its own progress and plan, and the whole
+/// batch resolves with one outcome per job. Cancellation reaches it through
+/// `cancel_sync`, the same as a single dub sync.
+#[tauri::command]
+async fn start_dubsync_batch<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, BridgeHandle>,
+    request: Value,
+) -> Result<Value, String> {
+    let handle = handle.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String("dubsyncBatch".into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(EVENT_TIMEOUT) {
+                    Ok(event) => {
+                        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+                        match kind {
+                            "dubsyncBatchDone" => return Ok(event),
+                            "dubsyncJobStart" => {
+                                let _ = app_for_task.emit("dubsync-job-start", &event);
+                            }
+                            "dubsyncJobProgress" => {
+                                let _ = app_for_task.emit("dubsync-job-progress", &event);
+                            }
+                            "dubsyncJobPlan" => {
+                                let _ = app_for_task.emit("dubsync-job-plan", &event);
+                            }
+                            "dubsyncJobDone" => {
+                                let _ = app_for_task.emit("dubsync-job-done", &event);
+                            }
+                            "log" | "dubsyncJobLog" => {
+                                if let Some(m) = event.get("message").and_then(Value::as_str) {
+                                    let _ = app_for_task.emit("sync-log", m);
+                                }
+                            }
+                            "error" => {
+                                let message = event
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Unknown engine error");
+                                let _ = app_for_task.emit("sync-log", format!("Error: {message}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err("The analysis engine stopped responding.".into());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("The analysis engine exited unexpectedly.".into());
+                    }
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 /// Cancel the running batch. Sent immediately rather than queued, so it reaches
 /// the engine while the run it targets is still in flight.
 #[tauri::command]
@@ -625,8 +824,8 @@ fn cancel_sync(handle: State<'_, BridgeHandle>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn probe_media(
-    app: AppHandle,
+async fn probe_media<R: tauri::Runtime>(
+    app: AppHandle<R>,
     handle: State<'_, BridgeHandle>,
     path: String,
 ) -> Result<MediaProbe, String> {
@@ -673,7 +872,10 @@ async fn probe_media(
 // --------------------------------------------------------------------- export
 
 #[tauri::command]
-async fn export_csv(window: Window, results: Vec<SyncResult>) -> Result<String, String> {
+async fn export_csv<R: tauri::Runtime>(
+    window: Window<R>,
+    results: Vec<SyncResult>,
+) -> Result<String, String> {
     let Some(path) = pick_save_path(window, "sync-results.csv").await else {
         return Err("Export cancelled".into());
     };
@@ -683,7 +885,10 @@ async fn export_csv(window: Window, results: Vec<SyncResult>) -> Result<String, 
 }
 
 #[tauri::command]
-async fn export_json(window: Window, results: Vec<SyncResult>) -> Result<String, String> {
+async fn export_json<R: tauri::Runtime>(
+    window: Window<R>,
+    results: Vec<SyncResult>,
+) -> Result<String, String> {
     let Some(path) = pick_save_path(window, "sync-results.json").await else {
         return Err("Export cancelled".into());
     };
@@ -697,7 +902,7 @@ async fn export_json(window: Window, results: Vec<SyncResult>) -> Result<String,
 /// Used for previews: the user's own player is better at playback than
 /// anything embeddable, and it already knows their audio device.
 #[tauri::command]
-fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+fn open_path<R: tauri::Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     if !PathBuf::from(&path).exists() {
         return Err("That file no longer exists.".into());
@@ -747,6 +952,14 @@ fn reveal_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// The app's context, generated once. `generate_context!` embeds a plist
+/// symbol on macOS, so a second invocation anywhere in the crate -- a test,
+/// say -- is a duplicate-symbol error; both the app and its tests go
+/// through here.
+fn context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -772,9 +985,12 @@ pub fn run() {
             pick_video_folder,
             pick_audio_folder,
             pick_audio_file,
+            pick_media_file,
             resolve_dropped_paths,
             preview_pairs,
             start_sync,
+            start_dubsync,
+            start_dubsync_batch,
             cancel_sync,
             apply_corrections,
             probe_media,
@@ -792,7 +1008,7 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
+        .run(context())
         .expect("error while running tauri application");
 }
 
@@ -855,5 +1071,114 @@ mod tests {
         let payload = serde_json::json!({ "videoFile": "a.mkv", "audioFile": "b.eac3" });
         let result: SyncResult = serde_json::from_value(payload).expect("should deserialize");
         assert!(result.rate_diagnosis.is_none());
+    }
+
+    /// The dub sync command, end to end: the request the webview sends, the
+    /// real Python engine behind the bridge, and the outcome that comes back.
+    ///
+    /// Everything between the React panel and the engine is exercised here
+    /// -- the command's argument shape, the bridge, the event forwarding,
+    /// the terminal event -- on a synthetic pair whose cuts are known.
+    ///
+    /// Needs the Python environment and ffmpeg, which the Rust CI job does
+    /// not have, so it runs only when AUDIOSYNC_E2E is set:
+    ///
+    ///     AUDIOSYNC_E2E=1 cargo test --manifest-path src-tauri/Cargo.toml
+    #[test]
+    fn start_dubsync_runs_the_engine_end_to_end() {
+        if std::env::var_os("AUDIOSYNC_E2E").is_none() {
+            eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
+            return;
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(BridgeHandle::default())
+            .invoke_handler(tauri::generate_handler![start_dubsync])
+            .build(context())
+            .expect("app should build");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview should build");
+
+        // A synthetic pair with known cuts, from the Python test fixtures.
+        let root = bridge::project_root(&app.handle().clone());
+        let dir = std::env::temp_dir().join(format!("audiosync-e2e-{}", std::process::id()));
+        let status = Command::new(bridge::find_python(&root))
+            .arg(root.join("tests").join("test_dubsync.py"))
+            .arg(&dir)
+            .status()
+            .expect("fixture script should run");
+        assert!(status.success(), "fixture generation failed");
+        let video = dir.join("org.wav");
+        let dub = dir.join("dub.wav");
+        let output = dir.join("synced.wav");
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            tauri::webview::InvokeRequest {
+                cmd: "start_dubsync".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                    "request": {
+                        "videoPath": video,
+                        "dubPath": dub,
+                        "videoTrack": 0,
+                        "dubTrack": 0,
+                        "codec": "wav",
+                        "outputPath": output,
+                        "mux": false,
+                        "language": null,
+                        "fillUnmatched": false,
+                        "overwrite": true,
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        );
+        app.state::<BridgeHandle>().shutdown();
+
+        let outcome: Value = response
+            .expect("the command should succeed")
+            .deserialize()
+            .expect("the outcome should be JSON");
+        assert!(
+            outcome["error"].is_null(),
+            "engine error: {}",
+            outcome["error"]
+        );
+        assert_eq!(outcome["cancelled"], false);
+
+        // The fixture has four stretches of dub and cuts at 60-75s, 180-182.5s
+        // and 297-300s; a dub-only insert at 240s leaves no gap in the video.
+        let segments = outcome["plan"]["segments"]
+            .as_array()
+            .expect("plan should list segments");
+        let dubs = segments.iter().filter(|s| s["kind"] == "dub").count();
+        let fills: Vec<&Value> = segments.iter().filter(|s| s["kind"] == "fill").collect();
+        assert_eq!(dubs, 4, "plan: {}", outcome["plan"]);
+        assert!(
+            fills
+                .iter()
+                .any(|f| (f["startS"].as_f64().unwrap() - 180.0).abs() < 0.05
+                    && (f["endS"].as_f64().unwrap() - 182.5).abs() < 0.05),
+            "the 2.5s cut at 180s was not filled: {}",
+            outcome["plan"]
+        );
+
+        // The track was written, the video's length, and measured as in sync.
+        assert!(output.is_file(), "no output at {}", output.display());
+        assert_eq!(outcome["output"]["outputPath"].as_str(), output.to_str());
+        let seconds = outcome["output"]["seconds"].as_f64().unwrap();
+        assert!(
+            (seconds - 300.0).abs() < 0.01,
+            "output is {seconds}s, the video is 300s"
+        );
+        let worst = outcome["verification"]["worstMs"].as_f64().unwrap();
+        assert!(worst <= 5.0, "finished track is {worst}ms out at worst");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

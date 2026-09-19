@@ -42,6 +42,10 @@ by a real mux round-trip in `tests/test_mux.py`.
   release a dub was timed for. A dub synced to a WEB-DL drifts against a BluRay
   with different framing; comparing both at once shows which one it belongs to.
   Capped at five files per side, since the work is the product of both.
+- **Dub sync** — a queue of videos against their dubs, each a different edit
+  of its video: scenes missing, a longer logo, a different speed. Pairs each
+  episode (or movie) with its own dub and writes, in parallel, a track the
+  length of each video with the original audio filling every gap. See below.
 
 ## Audio tracks
 
@@ -61,7 +65,117 @@ that cancels it exactly.
 Drift larger than any standard conversion can produce (beyond ~45 ms/s) means
 something else: the files contain different material. Those are reported as
 **Different cut** and excluded from the fixable set, because no single delay or
-speed ratio aligns them.
+speed ratio aligns them. For those, there is dub sync.
+
+## Dub sync
+
+A dub is often a different edit of the same film: a scene the dubbing studio
+never received, a recap trimmed for broadcast, a longer logo at the head. No
+single delay describes it. Dub sync works out, along the whole runtime, which
+stretch of the dub belongs at each moment of the video, and writes one track
+exactly the video's length: the dub wherever the dub exists, the video's own
+audio wherever it does not, crossfaded at every seam.
+
+```sh
+python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3
+python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3 --codec eac3 --mux --lang hin
+python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3 --plan-only
+python python/dubsync.py --from-plan MOVIE.hin.dubsynced.dubsync.json -o fixed.flac
+```
+
+The result is `MOVIE.hin.dubsynced.flac` beside the video (`--codec` for
+wav, aac, ac3, eac3 or opus; `--mux` for a copy of the video with the track
+added), a JSON plan beside it, and a report:
+
+```
+4 stretches of dub, 4 fills from the original (0:00:21.458 in all), fills at +4.4 dB
+  fill  0:00:00.000 - 0:00:00.735  <- org 0:00:00.000                   0.7s  dub starts late
+  dub   0:00:00.735 - 0:00:59.796  <- dub 0:00:01.541     +0.806s  match 0.08
+  fill  0:00:59.796 - 0:01:15.010  <- org 0:00:59.796                  15.2s  dub is cut here
+  dub   0:01:15.010 - 0:02:59.996  <- dub 0:01:00.815    -14.194s  match 0.07
+  ...
+--- checking the finished track against the original ---
+the finished track sits 0ms from the original typically and 0ms at its worst, measured at 10 spots.
+```
+
+Each `dub` line is a stretch of the video's timeline, where in the dub it was
+found, and the offset (dub time minus video time). Each `fill` is a stretch
+the dub does not have, taken from the video's own audio and re-levelled to
+sit among the dub. The check at the end decodes the finished track and
+measures it against the video at a dozen spots and in a sweep of short
+windows, so a mistake shows up as a number rather than on first viewing.
+
+How it works: both tracks are reduced to onset envelopes, since the music
+and effects under a dub are the same stems as under the original even
+though the dialogue is not. The video is cut into 30-second windows, each
+correlated against the dub across every plausible offset, and the offsets
+are chosen as one path through all the windows at once, which stays put for
+free and pays to jump -- so a window that locks onto a repeated musical
+phrase cannot splice the track on its own. Every stretch is then measured
+from inside at 2 ms, and split wherever the offset steps, so a one-frame cut
+in the middle of a scene is found too. Every cut is placed where the two
+tracks stop agreeing: first on the envelopes, then, where the two mixes
+demonstrably share a waveform, on the waveform itself, to the sample. Every
+gap is then searched again at the envelope's full 2 ms resolution, with
+windows of 10, 30 and 90 seconds and only the offsets the neighbouring
+stretches allow -- quiet scenes whose shared music and effects are too
+faint for the coarse pass are found this way, cuts inside them included.
+Stretches where the dub has gone silent while the video has not are
+filled; silence in both is a pause, not a cut. A dub at a different
+speed is caught two ways: a large conversion (PAL) by trying the standard
+ones on the audio, and a small one (24 against 23.976 fps, a millisecond a
+second) by reading the drift off the coarse alignment itself; either way the
+dub is decoded at the compensating rate throughout. A dub conformed scene
+by scene, with some scenes a few frames out, is followed scene by scene:
+steps as small as a few milliseconds are followed when the readings are
+sharp enough to tell them apart, and a step is believed only when the
+piece it cuts out, taken whole, agrees better at its own offset than at
+its neighbour's. Two stretches less than a tenth of a second apart are the
+same scene, and nothing between them is ever filled: the gap is bridged
+with each side keeping its own offset, because a few seconds a frame out
+of lip-sync is a far smaller mistake than the other language over a scene
+the dub has. An edge the evidence cannot place closer than a quarter of a
+second is pulled inward by its uncertainty, so the dub only ever plays
+where the dub belongs and the original takes the doubt. A track that is
+already in sync comes back as one stretch at 0 ms with nothing filled --
+feed the finished track back in as the dub to check it.
+
+What it will not do: it keeps the dub across a passage that merely
+correlates weakly when the offset is the same either side and the dub is
+audible there, because replacing a scene that has the right language with
+one that does not is the worse mistake; the plan notes where it did so
+(as a note, not a warning: nothing was changed there).
+`--fill-unmatched` (in the app: Settings, "Replace stretches that did not
+correlate") fills such passages from the original instead, and marks those
+fills `dub audible but did not correlate; replaced` -- shown as *Replaced*
+in the app -- so they can be told from real cuts and checked by ear. Leave
+it off unless a kept passage turns out to be the wrong scene.
+Cut placement is only as precise as the shared bed allows: at a cut that
+falls in a silence, the edge lands where the bed stops. Offsets are reported
+as decoded, so a raw AC3 or E-AC3 dub reads 5.3 ms of decoder priming into
+them; the rendered track is placed by the same decode and is not affected,
+and a raw AC3 or E-AC3 output is written early by the same amount so that it
+plays on the sample. Manual corrections go in the JSON plan and come back
+in with `--from-plan`.
+
+In the app, the **Dub sync** tab does the same thing, as a queue rather
+than a single pair: drop a folder of episodes (or movies) on one side and
+the folder of dubs on the other -- any format ffmpeg reads, bare or inside
+an MP4/MKV. Each episode is matched to its own dub by season and episode
+number (movies by filename similarity), and the pairing preview shows what
+will run, with hand repairs where a match is wrong. Press Sync and the
+whole queue runs in parallel, up to the configured worker count. Each pair
+reports its plan as soon as its analysis is done -- before its track is
+written -- and each finished row shows the written track and the check
+against the video; a row's plan is collapsed behind its summary, so a
+season reads as a list of results rather than a wall of tables. Choose
+what to write the synced tracks as (each dub's own codec by default, or
+FLAC, E-AC3, AC3, AAC, Opus, WAV) and whether to also write a copy of each
+video with the track added. Stop interrupts every job. The engine is
+reached through the bridge's `dubsyncBatch` command, which reports
+`dubsyncJobStart`, `dubsyncJobProgress`, `dubsyncJobPlan`, `dubsyncJobDone`
+and `dubsyncBatchDone` (the single-pair `dubsync` command, with
+`dubsyncProgress`, `dubsyncPlan` and `dubsyncDone`, remains for one-offs).
 
 ## Reviewing results
 
@@ -117,7 +231,10 @@ audiosync/          Analysis engine (Python)
   matching.py       Pairing video and audio files
   mux.py            Applying corrections
   batch.py          Bounded-concurrency batch runner
+  dubsync.py        Dub sync: which stretch of a cut dub belongs where
+  dubrender.py      Writing the synced track, and muxing it
 python/bridge.py    Line-delimited JSON bridge to the desktop host
+python/dubsync.py   Dub sync command line
 src-tauri/          Tauri host (Rust)
 src/                UI (React + TypeScript)
 tests/              Python tests and fixture generation
