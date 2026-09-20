@@ -121,7 +121,14 @@ windows of 10, 30 and 90 seconds and only the offsets the neighbouring
 stretches allow -- quiet scenes whose shared music and effects are too
 faint for the coarse pass are found this way, cuts inside them included.
 Stretches where the dub has gone silent while the video has not are
-filled; silence in both is a pause, not a cut. A dub at a different
+filled; silence in both is a pause, not a cut. When more than a tenth of
+the video is still without dub after that, every window of the video is
+searched across the whole dub at 2 ms: a dub cut as TV episodes -- with
+recaps, openings and endings between the film's scenes, and the episodes
+in any order -- puts scenes at offsets the coarse pass cannot reach, and
+its sharp onsets do not survive the coarse pooling. The songs and recaps
+are simply never used; nothing is trimmed from the video, and only the
+scenes the dub really lacks are filled. A dub at a different
 speed is caught two ways: a large conversion (PAL) by trying the standard
 ones on the audio, and a small one (24 against 23.976 fps, a millisecond a
 second) by reading the drift off the coarse alignment itself; either way the
@@ -144,7 +151,11 @@ What it will not do: it keeps the dub across a passage that merely
 correlates weakly when the offset is the same either side and the dub is
 audible there, because replacing a scene that has the right language with
 one that does not is the worse mistake; the plan notes where it did so
-(as a note, not a warning: nothing was changed there).
+(as a note, not a warning: nothing was changed there). At the very start
+and end of the file, where there is only one side to vouch for it, the
+dub is kept this way for at most half a minute; a longer uncorrelated
+leader is filled and marked *Replaced*, since on a dub made of episodes it
+was another episode's ending.
 `--fill-unmatched` (in the app: Settings, "Replace stretches that did not
 correlate") fills such passages from the original instead, and marks those
 fills `dub audible but did not correlate; replaced` -- shown as *Replaced*
@@ -159,11 +170,12 @@ plays on the sample. Manual corrections go in the JSON plan and come back
 in with `--from-plan`.
 
 In the app, the **Dub sync** tab does the same thing, as a queue rather
-than a single pair: drop a folder of episodes (or movies) on one side and
-the folder of dubs on the other -- any format ffmpeg reads, bare or inside
-an MP4/MKV. Each episode is matched to its own dub by season and episode
-number (movies by filename similarity), and the pairing preview shows what
-will run, with hand repairs where a match is wrong. Press Sync and the
+than a single pair. It opens on one of two scopes, chosen at the top of the
+sidebar: **Movies** pairs each video with its dub by filename; **Series**
+pairs a season by season and episode number. Drop a folder of movies (or
+episodes) on one side and the folder of dubs on the other -- any format
+ffmpeg reads, bare or inside an MP4/MKV -- and the pairing preview shows
+what will run, with hand repairs where a match is wrong. Press Sync and the
 whole queue runs in parallel, up to the configured worker count. Each pair
 reports its plan as soon as its analysis is done -- before its track is
 written -- and each finished row shows the written track and the check

@@ -3,6 +3,10 @@
 
 export type SyncMode = "movie" | "series" | "compare" | "dubsync";
 
+/** What the Dub sync tab is pairing: a batch of movies by filename, or a
+ *  season of episodes by season/episode number. */
+export type DubScope = "movies" | "series";
+
 /** Upper bound per side in compare mode. The work is the product of both
  *  sides, so five against five is already 25 analyses. */
 export const MAX_COMPARE_INPUTS = 5;
@@ -158,6 +162,8 @@ export interface AnalyzeRequest {
   videoFiles: string[] | null;
   audioFiles: string[] | null;
   matchPattern: string | null;
+  /** Which pairing the dub tab wants: movies by filename, series by episode. */
+  dubKind?: DubScope;
   videoTrack: number;
   audioTrack: number;
   /** Explicit pairs, sent when the user has corrected the matching by hand.

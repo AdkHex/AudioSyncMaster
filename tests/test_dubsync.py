@@ -344,6 +344,47 @@ def test_a_step_the_whole_piece_does_not_bear_out_is_not_split():
         assert aligner.step_is_real(Block(0.0, 200.0, 0.034), Block(200.0, 260.0, 0.0))
 
 
+def test_a_dub_made_of_episodes_is_found_across_the_whole_file():
+    """A dub cut as episodes: the film's ending first, then a long recap,
+    then the film with an opening and ending song between its parts. The
+    ending sits 200 s *before* where a dub of the same edit could put it,
+    outside the coarse pass's range, and is found by the wide pass. The
+    songs and the recap are simply not used; nothing is trimmed from the
+    video, and only the two scenes the dub lacks are filled."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 300, [
+            ("org", 200, 300), ("extra", 240), ("org", 0, 90), ("extra", 60), ("org", 100, 190),
+        ])
+        plan = _plan(ws)
+        got = sorted((round(d.start_s), round(d.end_s), round(d.offset_s, 3)) for d in plan.dub_segments)
+        assert sorted((s, e, round(o, 3)) for s, e, o in expected) == [(0, 90, 340.0), (100, 190, 390.0), (200, 300, -200.0)]
+        for (start, end, offset) in expected:
+            near = [g for g in got if abs(g[2] - offset) <= 0.003]
+            assert near, f"no stretch at {offset:+.0f}s:\n{plan.describe()}"
+            assert abs(near[0][0] - start) <= 2 and abs(near[0][1] - end) <= 2, f"stretch at {offset:+.0f}s spans {near[0][:2]}, expected {start}-{end}"
+        assert abs(plan.filled_s - 20.0) < 3.0, plan.describe()
+
+
+def test_a_long_uncorrelated_leader_is_filled_not_kept():
+    """Dub audible before the first stretch, at the offset the stretch
+    continues from, is kept a little way -- a logo the mixes differ on --
+    but not for minutes on the strength of one stretch: inside the file a
+    kept passage has the same offset on both sides for evidence, at the
+    start it has one. On a dub made of episodes the passage was another
+    episode's ending, and it was played over the film's opening."""
+    with Workspace() as ws:
+        build_pair(ws, 300, [("extra", 200), ("org", 190, 300)])
+        plan = _plan(ws)
+        first = plan.segments[0]
+        assert first.kind == "fill" and first.note == "dub audible but did not correlate; replaced", plan.describe()
+        assert abs(first.end_s - 190.0) < 2.0, plan.describe()
+    with Workspace() as ws:
+        build_pair(ws, 300, [("extra", 20), ("org", 15, 300)])
+        plan = _plan(ws)
+        assert plan.segments[0].kind == "dub" and plan.segments[0].start_s == 0.0, plan.describe()
+        assert any(n.startswith("kept the dub across 0:00:00.000") for n in plan.notes), plan.notes
+
+
 def _bedless_pair(ws, total_s=600, lo_s=100.0, hi_s=280.0):
     """A dub identical to the video's timeline, but with no shared bed at all
     -- dialogue over nothing -- across [lo_s, hi_s). Three minutes of it, so

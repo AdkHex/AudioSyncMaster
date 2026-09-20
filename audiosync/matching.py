@@ -218,6 +218,28 @@ def match_lists(
     return _match_by_similarity(primaries, secondaries, fuzzy_threshold)
 
 
+def match_movies(
+    primaries: Sequence[str],
+    secondaries: Sequence[str],
+    fuzzy_threshold: float = 0.55,
+) -> MatchReport:
+    """Pair movies against their dubs by filename similarity alone.
+
+    Movies carry no episode numbers, and their names routinely differ beyond
+    the release-metadata noise ("Interstellar" against "Interstellar Hindi
+    DD5.1"), so the episode passes are skipped and the similarity bar sits
+    lower than the series fallback. The pairing preview is the place to
+    catch what that lets through.
+    """
+    primaries = list(primaries)
+    secondaries = list(secondaries)
+    if not primaries:
+        return MatchReport([], [], secondaries, "none", None, "No media files on the video side")
+    if not secondaries:
+        return MatchReport([], primaries, [], "none", None, "No media files on the dub side")
+    return _match_by_similarity(primaries, secondaries, fuzzy_threshold)
+
+
 def _match_by_pattern(
     primaries: Sequence[str], secondaries: Sequence[str], pattern: str, method: str
 ) -> MatchReport:
@@ -346,10 +368,9 @@ def _match_by_similarity(
 
     pairs.sort(key=lambda pair: pair.primary_path)
     warning = (
-        "Paired by filename similarity rather than episode numbers. "
-        "Review the pairing preview before running."
+        "Paired by filename similarity. Review the pairing preview before running."
         if pairs
-        else "No episode numbers found and filenames are not similar enough to pair."
+        else "Filenames are not similar enough to pair."
     )
     return MatchReport(
         pairs=pairs,

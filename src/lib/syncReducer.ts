@@ -9,6 +9,7 @@
 
 import { MAX_COMPARE_INPUTS } from "./types";
 import type {
+  DubScope,
   FileItem,
   PairingReport,
   ProcessingStatus,
@@ -24,6 +25,8 @@ export interface SyncState {
   audioFiles: FileItem[];
   videoFolder: string | null;
   audioFolder: string | null;
+  /** What the dub sync tab is pairing: movies by filename, series by episode. */
+  dubScope: DubScope;
   /** True when videos were chosen individually rather than via a folder. */
   explicitVideoSelection: boolean;
   results: SyncResult[];
@@ -44,6 +47,7 @@ export const initialSyncState: SyncState = {
   audioFiles: [],
   videoFolder: null,
   audioFolder: null,
+  dubScope: "movies",
   explicitVideoSelection: false,
   results: [],
   summary: null,
@@ -60,6 +64,7 @@ const MAX_LOG_LINES = 500;
 
 export type SyncAction =
   | { type: "setMode"; mode: SyncMode }
+  | { type: "setDubScope"; scope: DubScope }
   | { type: "addFiles"; kind: "video" | "audio"; files: FileItem[]; folder?: string | null; explicit?: boolean }
   | { type: "replaceFiles"; kind: "video" | "audio"; files: FileItem[]; folder: string | null; explicit?: boolean }
   | { type: "removeFiles"; kind: "video" | "audio"; ids: string[] }
@@ -101,6 +106,13 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
         mode: action.mode,
         logs: state.logs,
       };
+    }
+
+    case "setDubScope": {
+      if (action.scope === state.dubScope) return state;
+      // The pairing belongs to the scope: episode numbers mean nothing to
+      // movies, and a movie title means nothing to a season.
+      return { ...state, dubScope: action.scope, pairing: null };
     }
 
     case "addFiles": {

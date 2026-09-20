@@ -294,6 +294,13 @@ FILL_AUDIBLE_RATIO = 0.1
 # its own offset. This is the offset at which lip-sync starts to show; a
 # step larger than it may be a shot cut out, and is treated as a cut.
 NEAR_OFFSET_S = 0.1
+# Dub audible before the first stretch or after the last, at the offset the
+# stretch continues from, is kept only this far: as far as the stretch is
+# long, and never more than this. Inside the file a kept passage has the
+# same offset on both sides for evidence; at the file's ends there is one
+# side, and a seven-second stretch cannot vouch for four minutes -- on a
+# dub made of episodes it vouched for another episode's ending.
+EDGE_KEEP_MAX_S = 30.0
 # How far the original is allowed to be re-levelled to sit among the dub.
 MAX_FILL_GAIN_DB = 12.0
 # The level difference is read in pieces this long across every stretch.
@@ -327,6 +334,33 @@ SPEED_ROUNDS = 2
 # resting on nothing, the pair may be a rate conversion rather than a bad
 # dub, and the standard speeds are tried before believing it.
 SPEED_RETRY_FRACTION = 0.3
+
+# --- the wide pass ----------------------------------------------------------
+
+# When the credible stretches cover less of the video than this after the
+# coarse pass and the speed trials, every window of the video is searched
+# across the whole dub at the envelope's full 2 ms. It costs a minute or two
+# on a feature and can only add stretches, so it runs whenever more than a
+# tenth of the video is without dub. The coarse pass looks
+# only within the offsets a dub of the same edit can reach, and at 20 to
+# 160 ms: a dub made of episodes -- recaps, openings and endings inserted,
+# the episodes in any order -- puts scenes at offsets far outside that, and
+# its onsets are too sharp to survive the pooling. On such a pair the coarse
+# pass matched 21 windows of 698 and left 93 minutes filled, while at 2 ms
+# every window of those minutes matched at 8 to 58 noise units.
+WIDE_PASS_COVERAGE = 0.9
+WIDE_WINDOW_S = 30.0
+WIDE_HOP_S = 15.0
+# A window's best offset counts when this far above the noise across the
+# whole dub: the search range is the file, so the bar is higher than the
+# coarse pass's MATCH_Z.
+WIDE_Z = 7.0
+# Consecutive windows whose offsets agree to within this are one stretch;
+# it takes three, because across a whole file two windows can agree on a
+# coincidence when the music repeats, and a stretch found by the wide pass
+# goes into a gap that would otherwise be filled with the original.
+WIDE_SAME_OFFSET_S = 0.05
+WIDE_MIN_WINDOWS = 3
 # A trial speed is believed when its peak stands this far above the noise
 # and this many times above what the files managed at their own speed.
 # Several speeds are tried, and each is a chance for a coincidence, so the
@@ -1929,6 +1963,15 @@ def plan_dubsync(
                 secondary, aligner, grid, blocks = trial
         plan.speed = secondary.speed
 
+        if _coverage(blocks, primary.duration_s) < WIDE_PASS_COVERAGE:
+            wide = _wide_blocks(aligner, lambda f: report(56 + 4 * f, "searching the whole dub"), say)
+            if wide:
+                blocks = _credible(_measure_and_split(aligner, _merge_blocks(blocks, wide)), aligner)
+                say(
+                    f"with the wide pass: {len(blocks)} credible stretch(es) covering "
+                    f"{100 * _coverage(blocks, primary.duration_s):.0f}%"
+                )
+
         if not blocks:
             plan.error = "No part of the dub could be matched to the video"
             return plan
@@ -2080,6 +2123,124 @@ def _speed_from_drift(
         return None
     say(f"dub runs at {candidate:.6f}x the video's speed")
     return trial, trial_aligner, grid, trial_blocks
+
+
+def _wide_blocks(aligner: _Aligner, report: Callable[[float, str], None], say: LogFn) -> List[Block]:
+    """Stretches found by searching every window of the video across the
+    whole dub at 2 ms (see WIDE_PASS_COVERAGE).
+
+    Each window keeps its best offset when it stands WIDE_Z above the noise
+    of the whole search; runs of consecutive windows agreeing on an offset
+    are stretches, bracketed the way the coarse pass brackets its own. The
+    stretches are measured and their edges placed afterwards like any other.
+    """
+    rate = ENVELOPE_RATE
+    primary, secondary = aligner.primary.onset, aligner.secondary.onset
+    window = int(WIDE_WINDOW_S * rate)
+    hop = int(WIDE_HOP_S * rate)
+    if len(primary) < window or len(secondary) < window:
+        return []
+    starts = list(range(0, len(primary) - window + 1, hop))
+    possible = np.ones(len(secondary) - window + 1, dtype=bool)
+    hits: List[Tuple[float, float, float]] = []  # (window start, offset, noise units)
+    for index, start in enumerate(starts):
+        if aligner.token:
+            aligner.token.raise_if_cancelled()
+        row = ncc_lags(primary[start : start + window], secondary)
+        if row.size < 3:
+            continue
+        peak = int(np.argmax(row))
+        z = float(_noise_units(row, possible)[peak])
+        if z >= WIDE_Z:
+            hits.append((start / rate, (_parabolic(row, peak) - start) / rate, z))
+        report((index + 1) / len(starts))
+
+    blocks: List[Block] = []
+    run: List[Tuple[float, float, float]] = []
+
+    def close() -> None:
+        if len(run) >= WIDE_MIN_WINDOWS:
+            blocks.append(Block(
+                start_s=run[0][0],
+                end_s=run[-1][0] + WIDE_WINDOW_S,
+                offset_s=float(np.median([h[1] for h in run])),
+                support=float(np.mean([h[2] for h in run])),
+                windows=len(run),
+                start_lo=max(0.0, run[0][0] - WIDE_HOP_S),
+                start_hi=run[0][0] + WIDE_WINDOW_S,
+                end_lo=run[-1][0],
+                end_hi=run[-1][0] + WIDE_WINDOW_S + WIDE_HOP_S,
+                trace=[(h[0], h[1]) for h in run],
+            ))
+        run.clear()
+
+    for hit in hits:
+        if run and (
+            abs(hit[1] - run[-1][1]) > WIDE_SAME_OFFSET_S
+            or hit[0] - run[-1][0] > 2.0 * WIDE_HOP_S + 1e-6
+        ):
+            close()
+        run.append(hit)
+    close()
+    say(
+        f"wide pass: {len(hits)} of {len(starts)} windows of {WIDE_WINDOW_S:.0f}s found in the dub "
+        f"at {WIDE_Z:.0f}+ noise units, {len(blocks)} stretch(es) of {WIDE_MIN_WINDOWS}+ windows"
+    )
+    return blocks
+
+
+def _merge_blocks(coarse: List[Block], wide: List[Block]) -> List[Block]:
+    """The coarse stretches and the wide pass's together, without overlap.
+
+    Where the two overlap at one offset they are one stretch, spanning
+    both. Where they overlap at different offsets the wide pass's is kept:
+    it was measured at 2 ms across the whole dub, where the coarse pass
+    coasts over windows with no evidence and searches only where a dub of
+    the same edit could be.
+    """
+    from_wide = {id(b) for b in wide}
+    kept: List[Block] = []
+    for block in sorted(coarse + wide, key=lambda b: (b.start_s, b.end_s)):
+        if not kept:
+            kept.append(block)
+            continue
+        last = kept[-1]
+        overlap = min(last.end_s, block.end_s) - max(last.start_s, block.start_s)
+        if overlap <= 0.0:
+            kept.append(block)
+            continue
+        if abs(block.offset_s - last.offset_s) <= NEAR_OFFSET_S:
+            wide_one = block if id(block) in from_wide else last
+            last.start_s = min(last.start_s, block.start_s)
+            last.end_s = max(last.end_s, block.end_s)
+            last.start_lo = min(last.start_lo, block.start_lo)
+            last.end_hi = max(last.end_hi, block.end_hi)
+            last.offset_s = wide_one.offset_s
+            last.support = max(last.support, block.support)
+            last.windows += block.windows
+            last.trace = sorted(last.trace + block.trace)
+            continue
+        if id(block) in from_wide and id(last) not in from_wide:
+            loser, winner = last, block
+        elif id(last) in from_wide and id(block) not in from_wide:
+            loser, winner = block, last
+        else:
+            # Both from one pass: the longer stays whole.
+            loser, winner = (block, last) if last.length_s >= block.length_s else (last, block)
+        if loser is last:
+            last.end_s = min(last.end_s, winner.start_s)
+            last.end_lo = min(last.end_lo, last.end_s)
+            last.end_hi = min(last.end_hi, winner.start_s)
+            if last.length_s < MIN_BLOCK_S:
+                kept.pop()
+            kept.append(block)
+        else:
+            block.start_s = max(block.start_s, winner.end_s)
+            block.start_hi = max(block.start_hi, block.start_s)
+            block.start_lo = max(block.start_lo, winner.end_s)
+            if block.length_s >= MIN_BLOCK_S:
+                kept.append(block)
+    return kept
 
 
 def _coverage(blocks: List[Block], duration_s: float) -> float:
@@ -2816,7 +2977,7 @@ def _assemble(
     leading_note = "dub starts late"
     if first.start_s - reach > MIN_FILL_S:
         if dub_audible(reach, first.start_s, first.offset_s):
-            if keep_unmatched_dub:
+            if keep_unmatched_dub and first.start_s - reach <= min(EDGE_KEEP_MAX_S, first.length_s):
                 notes.append(
                     f"kept the dub across {_clock(reach)} - {_clock(first.start_s)}: it did not "
                     f"correlate there, but the offset carries on from the stretch after it and the dub is not silent"
@@ -2834,7 +2995,7 @@ def _assemble(
     trailing_note = "past dub end"
     if reach - last.end_s > MIN_FILL_S:
         if dub_audible(last.end_s, reach, last.offset_s):
-            if keep_unmatched_dub:
+            if keep_unmatched_dub and reach - last.end_s <= min(EDGE_KEEP_MAX_S, last.length_s):
                 notes.append(
                     f"kept the dub across {_clock(last.end_s)} - {_clock(reach)}: it did not "
                     f"correlate there, but the offset carries on from the stretch before it and the dub is not silent"

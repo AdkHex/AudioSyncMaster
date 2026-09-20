@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from audiosync.matching import (  # noqa: E402
     match_folders,
     match_lists,
+    match_movies,
     pair_movie_mode,
     validate_pattern,
 )
@@ -163,6 +164,39 @@ def test_match_lists_reports_unmatched_on_either_side():
         assert len(report.pairs) == 1
         assert len(report.unmatched_primary) == 2, report.unmatched_primary
         assert report.unmatched_secondary == []
+
+
+def test_match_movies_pairs_each_movie_with_its_own_dub():
+    """Movies pair by filename alone, even when release noise and language
+    words push the names apart."""
+    with Folders(
+        ["Interstellar (2014) 1080p BluRay.mkv", "Dune.mkv"],
+        ["Dune Hindi.ac3", "Interstellar Hindi DD5.1 eac3"],
+    ) as f:
+        videos = [os.path.join(f.primary, n) for n in os.listdir(f.primary)]
+        dubs = [os.path.join(f.secondary, n) for n in os.listdir(f.secondary)]
+        report = match_movies(videos, dubs)
+        assert len(report.pairs) == 2, f"got {len(report.pairs)} pairs: {report.warning}"
+        by_video = {p.primary_name: p for p in report.pairs}
+        assert by_video["Dune.mkv"].secondary_name == "Dune Hindi.ac3", (
+            f"mismatched: {by_video['Dune.mkv']}"
+        )
+        assert by_video["Interstellar (2014) 1080p BluRay.mkv"].secondary_name == (
+            "Interstellar Hindi DD5.1 eac3"
+        )
+        assert all(p.method == "filename similarity" for p in report.pairs)
+
+
+def test_match_movies_refuses_unrelated_names():
+    with Folders(
+        ["Inception.mkv"],
+        ["Insidious Hindi.ac3"],
+    ) as f:
+        videos = [os.path.join(f.primary, n) for n in os.listdir(f.primary)]
+        dubs = [os.path.join(f.secondary, n) for n in os.listdir(f.secondary)]
+        report = match_movies(videos, dubs)
+        assert report.pairs == [], f"paired unrelated movies: {report.pairs}"
+        assert report.warning, "no explanation for the empty pairing"
 
 
 def test_duplicate_keys_produce_warning():

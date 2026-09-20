@@ -221,6 +221,18 @@ describe("logs", () => {
 });
 
 describe("validation", () => {
+  it("switches the dub scope and drops the pairing with it", () => {
+    const paired = {
+      ...initialSyncState,
+      mode: "dubsync" as const,
+      pairing: { pairs: [], unmatchedPrimary: [], unmatchedSecondary: [], method: "episode", patternUsed: null, warning: null },
+    };
+    const state = syncReducer(paired, { type: "setDubScope", scope: "series" });
+    expect(state.dubScope).toBe("series");
+    expect(state.pairing).toBeNull();
+    expect(syncReducer(state, { type: "setDubScope", scope: "series" })).toBe(state);
+  });
+
   it("wants at least one file on each side of a dub sync", () => {
     const dub = { ...initialSyncState, mode: "dubsync" as const };
     expect(validateSelection(dub).reason).toMatch(/video and the dub/);

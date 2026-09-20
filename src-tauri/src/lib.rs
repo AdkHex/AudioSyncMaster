@@ -321,6 +321,34 @@ async fn pick_media_file<R: tauri::Runtime>(
     pick_single(window, &kind).await
 }
 
+/// Several files of either kind at once, for the dub tab's Movies scope:
+/// a movie list is rarely one folder, so the dialog allows multi-selection.
+/// Anything media drops in, since either slot takes a dub inside an MKV as
+/// readily as a bare track; non-media picks are discarded like stray drops.
+#[tauri::command]
+async fn pick_media_files<R: tauri::Runtime>(
+    window: Window<R>,
+    kind: String,
+) -> Result<PickResponse, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    window.dialog().file().pick_files(move |paths| {
+        let _ = tx.send(paths.unwrap_or_default());
+    });
+    let paths = tauri::async_runtime::spawn_blocking(move || rx.recv().ok().unwrap_or_default())
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let mut items: Vec<FileItem> = paths
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .filter(|p| p.is_file() && Accept::Media.allows(p))
+        .map(|p| file_item(&p, &kind))
+        .collect();
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    items.dedup_by(|a, b| a.path == b.path);
+    Ok(PickResponse { folder: None, files: items })
+}
+
 async fn pick_single<R: tauri::Runtime>(
     window: Window<R>,
     kind: &str,
@@ -986,6 +1014,7 @@ pub fn run() {
             pick_audio_folder,
             pick_audio_file,
             pick_media_file,
+            pick_media_files,
             resolve_dropped_paths,
             preview_pairs,
             start_sync,

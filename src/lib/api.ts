@@ -83,6 +83,16 @@ export async function pickMediaFile(
   return { folder: response.folder, files: withIds(response.files, kind) };
 }
 
+/** Several media files in one dialog, for the dub tab's Movies scope: the
+ *  movie list is rarely one folder, so this allows multi-selection. */
+export async function pickMediaFiles(
+  kind: "video" | "audio",
+): Promise<{ folder: string | null; files: FileItem[] }> {
+  requireDesktop("Choosing files");
+  const response = await invoke<PickResponse>("pick_media_files", { kind });
+  return { folder: response.folder, files: withIds(response.files, kind) };
+}
+
 /** Turn dropped OS paths into usable file entries, expanding folders.
  *
  *  `accept` says what a dropped folder contributes: the side's own kind, or

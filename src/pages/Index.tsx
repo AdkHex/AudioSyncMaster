@@ -355,8 +355,13 @@ export default function Index() {
       try {
         const mode = stateRef.current.mode;
         const wantsSingleAudio = kind === "audio" && mode === "movie";
-        const response =
-          wantsSingleAudio
+        // The dub tab's Movies scope browses files, with multi-selection:
+        // a movie list is rarely one folder. Series keeps folder browsing.
+        const wantsMovieFiles =
+          mode === "dubsync" && stateRef.current.dubScope === "movies";
+        const response = wantsMovieFiles
+          ? await api.pickMediaFiles(kind)
+          : wantsSingleAudio
             ? await api.pickAudioFile()
             : kind === "audio"
               ? await api.pickAudioFolder()
@@ -364,13 +369,19 @@ export default function Index() {
 
         if (response.files.length === 0) return;
 
-        dispatch({
-          type: "replaceFiles",
-          kind,
-          files: response.files,
-          folder: response.folder,
-          explicit: false,
-        });
+        if (wantsMovieFiles) {
+          // Multi-selected files add to the list: a second browse for one
+          // more movie must not throw the first picks away.
+          dispatch({ type: "addFiles", kind, files: response.files, folder: null, explicit: true });
+        } else {
+          dispatch({
+            type: "replaceFiles",
+            kind,
+            files: response.files,
+            folder: response.folder,
+            explicit: false,
+          });
+        }
         if (response.folder) {
           setRecentFolders((prev) => ({ ...prev, [kind]: response.folder }));
         }
@@ -444,6 +455,8 @@ export default function Index() {
         current.mode === "series" && config.matchPattern.trim()
           ? config.matchPattern
           : null,
+      // The dub tab pairs by episode for a season and by filename for movies.
+      dubKind: current.mode === "dubsync" ? current.dubScope : undefined,
       // Kept as the default for any pair that does not name its own stream.
       // Track 0 is the file's first audio stream, which is what the engine
       // would have used anyway.
@@ -506,6 +519,7 @@ export default function Index() {
     state.audioFiles,
     state.mode,
     state.status,
+    state.dubScope,
     settings.matchPattern,
     buildRequest,
   ]);
@@ -943,6 +957,8 @@ export default function Index() {
           onDragEnter={setDragTarget}
           dubOptions={settings}
           onDubOptionsChange={(patch) => setSettings((current) => ({ ...current, ...patch }))}
+          dubScope={state.dubScope}
+          onDubScopeChange={(scope) => dispatch({ type: "setDubScope", scope })}
           runLabel={runLabel}
           canRun={selection.ok && desktop}
           runBlockedReason={
@@ -963,8 +979,16 @@ export default function Index() {
                   />
                 ) : state.videoFiles.length === 0 && state.audioFiles.length === 0 ? (
                   <EmptyState
-                    title="Sync a season of dubs onto its episodes"
-                    body="Add the episodes (or the movies) and their dubs. Each one is matched to its own dub by season and episode number — or filename, for movies — and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
+                    title={
+                      state.dubScope === "movies"
+                        ? "Sync your movies onto their dubs"
+                        : "Sync a season of dubs onto its episodes"
+                    }
+                    body={
+                      state.dubScope === "movies"
+                        ? "Add the movies and their dubs. Each movie is matched to its own dub by filename, and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
+                        : "Add the episodes and their dubs. Each one is matched to its own dub by season and episode number, and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
+                    }
                   />
                 ) : state.pairing || pairingLoading ? (
                   <PairingPreview

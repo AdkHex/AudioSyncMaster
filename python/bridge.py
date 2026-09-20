@@ -42,6 +42,7 @@ try:
         list_media,
         match_folders,
         match_lists,
+        match_movies,
         pair_every_combination,
         pair_movie_mode,
         validate_pattern,
@@ -341,14 +342,20 @@ def handle_preview_pairs(request: dict) -> None:
 
     if mode == "dubsync":
         # Each episode or movie against its own dub: episode numbers where the
-        # names carry them, filename similarity otherwise.
+        # names carry them, filename similarity otherwise. The movies scope
+        # skips episode matching entirely, since a movie title never carries
+        # one -- its pairing is similarity alone.
         videos = [p for p in (request.get("videoFiles") or []) if os.path.isfile(p)]
         dubs = [p for p in (request.get("audioFiles") or []) if os.path.isfile(p)]
         if not videos and request.get("videoFolder"):
             videos = list_media(request["videoFolder"], "video")
         if not dubs and request.get("audioFolder"):
             dubs = list_media(request["audioFolder"])
-        report = match_lists(videos, dubs)
+        report = (
+            match_movies(videos, dubs)
+            if request.get("dubKind") == "movies"
+            else match_lists(videos, dubs)
+        )
         emit({"type": "pairs", **report.to_dict()})
         return
 

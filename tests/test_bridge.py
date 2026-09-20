@@ -339,6 +339,52 @@ def test_dubsync_batch_plans_every_pair_and_reports_by_job():
         shutil.rmtree(os.path.dirname(jobs[0]["videoPath"]), ignore_errors=True)
 
 
+def test_preview_pairs_dub_scope_chooses_the_matcher():
+    """The dub tab's Movies scope pairs by filename; Series by episode."""
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="audiosync-bridge-pairs-")
+    try:
+        movies = ["Dune.mkv", "Interstellar.mkv"]
+        dubs = ["Interstellar Hindi.ac3", "Dune Hindi.ac3"]
+        movie_paths = [os.path.join(root, n) for n in movies]
+        dub_paths = [os.path.join(root, n) for n in dubs]
+        for path in [*movie_paths, *dub_paths]:
+            open(path, "w").close()
+
+        events, process = run_bridge([{
+            "command": "previewPairs",
+            "mode": "dubsync",
+            "dubKind": "movies",
+            "videoFiles": movie_paths,
+            "audioFiles": dub_paths,
+        }])
+        pairs = [e for e in events if e["type"] == "pairs"][0]
+        assert len(pairs["pairs"]) == 2, f"movies not paired: {pairs}"
+        assert pairs["method"] == "filename similarity", pairs["method"]
+
+        episodes = ["Show.S01E01.mkv", "Show.S01E02.mkv"]
+        ep_dubs = ["Show.S01E02 Hindi.ac3", "Show.S01E01 Hindi.ac3"]
+        ep_paths = [os.path.join(root, n) for n in episodes]
+        ep_dub_paths = [os.path.join(root, n) for n in ep_dubs]
+        for path in [*ep_paths, *ep_dub_paths]:
+            open(path, "w").close()
+
+        events, process = run_bridge([{
+            "command": "previewPairs",
+            "mode": "dubsync",
+            "dubKind": "series",
+            "videoFiles": ep_paths,
+            "audioFiles": ep_dub_paths,
+        }])
+        pairs = [e for e in events if e["type"] == "pairs"][0]
+        assert len(pairs["pairs"]) == 2, f"episodes not paired: {pairs}"
+        assert pairs["method"].startswith("episode"), pairs["method"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -6,6 +6,7 @@ import { cx } from "@/lib/cx";
 import {
   DUB_CODECS,
   type AppSettings,
+  type DubScope,
   type FileItem,
   type MediaProbe,
   type SyncMode,
@@ -29,6 +30,10 @@ interface SidebarProps {
   probes: Record<string, MediaProbe>;
   dragTarget: "video" | "audio" | null;
   busy: boolean;
+
+  /** What the dub sync tab pairs: movies by filename, series by episode. */
+  dubScope: DubScope;
+  onDubScopeChange: (scope: DubScope) => void;
 
   /** Audio streams per file path, and the chosen stream for each. Per file
    *  rather than per side: a selection can mix sources whose track layouts
@@ -83,6 +88,8 @@ export const Sidebar = memo(function Sidebar({
   runBlockedReason,
   onRun,
   onStop,
+  dubScope,
+  onDubScopeChange,
 }: SidebarProps) {
   const dubsync = mode === "dubsync";
   return (
@@ -91,16 +98,35 @@ export const Sidebar = memo(function Sidebar({
         className="min-h-0 flex-1 overflow-y-auto px-4 py-[18px]"
         onDragOver={(event) => event.preventDefault()}
       >
+        {dubsync && (
+          <>
+            <DubScopeSwitch
+              scope={dubScope}
+              disabled={busy}
+              onChange={onDubScopeChange}
+            />
+            <div className="mt-4" />
+          </>
+        )}
+
         <div onDragEnter={() => onDragEnter("video")}>
           <FilePanel
             kind="video"
             // A bare original-language track works as well as the video here:
             // only its audio is compared, and only its audio fills the gaps.
             needs={dubsync ? "audio" : "video"}
-            title={dubsync ? "Episodes or movies" : "Video"}
+            title={
+              dubsync
+                ? dubScope === "movies"
+                  ? "Movies"
+                  : "Episodes"
+                : "Video"
+            }
             hint={
               dubsync
-                ? "Drop the episode folder, or click to browse"
+                ? dubScope === "movies"
+                  ? "Select the movies (multi-select works), or drop them"
+                  : "Drop the episode folder, or click to browse"
                 : "Drop files, or click to browse"
             }
             files={videoFiles}
@@ -127,7 +153,9 @@ export const Sidebar = memo(function Sidebar({
               mode === "compare"
                 ? "Dubs to test"
                 : dubsync
-                  ? "Episode dubs"
+                  ? dubScope === "movies"
+                    ? "Movie dubs"
+                    : "Episode dubs"
                   : "Dub"
             }
             hint={
@@ -135,7 +163,9 @@ export const Sidebar = memo(function Sidebar({
                 ? "Drop the audio track"
                 : mode === "compare"
                   ? "Drop the tracks to test"
-                  : "Drop the folder of dubs"
+                  : dubsync && dubScope === "movies"
+                    ? "Select the movie dubs (multi-select works), or drop them"
+                    : "Drop the folder of dubs"
             }
             files={audioFiles}
             folder={audioFolder}
@@ -200,6 +230,52 @@ export const Sidebar = memo(function Sidebar({
 
 const SELECT_ARROW =
   "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23969696' stroke-width='2.5'><path d='m6 9 6 6 6-6'/></svg>\")";
+
+/** What the dub tab is pairing, chosen before the files: movies are paired
+ *  by filename, episodes by season/episode number. The labels of both slots
+ *  follow the choice, since a season and a folder of movies ask different
+ *  questions. */
+function DubScopeSwitch({
+  scope,
+  disabled,
+  onChange,
+}: {
+  scope: "movies" | "series";
+  disabled: boolean;
+  onChange: (scope: "movies" | "series") => void;
+}) {
+  const options: { id: "movies" | "series"; label: string }[] = [
+    { id: "movies", label: "Movies" },
+    { id: "series", label: "Series" },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="What to sync"
+      className="grid grid-cols-2 gap-1 rounded-[9px] bg-elevated p-1"
+    >
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          role="radio"
+          aria-checked={scope === option.id}
+          disabled={disabled}
+          onClick={() => onChange(option.id)}
+          className={cx(
+            "rounded-[7px] px-3 py-1.5 text-[12px] font-medium transition-colors",
+            scope === option.id
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+            "disabled:opacity-50",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** What the synced track is written as, and whether it also goes into a
  *  copy of the video. The track always lands beside the video; the video
