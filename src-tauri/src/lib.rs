@@ -346,7 +346,10 @@ async fn pick_media_files<R: tauri::Runtime>(
         .collect();
     items.sort_by(|a, b| a.name.cmp(&b.name));
     items.dedup_by(|a, b| a.path == b.path);
-    Ok(PickResponse { folder: None, files: items })
+    Ok(PickResponse {
+        folder: None,
+        files: items,
+    })
 }
 
 async fn pick_single<R: tauri::Runtime>(

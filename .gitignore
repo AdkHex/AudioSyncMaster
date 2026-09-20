@@ -44,3 +44,7 @@ src-tauri/gen/
 # Updater signing keys - never commit these
 *.key
 *.key.pub
+
+# Agent instruction files: kept locally, not published
+CLAUDE.md
+AGENTS.md

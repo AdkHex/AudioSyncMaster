@@ -11,36 +11,45 @@ permissions:
   contents: write
 
 jobs:
-  # A push whose version already has a tag builds green and publishes nothing,
-  # because tauri-action will not overwrite an existing release. The commit then
-  # looks shipped -- green check, successful run -- while every installed app
-  # stays on the old build. Catch that here, in seconds, rather than after three
-  # platforms have each spent eight minutes building something discardable.
+  # A push whose version already has a tag would build green and publish
+  # nothing, because tauri-action will not overwrite an existing release. The
+  # commit would then look shipped -- green check, successful run -- while
+  # every installed app stays on the old build. So a push is only published
+  # when its version is new; otherwise it is tested and the build jobs are
+  # skipped, visibly, with a notice saying why. Skipping is not a failure:
+  # most pushes are work in progress, and a release is made by bumping the
+  # version, deliberately. Failing every unbumped push, as this once did, only
+  # taught the eye to ignore red.
   version:
     name: Version is releasable
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       value: ${{ steps.read.outputs.value }}
+      release: ${{ steps.released.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read version
         id: read
         run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: Check the version is not already released
+      - name: Check whether the version is already released
+        id: released
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="v${{ steps.read.outputs.value }}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::$tag is already released. Bump the version in package.json, \
-          src-tauri/tauri.conf.json, src-tauri/Cargo.toml and both lockfiles, or this \
-          commit will never reach installed apps."
-            exit 1
+            echo "::notice::$tag is already released, so this push is tested but not \
+          published and installed apps will not see it. To release it, bump the version \
+          in package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml and both \
+          lockfiles."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$tag has not been released yet; this push will be published."
+            echo "release=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "$tag has not been released yet."
 
       - name: Check every version source agrees
         run: |
@@ -62,16 +71,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -109,9 +118,9 @@ jobs:
 
   rust:
     name: Rust checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -148,7 +157,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: [version, test, rust]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -158,17 +167,17 @@ jobs:
             triple: x86_64-pc-windows-msvc
           - os: macos-latest
             triple: aarch64-apple-darwin
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             triple: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 

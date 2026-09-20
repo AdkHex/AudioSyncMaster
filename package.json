@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:py": "python/.venv/bin/python tests/run_all.py",
-    "test:all": "npm run typecheck && npm run test && npm run test:py",
+    "check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    "test:all": "npm run typecheck && npm run test && npm run check:rust && npm run test:py",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

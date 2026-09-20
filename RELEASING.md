@@ -20,8 +20,9 @@ that works and what you have to do.
 
 That is the whole process. CI then:
 
-- refuses to build at all if `v<version>` is already released, or if the four
-  version sources disagree
+- skips the build jobs, with a notice, if `v<version>` is already released --
+  the push is still tested, but nothing is published and installed apps do
+  not see it; refuses outright if the version sources disagree
 - runs the full test suite on Linux, Windows and macOS, plus Rust checks
 - builds installers for all three platforms
 - signs the updater artifacts with the private key held in GitHub Secrets
@@ -31,17 +32,20 @@ That is the whole process. CI then:
 
 Nothing is published unless the tests pass first.
 
-### Forgetting the bump
+### Pushing without a bump
 
 Pushing without bumping used to be the quiet failure mode: the run went green,
 the commit looked shipped, and nothing reached users — `tauri-action` will not
 overwrite a tag that already exists, so it published nothing and said so only
-in the log. That is why the `Version is releasable` job exists. It runs first,
-takes seconds, and fails the whole workflow with a message naming the files to
-edit.
+in the log. That is why the `Version is releasable` job exists. It runs first
+and takes seconds. When the version is already released it marks the run with
+a notice naming the files to edit and the **Build** jobs are skipped -- visibly,
+in the run graph -- while the tests still run. That is the normal outcome for
+a work-in-progress push, not an error: a release is made by bumping the
+version on purpose.
 
-If you see that failure, bump and push again; there is nothing to clean up,
-because the stale run published nothing.
+To ship a commit you pushed without a bump, bump and push again; there is
+nothing to clean up, because the earlier run published nothing.
 
 ## What users see
 
