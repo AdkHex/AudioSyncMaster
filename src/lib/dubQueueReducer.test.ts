@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { dubQueueReducer, initialDubQueueState, type DubQueueState } from "./dubQueueReducer";
+import { describePlan, dubQueueReducer, initialDubQueueState, type DubQueueState } from "./dubQueueReducer";
 import type { DubJobOutcome, DubSyncPlan } from "./types";
 
 /** Two jobs queued: the shape the engine sees after a pairing. */
@@ -20,6 +20,8 @@ const plan: DubSyncPlan = {
   videoTrack: 0,
   dubTrack: 0,
   speed: 1,
+  videoFps: null,
+  dubRate: null,
   fillGainDb: 0,
   videoDurationS: 2700,
   dubDurationS: 2600,
@@ -126,5 +128,37 @@ describe("dubQueueReducer", () => {
   it("resets to an empty idle queue", () => {
     const state = dubQueueReducer(queued(), { type: "reset" });
     expect(state).toEqual(initialDubQueueState);
+  });
+});
+
+describe("describePlan", () => {
+  const base = {
+    ...plan,
+    videoFps: null as number | null,
+    dubRate: null as number | null,
+    speed: 1,
+  };
+
+  it("names a rate mismatch, read from the video's metadata", () => {
+    const text = describePlan({
+      ...base,
+      videoFps: 24000 / 1001,
+      dubRate: 25,
+      speed: 25 / (24000 / 1001),
+    });
+    expect(text).toContain("video 23.976 fps, dub mastered at 25 fps");
+    expect(text).toContain("played at 1.042708×");
+  });
+
+  it("confirms a matched rate instead of leaving it implied", () => {
+    const text = describePlan({ ...base, videoFps: 24000 / 1001, dubRate: 24000 / 1001 });
+    expect(text).toContain("video 23.976 fps, dub at the same rate");
+    expect(text).not.toContain("played at");
+  });
+
+  it("falls back to the bare speed when the video has no frame rate", () => {
+    const text = describePlan({ ...base, videoFps: null, dubRate: null, speed: 0.999001 });
+    expect(text).toContain("dub played at 0.999001×");
+    expect(text).not.toContain("mastered");
   });
 });

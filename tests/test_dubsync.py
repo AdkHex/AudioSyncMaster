@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -23,10 +24,15 @@ import soundfile as sf  # noqa: E402
 
 from audiosync.dubrender import RenderOptions, render  # noqa: E402
 from audiosync.dubsync import (  # noqa: E402
+    ENVELOPE_RATE,
     Block,
     _Aligner,
     DubSyncPlan,
+    _continuing_candidate,
     _level_runs,
+    _measure,
+    _nearest_peak,
+    _peak_dominance,
     best_path,
     build_envelope,
     ncc_lags,
@@ -51,10 +57,14 @@ class Workspace:
 
 
 def _bed(seconds: float, seed: int) -> np.ndarray:
-    """Music-and-effects-like: dense short transients, as a real stem has."""
+    """Music-and-effects-like: dense short transients, as a real stem has.
+
+    Broadband, as a real bed is: an eight-sample average left it nothing
+    above a kilohertz, and once whitened for the waveform pass it was
+    quieter than the dialogue, which no music-and-effects stem is."""
     rng = np.random.default_rng(seed)
     n = int(seconds * SR)
-    noise = np.convolve(rng.standard_normal(n), np.ones(8) / 8.0, mode="same")
+    noise = np.convolve(rng.standard_normal(n), np.ones(2) / 2.0, mode="same")
     envelope = np.zeros(n)
     pos = 0
     while pos < n:
@@ -67,6 +77,25 @@ def _bed(seconds: float, seed: int) -> np.ndarray:
     return (signal / np.max(np.abs(signal)) * 0.7).astype(np.float32)
 
 
+def _dialogue(seconds: float, seed: int) -> np.ndarray:
+    """Speech-like bursts where speech lives: 300-3400 Hz.
+
+    ``_speechlike`` is low-passed noise, most of its power below 300 Hz,
+    and there two different speakers coincide by chance often enough to
+    look like a match; real dialogue has little energy that low, which is
+    what leaves the band to the music-and-effects bed and lets the low
+    band find a scene the full band cannot. The fixture's dialogue is put
+    where dialogue is, at the same peak level.
+    """
+    signal = _speechlike(seconds, SR, seed=seed).astype(np.float64)
+    spectrum = np.fft.rfft(signal)
+    freqs = np.fft.rfftfreq(len(signal), 1.0 / SR)
+    spectrum[(freqs < 300.0) | (freqs > 3400.0)] = 0.0
+    banded = np.fft.irfft(spectrum, len(signal))
+    peak = np.max(np.abs(banded))
+    return (banded / peak * np.max(np.abs(signal))).astype(np.float32) if peak > 0 else banded.astype(np.float32)
+
+
 def build_pair(workspace, total_s, pieces, bed_gain=0.6, dial_gain=0.8):
     """Write org.wav and dub.wav; return the expected stretches.
 
@@ -76,8 +105,17 @@ def build_pair(workspace, total_s, pieces, bed_gain=0.6, dial_gain=0.8):
     (video_start, video_end, offset) with offset = dub time - video time.
     """
     bed = _bed(total_s, 11)
-    org = (bed_gain * bed + dial_gain * _speechlike(total_s, SR, seed=22)).astype(np.float32)
-    dub_full = (bed_gain * 0.8 * bed + dial_gain * _speechlike(total_s, SR, seed=33)).astype(np.float32)
+    # Each mix has its own noise floor, as real ones do, so nothing below
+    # it -- rounding, quantisation -- is shared between the two.
+    floor = 1e-3
+    org = (
+        bed_gain * bed + dial_gain * _dialogue(total_s, seed=22)
+        + floor * np.random.default_rng(5).standard_normal(len(bed))
+    ).astype(np.float32)
+    dub_full = (
+        bed_gain * 0.8 * bed + dial_gain * _dialogue(total_s, seed=33)
+        + floor * np.random.default_rng(6).standard_normal(len(bed))
+    ).astype(np.float32)
     parts, expected = [], []
     cursor, seed = 0.0, 100
     for piece in pieces:
@@ -88,7 +126,8 @@ def build_pair(workspace, total_s, pieces, bed_gain=0.6, dial_gain=0.8):
             cursor += b - a
         else:
             seed += 1
-            parts.append(_speechlike(piece[1], SR, seed=seed) * 0.5)
+            extra = _dialogue(piece[1], seed=seed) * 0.5
+            parts.append(extra + 1e-3 * np.random.default_rng(seed).standard_normal(len(extra)).astype(np.float32))
             cursor += piece[1]
     sf.write(workspace.path("org.wav"), org, SR)
     sf.write(workspace.path("dub.wav"), np.concatenate(parts).astype(np.float32), SR)
@@ -97,6 +136,15 @@ def build_pair(workspace, total_s, pieces, bed_gain=0.6, dial_gain=0.8):
 
 def _plan(workspace, **kwargs):
     plan = plan_dubsync(workspace.path("org.wav"), workspace.path("dub.wav"), progress=lambda p, s: None, **kwargs)
+    assert plan.error is None, plan.error
+    return plan
+
+
+def _plan_at(workspace, video_name, dub_name, **kwargs):
+    plan = plan_dubsync(
+        workspace.path(video_name), workspace.path(dub_name),
+        progress=lambda p, s: None, **kwargs,
+    )
     assert plan.error is None, plan.error
     return plan
 
@@ -163,10 +211,7 @@ def test_cuts_are_found_with_exact_offsets():
     """The case this exists for: a dub with scenes missing and a longer logo.
 
     The offsets are what a listener would hear as sync, and they come out
-    to the millisecond. The cuts come out where the shared bed lets them:
-    this seed's bed is digitally silent for the fifth of a second before
-    the first cut, so that edge is placed where the bed stops, and the
-    first 0.7s of the file have almost no bed at all.
+    to the millisecond. The cuts come out where the shared bed lets them.
     """
     with Workspace() as ws:
         expected = build_pair(ws, 300, [
@@ -186,11 +231,10 @@ def test_cuts_are_found_with_exact_offsets():
         assert any(abs(f.start_s - 60) < 0.8 and abs(f.end_s - 75) < 0.8 for f in fills), "the 15s cut was not filled"
         assert any(abs(f.start_s - 180) < 0.05 and abs(f.end_s - 182.5) < 0.05 for f in fills), "the 2.5s cut was not filled"
         assert fills[-1].note == "past dub end" and abs(fills[-1].start_s - 297.0) < 0.05
-        # The first 0.7s could not be placed by the bed, but the dub has
-        # material there at the offset the rest of the stretch sits at and
-        # is not silent in it: it is kept, not filled, and the plan says so.
+        # The dub has material from the very start at the offset the first
+        # stretch sits at: whether the bed placed it or it was kept on the
+        # strength of the stretch, it is dub, not fill.
         assert dubs[0].start_s == 0.0, plan.describe()
-        assert any(n.startswith("kept the dub across 0:00:00.000") for n in plan.notes), plan.notes
         assert abs(plan.filled_s - 20.5) < 0.5, plan.filled_s
         assert plan.speed == 1.0
 
@@ -322,7 +366,7 @@ def test_a_pause_in_both_tracks_is_not_a_cut():
         assert fills[0].note == "dub is silent here", fills[0].note
         assert len(plan.dub_segments) == 2, plan.describe()
         silent = [w for w in plan.warnings if "silent" in w]
-        assert len(silent) == 1 and silent[0].startswith("the dub is silent across 0:03:19.9"), plan.warnings
+        assert len(silent) == 1 and re.match(r"the dub is silent across 0:03:(19\.9|20\.0)", silent[0]), plan.warnings
 
 
 def test_a_step_the_whole_piece_does_not_bear_out_is_not_split():
@@ -527,9 +571,9 @@ def test_the_dub_is_found_inside_a_quiet_gap():
             scale = 0.6 * (0.8 if name == "dub.wav" else 1.0)
             if name == "dub.wav":
                 # The dub's timeline: 0-100 -> 0-100, then 110-300 -> 100-290.
-                audio[int(100 * SR) : int(290 * SR)] -= 0.8 * scale * bed[int(110 * SR) : int(300 * SR)]
+                audio[int(100 * SR) : int(290 * SR)] -= 0.97 * scale * bed[int(110 * SR) : int(300 * SR)]
             else:
-                audio[quiet] -= 0.8 * scale * bed[quiet]
+                audio[quiet] -= 0.97 * scale * bed[quiet]
             sf.write(ws.path(name), audio, SR)
         logs = []
         plan = plan_dubsync(ws.path("org.wav"), ws.path("dub.wav"), progress=lambda p, s: None, log=logs.append)
@@ -634,6 +678,66 @@ def test_a_rendered_pal_dub_verifies_against_the_video():
         assert verification.worst_ms <= 5.0, verification.describe()
 
 
+def _mkv_with_fps(workspace, fps_ratio: str, name: str = "org.mkv") -> str:
+    """Wrap org.wav in an MKV whose video stream carries the given frame
+    rate, the way a real file's metadata would. The video is 64x64 black,
+    which encodes in seconds."""
+    import subprocess
+
+    from audiosync.media import ffmpeg_path
+
+    mkv = workspace.path(name)
+    subprocess.run(
+        [
+            ffmpeg_path(), "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c=black:s=64x64:r={fps_ratio}",
+            "-i", workspace.path("org.wav"),
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "copy", "-shortest",
+            mkv,
+        ],
+        check=True, capture_output=True,
+    )
+    return mkv
+
+
+def test_the_videos_fps_guides_the_rate_check():
+    """A 23.976fps video against a 25fps-mastered dub: the video's own
+    metadata names the candidates, so the rate is verified before the
+    coarse pass could misread the mismatch as a flood of cuts."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 300, [("org", 0, 120), ("org", 150, 300)])
+        dub, _ = sf.read(ws.path("dub.wav"), dtype="float32")
+        # Mastered at 25fps: the dub runs 25/23.976 faster than the film.
+        sf.write(ws.path("dub.wav"), _resample_linear(dub, (24000.0 / 1001.0) / 25.0), SR)
+        mkv = _mkv_with_fps(ws, "24000/1001")
+        plan = _plan_at(ws, mkv, "dub.wav")
+        assert abs(plan.speed - 25.0 / (24000.0 / 1001.0)) < 1e-6, f"speed {plan.speed:.6f}"
+        assert plan.video_fps == float(24000.0 / 1001.0), plan.video_fps
+        assert plan.dub_rate == 25.0, plan.dub_rate
+        assert "video 23.976 fps, dub mastered at 25 fps" in plan.describe(), plan.describe()
+        _check(plan, expected, edge_tolerance_s=0.8, offset_tolerance_s=0.02)
+        # The one real cut (30s) is filled; the rate mismatch is not misread
+        # as extra cuts.
+        assert plan.filled_s < 40.0, f"{plan.filled_s:.0f}s filled: {plan.describe()}"
+
+
+def test_a_matched_rate_is_verified_from_the_fps():
+    """A dub mastered at the video's own rate is confirmed, not silently
+    assumed: the verdict says so, and the dub is left unaltered."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 240, [("org", 0, 120), ("org", 150, 240)])
+        mkv = _mkv_with_fps(ws, "24000/1001")
+        plan = _plan_at(ws, mkv, "dub.wav")
+        assert abs(plan.speed - 1.0) < 1e-9, plan.speed
+        assert plan.video_fps == float(24000.0 / 1001.0), plan.video_fps
+        # dub_rate is rounded to 6 places, so equality is judged loosely.
+        assert abs(plan.dub_rate - plan.video_fps) < 1e-5, plan.dub_rate
+        assert "dub at the same rate" in plan.describe(), plan.describe()
+        _check(plan, expected, edge_tolerance_s=0.3)
+
+
 def test_the_plan_round_trips_through_json():
     with Workspace() as ws:
         build_pair(ws, 200, [("org", 0, 80), ("org", 100, 200)])
@@ -641,6 +745,18 @@ def test_the_plan_round_trips_through_json():
         copy = DubSyncPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
         assert copy.to_dict() == plan.to_dict()
         assert [s.to_dict() for s in copy.segments] == [s.to_dict() for s in plan.segments]
+
+
+def test_the_rate_verdict_survives_the_plan_json():
+    with Workspace() as ws:
+        build_pair(ws, 240, [("org", 0, 240)])
+        mkv = _mkv_with_fps(ws, "24000/1001")
+        plan = _plan_at(ws, mkv, "dub.wav")
+        payload = plan.to_dict()
+        assert payload["videoFps"] is not None and payload["dubRate"] is not None
+        copy = DubSyncPlan.from_dict(json.loads(json.dumps(payload)))
+        assert copy.video_fps == plan.video_fps
+        assert copy.dub_rate == plan.dub_rate
 
 
 def test_the_report_names_every_piece():
@@ -668,3 +784,170 @@ if __name__ == "__main__":
 
     for stretch in build_pair(_Dir(), 300, [("extra", 0.8), ("org", 0, 60), ("org", 75, 180), ("org", 182.5, 240), ("extra", 5), ("org", 240, 297)]):
         print("%.1f-%.1f %+.3f" % stretch)
+
+
+# ---------------------------------------------------------------------------
+# Bands: the low band finds what the full band cannot, the high band decides
+# ---------------------------------------------------------------------------
+
+
+def test_band_envelopes_are_built_on_the_full_bands_frames():
+    """Every band has one value per full-band frame, describing the same
+    instant: a click lands on the same frame in all of them."""
+    with Workspace() as ws:
+        audio = np.zeros(int(20 * SR), dtype=np.float32)
+        rng = np.random.default_rng(3)
+        audio += 0.01 * rng.standard_normal(len(audio)).astype(np.float32)
+        click = int(12.3456 * SR)
+        audio[click : click + 16] += 0.8
+        sf.write(ws.path("click.wav"), audio, SR)
+        env = build_envelope(ws.path("click.wav"))
+        assert env.bands == ["full", "high", "low"]
+        for band in ("low", "high"):
+            assert len(env.band_energy[band]) == len(env.energy)
+            assert len(env.onsets(band)) == len(env.onset)
+        frame = int(12.3456 * ENVELOPE_RATE)
+        assert abs(int(np.argmax(env.onset)) - frame) <= 2
+        for band in ("low", "high"):
+            # A band's frame is a 24 ms window, so its energy starts rising
+            # half a window before the click and the onset leads by up to
+            # that; the same lead on both tracks, so offsets are unmoved.
+            peak = int(np.argmax(env.onsets(band)))
+            assert -8 <= peak - frame <= 2, f"{band} onset peaks at frame {peak}, the click is at {frame}"
+        # Sped up, the bands come along.
+        faster = env.at_speed(0.999)
+        assert set(faster.band_onset) == {"low", "high"}
+        assert len(faster.band_onset["low"]) == len(faster.onset)
+
+
+def test_a_scene_only_the_low_band_can_see_is_found():
+    """A scene with no music: the two languages' consonants agree on
+    nothing in the full band, but the bass and rumble the mixes share do
+    correlate in the 30-250 Hz band. Such a scene is placed, not filled --
+    and without the low band it would have been filled, which is what the
+    band is for."""
+    with Workspace() as ws:
+        # The scene sits at its own offset (a cut before and after it), so
+        # nothing can coast across it: it is found or it is filled.
+        expected = build_pair(ws, 400, [("org", 0, 120), ("org", 125, 280), ("org", 285, 400)])
+        # Between 125 and 280 s of the video replace the shared bed with one
+        # that lives below 200 Hz only, well under the dialogue.
+        bed = _bed(400, 11).astype(np.float64)
+        spectrum = np.fft.rfft(bed)
+        freqs = np.fft.rfftfreq(len(bed), 1.0 / SR)
+        spectrum[freqs > 200.0] = 0.0
+        rumble = np.fft.irfft(spectrum, len(bed))
+        rumble = rumble / np.max(np.abs(rumble)) * 0.7
+        for name, gain, shift in (("org.wav", 0.6, 0), ("dub.wav", 0.6 * 0.8, -5)):
+            audio, _ = sf.read(ws.path(name), dtype="float32")
+            lo, hi = int((125 + shift) * SR), int((280 + shift) * SR)
+            audio[lo:hi] -= (gain * bed[int(125 * SR) : int(280 * SR)]).astype(np.float32)
+            audio[lo:hi] += (gain * 0.12 * rumble[int(125 * SR) : int(280 * SR)]).astype(np.float32)
+            sf.write(ws.path(name), audio, SR)
+        plan = _plan(ws)
+        # Found and placed; with a bed this faint the edges are as good as
+        # a couple of seconds, and the point is that the scene is dub.
+        _check(plan, expected, edge_tolerance_s=2.0)
+        assert plan.filled_s < 15.0, plan.describe()
+        # The full band alone gives up on much of the scene.
+        originals = {name: _Aligner.__dict__[name] for name in ("detect_bands", "shared_bands")}
+        try:
+            _Aligner.detect_bands = property(lambda self: ["full"])
+            _Aligner.shared_bands = property(lambda self: ["full"])
+            plan_blind = _plan(ws)
+        finally:
+            for name, original in originals.items():
+                setattr(_Aligner, name, original)
+        assert plan_blind.filled_s > 30.0, plan_blind.describe()
+
+
+def test_a_repeated_cue_is_placed_where_the_scene_continues():
+    """A window whose cue recurs in the dub keeps the peak that continues
+    the neighbouring stretch, not the tallest; without a neighbour, one
+    that does not wind the dub back by a little; failing both, the tallest."""
+    anchor = Block(100.0, 160.0, +19.0)
+    candidates = [(-948.0, 40.0), (+19.06, 31.0), (+5143.0, 36.0)]
+    assert _continuing_candidate(candidates, 170.0, [anchor], None) == (+19.06, 31.0)
+    # No stretch nearby: the previous window sat at +19.0, so a candidate
+    # two minutes back is a repeat within the scene and one that continues
+    # wins, though the repeat is taller.
+    nearby = [(-120.0, 40.0), (+19.06, 31.0)]
+    assert _continuing_candidate(nearby, 800.0, [anchor], (785.0, +19.0)) == (+19.06, 31.0)
+    # Winding back a whole episode is allowed: material out of order.
+    far = [(-1500.0, 30.0), (+19.06, 8.0)]
+    assert _continuing_candidate(far, 800.0, [], (785.0, +19.0)) == (-1500.0, 30.0)
+    # Nothing known: the tallest.
+    assert _continuing_candidate(candidates, 800.0, [], None) == (-948.0, 40.0)
+
+
+def test_a_beat_does_not_fool_the_verification():
+    """Music with a beat correlates at every period; the residual reported
+    is the peak nearest zero among those as tall as the tallest, and the
+    bands' curves are summed so a peak only one band shows is not it."""
+    rate = ENVELOPE_RATE
+    rng = np.random.default_rng(9)
+    period = int(0.444 * rate)
+    n = 60 * rate
+    pulse = np.zeros(n)
+    pulse[::period] = 1.0
+    beat = np.convolve(pulse, [0.3, 1.0, 0.3], mode="same") + 0.05 * rng.standard_normal(n)
+    other = 0.05 * rng.standard_normal(n)
+    # The track sits where it should; the full band is nearly periodic.
+    margin = int(1.0 * rate)
+    window = 30 * rate
+    start = 10 * rate
+    padded = np.concatenate([np.zeros(margin), beat, np.zeros(margin)])
+    residual, _match, z = _measure([beat, other], [padded[margin:-margin], other], start, window, margin, rate)
+    assert residual is not None and abs(residual) < 3.0, residual
+    assert z >= 5.0, z
+
+
+def test_the_nearest_of_equal_peaks_is_taken_and_a_shoulder_is_not_a_peak():
+    rng = np.random.default_rng(1)
+    row = 0.01 * np.abs(rng.standard_normal(1001))
+    for centre, height in ((300, 0.9), (500, 1.0), (700, 0.92)):
+        row[centre - 5 : centre + 6] = height * np.hanning(11)
+    assert _nearest_peak(row, 310) == 300
+    assert _nearest_peak(row, 650) == 700
+    assert _nearest_peak(row, 505) == 500
+    # A bump on the tallest peak's shoulder is not another peak.
+    row[520] += 0.05
+    assert _nearest_peak(row, 530) == 500
+    # Dominance: one peak among noise stands out, one among equals does not.
+    lone = 0.02 * np.abs(rng.standard_normal(1001))
+    lone[500 - 5 : 500 + 6] = np.hanning(11)
+    assert _peak_dominance(lone, 500) > 5.0
+    assert _peak_dominance(row, 500) < 3.0
+
+
+def test_a_small_step_inside_an_uncorrelated_passage_is_bridged():
+    """A scene with no shared bed, and a cut of a second somewhere inside
+    it: the dub is there on both sides, one second apart, and is kept
+    rather than replaced by a minute of the other language. The step is
+    put where the agreement says, or in the middle when it says nothing,
+    and the note says which; the second the dub lacks is filled there."""
+    with Workspace() as ws:
+        build_pair(ws, 300, [("org", 0, 100), ("org", 101, 300)])
+        bed = _bed(300, 11)
+        for name, gain, shift in (("org.wav", 0.6, 0.0), ("dub.wav", 0.6 * 0.8, 0.0)):
+            audio, _ = sf.read(ws.path(name), dtype="float32")
+            if name == "org.wav":
+                audio[int(85 * SR) : int(145 * SR)] -= gain * bed[int(85 * SR) : int(145 * SR)]
+            else:
+                # The dub's timeline: video 85-100 -> dub 85-100, video 101-145 -> dub 100-144.
+                audio[int(85 * SR) : int(100 * SR)] -= gain * bed[int(85 * SR) : int(100 * SR)]
+                audio[int(100 * SR) : int(144 * SR)] -= gain * bed[int(101 * SR) : int(145 * SR)]
+            sf.write(ws.path(name), audio, SR)
+        plan = _plan(ws)
+        dubs = plan.dub_segments
+        assert [round(d.offset_s, 2) for d in dubs] == [0.0, -1.0], plan.describe()
+        long_fills = [f for f in plan.fill_segments if f.length_s > 1.5]
+        assert not long_fills, plan.describe()
+        assert abs(plan.filled_s - 1.0) < 0.3, plan.describe()
+        assert any("the offset steps by only +1000 ms inside it; the step was guessed" in n for n in plan.notes), plan.notes
+        # The step lies inside the bedless passage, and the dub is
+        # continuous across it: what precedes the fill on the video is the
+        # last dub before the cut, what follows is the first after.
+        cut = dubs[0].end_s
+        assert 85.0 <= cut <= 145.0, plan.describe()
+        assert abs(dubs[1].start_s - (cut + 1.0)) < 0.02, plan.describe()

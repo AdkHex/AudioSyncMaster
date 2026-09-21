@@ -104,10 +104,26 @@ the dub does not have, taken from the video's own audio and re-levelled to
 sit among the dub. The check at the end decodes the finished track and
 measures it against the video at a dozen spots and in a sweep of short
 windows, so a mistake shows up as a number rather than on first viewing.
+The check sums the three bands' correlations and, among peaks as tall as
+the tallest, reports the one nearest zero: a beat gives the full band a
+peak every period, and a track that sits where it should gives one at
+zero in every band.
 
-How it works: both tracks are reduced to onset envelopes, since the music
+How it works: the frame rate is settled first, before any offset or cut is
+trusted. When the video carries a frame rate, the dub's mastering rate is
+checked against it directly -- a 25fps-mastered dub on a 23.976fps video is
+played at 25/23.976 throughout, and the plan says so ("video 23.976 fps,
+dub mastered at 25 fps"); a dub at the video's own rate is confirmed, not
+assumed. Without metadata, the rate is still verified from the audio's
+symptoms. Then both tracks are reduced to onset envelopes, since the music
 and effects under a dub are the same stems as under the original even
-though the dialogue is not. The video is cut into 30-second windows, each
+though the dialogue is not -- three envelopes each: the whole spectrum,
+the 30-250 Hz band (bass, footsteps, rumble) and the 4-8 kHz band
+(ambience, foley). The dialogue sits between those two bands, so in a
+scene with no music, where the full band hears only two languages'
+consonants and agrees on nothing, the low band still hears the bed the
+mixes share; on a real pair it found 21 of the 23 minutes the full band
+had given up on. The video is cut into 30-second windows, each
 correlated against the dub across every plausible offset, and the offsets
 are chosen as one path through all the windows at once, which stays put for
 free and pays to jump -- so a window that locks onto a repeated musical
@@ -126,9 +142,15 @@ the video is still without dub after that, every window of the video is
 searched across the whole dub at 2 ms: a dub cut as TV episodes -- with
 recaps, openings and endings between the film's scenes, and the episodes
 in any order -- puts scenes at offsets the coarse pass cannot reach, and
-its sharp onsets do not survive the coarse pooling. The songs and recaps
-are simply never used; nothing is trimmed from the video, and only the
-scenes the dub really lacks are filled. A dub at a different
+its sharp onsets do not survive the coarse pooling. A cue that recurs
+(a theme heard four times, an opening every episode) correlates at every
+occurrence, loudest where it is mixed loudest, so each window keeps its
+few tallest peaks and takes the one that continues what is already
+known: the one near the neighbouring stretches' offset, or the one that
+does not wind the dub back by a minute or two; a whole episode back is
+allowed, since that is what episodes out of order look like. The songs
+and recaps are simply never used; nothing is trimmed from the video, and
+only the scenes the dub really lacks are filled. A dub at a different
 speed is caught two ways: a large conversion (PAL) by trying the standard
 ones on the audio, and a small one (24 against 23.976 fps, a millisecond a
 second) by reading the drift off the coarse alignment itself; either way the
@@ -137,11 +159,25 @@ by scene, with some scenes a few frames out, is followed scene by scene:
 steps as small as a few milliseconds are followed when the readings are
 sharp enough to tell them apart, and a step is believed only when the
 piece it cuts out, taken whole, agrees better at its own offset than at
-its neighbour's. Two stretches less than a tenth of a second apart are the
-same scene, and nothing between them is ever filled: the gap is bridged
-with each side keeping its own offset, because a few seconds a frame out
-of lip-sync is a far smaller mistake than the other language over a scene
-the dub has. An edge the evidence cannot place closer than a quarter of a
+its neighbour's. The 4-8 kHz band has the last word on where a stretch
+sits: at a small picture trim -- a few frames -- the dub's dialogue and
+effects follow the picture but its music is often left running, so for
+a while the music sits a whole number of frames from the effects, and
+the dialogue, recorded to the picture, goes with the effects (the
+ambience steps exactly at the shot changes at the effects' offset). Where
+the two disagree the effects decide, and a music-only level that is not a
+whole number of frames from the effects' level -- a cue laid twice, a
+beat's alias -- is folded into it rather than followed. Two stretches
+less than a tenth of a second apart are the same scene, and nothing
+between them is ever filled: the gap is bridged with each side keeping
+its own offset, because a few seconds a frame out of lip-sync is a far
+smaller mistake than the other language over a scene the dub has. A gap
+the dub is audible across whose sides sit up to two seconds apart -- or
+any such gap where a wrongly placed step could misplace no more than five
+seconds of dub -- is bridged too, the step put where the agreement changes
+from one offset to the other, or in the middle when the agreement says
+nothing, and the note says which; the frames the dub lacks are filled at
+the step. An edge the evidence cannot place closer than a quarter of a
 second is pulled inward by its uncertainty, so the dub only ever plays
 where the dub belongs and the original takes the doubt. A track that is
 already in sync comes back as one stretch at 0 ms with nothing filled --

@@ -8,6 +8,7 @@
  *  pair per run. */
 
 import {
+  formatFps,
   isUnmatchedFill,
   type DubJobOutcome,
   type DubSyncPlan,
@@ -183,6 +184,20 @@ export function describePlan(plan: DubSyncPlan): string {
     `${fills} fill${fills === 1 ? "" : "s"} from the original` +
       (replaced ? ` (${replaced} replacing dub that did not correlate)` : ""),
   ];
-  if (Math.abs(plan.speed - 1) > 1e-9) parts.push(`dub played at ${plan.speed.toFixed(6)}×`);
+  // The frame-rate verdict, read off the video's own metadata rather than
+  // left to the symptoms: matched, or mastered at another rate. dubRate is
+  // rounded to 6 places, so equality is judged loosely.
+  if (plan.videoFps !== null && plan.videoFps !== undefined) {
+    if (plan.dubRate !== null && Math.abs(plan.dubRate - plan.videoFps) > 1e-6) {
+      parts.push(
+        `video ${formatFps(plan.videoFps)} fps, dub mastered at ${formatFps(plan.dubRate)} fps` +
+          (Math.abs(plan.speed - 1) > 1e-9 ? ` (played at ${plan.speed.toFixed(6)}×)` : ""),
+      );
+    } else {
+      parts.push(`video ${formatFps(plan.videoFps)} fps, dub at the same rate`);
+    }
+  } else if (Math.abs(plan.speed - 1) > 1e-9) {
+    parts.push(`dub played at ${plan.speed.toFixed(6)}×`);
+  }
   return parts.join(", ");
 }

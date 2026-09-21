@@ -276,6 +276,12 @@ export interface DubSyncPlan {
   dubTrack: number;
   /** Playback-speed factor the dub was decoded at; 1 when it matched as is. */
   speed: number;
+  /** The video container's exact standard frame rate, when one was read
+   *  from the file (e.g. 23.976023978 for 24000/1001). Null for bare audio. */
+  videoFps: number | null;
+  /** The rate the dub was mastered at, implied by speed against videoFps.
+   *  Equals videoFps when the rates match. */
+  dubRate: number | null;
   /** Gain applied to the original where it fills a gap. */
   fillGainDb: number;
   videoDurationS: number;

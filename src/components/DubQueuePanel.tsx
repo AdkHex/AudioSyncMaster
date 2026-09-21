@@ -320,6 +320,7 @@ function describeStage(stage: string | null): string {
     probing: "Reading the files",
     "reading the original": "Reading the original",
     "reading the dub": "Reading the dub",
+    "checking the frame rate": "Checking the frame rate",
     "finding the offsets": "Finding where the dub belongs",
     "placing the cuts": "Placing the cuts",
     "measuring the offsets": "Measuring each stretch",

@@ -197,7 +197,7 @@ def _format_clock(seconds: float) -> str:
     return f"{minutes}:{secs:02d}"
 
 
-def _exact_rate(fps: float) -> Optional[Fraction]:
+def exact_rate(fps: float) -> Optional[Fraction]:
     """The standard rate a measured frame rate is, or None if it is not one.
 
     A codec's own frame rate lands here too -- 31.25 for AC-3, 46.875 for
@@ -293,8 +293,8 @@ def diagnose(
     if primary_fps and secondary_fps and primary_fps > 0 and secondary_fps > 0:
         # Snapped to exact rationals first, so the ratio between two standard
         # rates is the conversion itself rather than a rounding of it.
-        exact_primary = _exact_rate(primary_fps)
-        exact_secondary = _exact_rate(secondary_fps)
+        exact_primary = exact_rate(primary_fps)
+        exact_secondary = exact_rate(secondary_fps)
         if exact_primary is not None and exact_secondary is not None:
             implied = float(exact_primary / exact_secondary)
             primary_fps, secondary_fps = float(exact_primary), float(exact_secondary)
@@ -335,7 +335,7 @@ def diagnose(
     # exact. Refusing to name one is the right answer there -- a drift that no
     # conversion onto *this* video explains is a fact worth reporting, not a
     # gap to fill with the nearest rate from another video.
-    required_video_rate = _exact_rate(primary_fps) if primary_fps else None
+    required_video_rate = exact_rate(primary_fps) if primary_fps else None
 
     best: Optional[tuple] = None
     for audio_rate in COMMON_RATES:

@@ -47,17 +47,80 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence, Tuple
+from fractions import Fraction
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .correlate import ENVELOPE_HOP, _fast_fft_size
-from .framerate import COMMON_RATES, RATIO_TOLERANCE, speed_candidates
+from .framerate import COMMON_RATES, RATIO_TOLERANCE, _format_fps, exact_rate, speed_candidates
 from .segments import find_step
 from .media import CancellationToken, MediaError, load_audio, probe, stream_audio
 
 ANALYSIS_SR = 16000
 ENVELOPE_RATE = ANALYSIS_SR // ENVELOPE_HOP  # 500 Hz: one value per 2 ms
+
+# --- bands -------------------------------------------------------------------
+
+# Besides the full-band envelope, two band-limited ones, computed in the same
+# pass. A dub shares its music and effects bed with the original but not its
+# dialogue, and the dialogue sits in the middle of the spectrum: in a scene
+# with no music the full-band onsets are two languages' consonants and agree
+# on nothing, while the 30-250 Hz band (bass, footsteps, room rumble) and
+# the 4-8 kHz band (ambience, foley, sibilance of the bed) still correlate.
+# On a real pair the low band found 21 of 23 minutes the full band had
+# given up on (z 9-20 where the full band sat at 3-5).
+#
+# The high band is more than a fallback. At a small picture trim (a few
+# frames) the dub's dialogue and effects follow the picture but its music
+# is often left running, so for a while the music sits a whole number of
+# frames from the effects. The dialogue, recorded to the picture, goes with
+# the effects: the ambience steps exactly at the shot changes at the
+# effects' offset and not at the music's. So wherever the high band is
+# confident it decides, and a music-only level that is not a whole number
+# of frames from the effects level is an artefact (a cue laid twice, a
+# beat alias), never a cut.
+BANDS: Dict[str, Tuple[float, float]] = {"low": (30.0, 250.0), "high": (4000.0, 8000.0)}
+BAND_WINDOW = 384
+"""STFT window for the band envelopes, in samples at ANALYSIS_SR: 24 ms,
+41.7 Hz per bin, so the low band is six bins wide and a transient is
+still a 24 ms bump."""
+# The high band's reading overrides the others' when it stands this far
+# above its noise; below, the bands are pooled by whichever peaks highest.
+EFFECTS_Z = 10.0
+# How far the effects are looked for around a stretch's offset: a trim of
+# up to twelve frames, which is what a music-versus-effects split looks like.
+EFFECTS_RANGE_S = 0.5
+# ...and its peak must be this many times the size of the row's other
+# peaks (see _peak_dominance).
+EFFECTS_DOMINANCE = 3.0
+# The high band's noise units, scaled to the full band's when it competes
+# with the other bands as a reader (its chance peaks run about 1.3x).
+EFFECTS_DISCOUNT = 0.75
+# Slack when the high band is asked which of two levels it agrees with.
+EFFECTS_VOTE_SLACK_S = 0.012
+# A reading whose peak is not this far above its own row found nothing:
+# the tallest of a few hundred chance offsets reaches three, of a
+# thousand three and a half.
+READING_Z = 4.5
+# How far from a whole number of frames two effects levels may sit and
+# still both be picture trims. Readings resolve 2 ms; a doubled music cue
+# sits at any distance (104, 270, 20 ms were measured) and a beat alias
+# at its period.
+FRAME_TOLERANCE_MS = 12.0
+# How far apart, in offset and in time, a music-placed stretch and an
+# effects-placed neighbour may be for the effects to be asked about it.
+FOLLOW_EFFECTS_STEP_S = 0.5
+FOLLOW_EFFECTS_GAP_S = 3.0
+# An excursion (see _Aligner._effects_rule): at least this large, over
+# within this long.
+EXCURSION_MIN_MS = 250.0
+EXCURSION_MAX_S = 60.0
+# A stretch whose own peak does not stand this far above the offsets around
+# it, in any band, is a coincidence (see _Aligner.credibility).
+CREDIBLE_Z = 5.0
+CREDIBILITY_SPAN_S = 30.0
+CREDIBILITY_RANGE_S = 1.0
 
 # --- coarse pass: the whole file at once -----------------------------------
 
@@ -187,6 +250,9 @@ GAP_NULL_COST = 4.0
 # in the search this replaces.
 RECOVER_Z = 6.0
 RECOVER_ROUNDS = 2
+# The effects band searching a gap on its own (see _search_gap).
+EFFECTS_RECOVER_Z = 7.0
+EFFECTS_RECOVER_WINDOWS = 3
 
 # --- polishing, at the envelope's own resolution --------------------------
 
@@ -252,7 +318,7 @@ SHARPEN_MAX_SPAN_S = 60.0
 CONTINUOUS_DUB_S = 1.0
 # A stretch is measured every this many seconds along its length, so a step
 # in the offset is caught wherever it falls.
-POLISH_SPACING_S = 15.0
+POLISH_SPACING_S = 7.5
 # Inside one stretch the offset should hold still. A slope past this is a
 # speed difference, and is reported rather than silently averaged.
 DRIFT_WARN_MS_PER_S = 0.5
@@ -301,6 +367,15 @@ NEAR_OFFSET_S = 0.1
 # side, and a seven-second stretch cannot vouch for four minutes -- on a
 # dub made of episodes it vouched for another episode's ending.
 EDGE_KEEP_MAX_S = 30.0
+# A gap the dub is audible across, whose two sides sit up to this far
+# apart, is bridged with the step placed inside it; so is any such gap
+# where a wrongly placed step would misplace no more than
+# BRIDGE_EXPOSURE_S of dub. Beyond both, the original fills it.
+BRIDGE_STEP_S = 2.0
+BRIDGE_EXPOSURE_S = 5.0
+# How far the best step placement must stand above the median one, in
+# seconds of the mean agreement, to count as measured rather than guessed.
+STEP_EVIDENCE = 1.0
 # How far the original is allowed to be re-levelled to sit among the dub.
 MAX_FILL_GAIN_DB = 12.0
 # The level difference is read in pieces this long across every stretch.
@@ -361,6 +436,19 @@ WIDE_Z = 7.0
 # goes into a gap that would otherwise be filled with the original.
 WIDE_SAME_OFFSET_S = 0.05
 WIDE_MIN_WINDOWS = 3
+# Peaks a wide window keeps for the choice described in _wide_blocks, and
+# how far apart they must be to count as different occurrences.
+WIDE_PEAKS = 4
+WIDE_PEAK_APART_S = 3.0
+# A candidate this close to a neighbouring coarse stretch's offset is the
+# same scene continuing (a cut inside a scene is seconds, not minutes).
+WIDE_LOCAL_S = 60.0
+# How far a coarse stretch's offset reaches as the neighbourhood's.
+WIDE_ANCHOR_REACH_S = 120.0
+# A rewind smaller than this against the previous window is a repeat of a
+# cue within the scene; a larger one is material out of order.
+WIDE_REWIND_SLACK_S = 2.0
+WIDE_EPISODE_S = 300.0
 # A trial speed is believed when its peak stands this far above the noise
 # and this many times above what the files managed at their own speed.
 # Several speeds are tried, and each is a chance for a coincidence, so the
@@ -435,14 +523,34 @@ class TrackEnvelope:
     """Playback-speed factor applied when decoding: the timeline these curves
     are on is the file's own time multiplied by this."""
     rate: int = ENVELOPE_RATE
+    band_energy: Dict[str, np.ndarray] = field(default_factory=dict)
+    """Frame energy of each band in BANDS, same frames as ``energy``."""
+    band_onset: Dict[str, np.ndarray] = field(default_factory=dict)
+    """Onsets of each band, derived like ``onset``."""
 
     @property
     def duration_s(self) -> float:
         return len(self.energy) / self.rate
 
+    def onsets(self, band: str) -> np.ndarray:
+        """The onset curve of one band; ``full`` is the whole spectrum."""
+        return self.onset if band == "full" else self.band_onset[band]
+
+    @property
+    def bands(self) -> List[str]:
+        """``full`` first, then every band this track carries."""
+        return ["full"] + sorted(self.band_onset)
+
     @classmethod
-    def from_energy(cls, path: str, track: int, energy: np.ndarray, speed: float = 1.0):
-        return cls(path, track, energy.astype(np.float32), _onsets(energy), speed)
+    def from_energy(
+        cls, path: str, track: int, energy: np.ndarray, speed: float = 1.0,
+        band_energy: Optional[Dict[str, np.ndarray]] = None,
+    ):
+        bands = {k: v.astype(np.float32) for k, v in (band_energy or {}).items()}
+        return cls(
+            path, track, energy.astype(np.float32), _onsets(energy), speed,
+            band_energy=bands, band_onset={k: _band_onsets(v) for k, v in bands.items()},
+        )
 
     def at_speed(self, speed: float) -> "TrackEnvelope":
         """The same track as it would decode at another playback speed."""
@@ -452,7 +560,10 @@ class TrackEnvelope:
         n = int(len(self.energy) * factor)
         source = np.arange(n, dtype=np.float64) / factor
         energy = np.interp(source, np.arange(len(self.energy)), self.energy)
-        return TrackEnvelope.from_energy(self.path, self.track, energy, speed)
+        bands = {
+            k: np.interp(source, np.arange(len(v)), v) for k, v in self.band_energy.items()
+        }
+        return TrackEnvelope.from_energy(self.path, self.track, energy, speed, bands)
 
 
 def _onsets(energy: np.ndarray) -> np.ndarray:
@@ -461,6 +572,31 @@ def _onsets(energy: np.ndarray) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
     log_energy = np.log1p(energy.astype(np.float64) * 1000.0)
     return np.maximum(0.0, np.diff(log_energy)).astype(np.float32)
+
+
+# Where a band's typical frame lands on the onset curve's log knee: the
+# same place a full-band frame of 0.01 RMS lands, which is what the knee in
+# ``_onsets`` was set for.
+BAND_KNEE = 10.0
+
+
+def _band_onsets(energy: np.ndarray) -> np.ndarray:
+    """``_onsets`` of a band, with the band's own level put on the knee.
+
+    ``_onsets`` compresses with log1p(1000 * energy), a knee set for the
+    full-band RMS of a film. A band carries far less -- the 4-8 kHz band a
+    hundredth -- and below the knee the curve is not the log rise it is
+    above it but the raw difference, a few tall spikes where the band is
+    loudest and nothing between: correlated, that gives heavy-tailed noise
+    and chance peaks of eight or nine floors. Scaling the band so its
+    median frame sits at the knee makes its curve as dense as the full
+    band's, and the noise floors comparable.
+    """
+    if len(energy) == 0:
+        return np.zeros(0, dtype=np.float32)
+    typical = float(np.median(energy))
+    scale = BAND_KNEE / (1000.0 * max(typical, 1e-9))
+    return _onsets(energy.astype(np.float64) * scale)
 
 
 def build_envelope(
@@ -485,6 +621,7 @@ def build_envelope(
     energies: List[np.ndarray] = []
     carry = np.zeros(0, dtype=np.float32)
     seen = 0
+    bands = _BandFrames()
     for block in stream_audio(path, rate, track=track, token=token, block_s=30.0):
         if carry.size:
             block = np.concatenate([carry, block])
@@ -492,13 +629,64 @@ def build_envelope(
         if frames:
             shaped = block[: frames * hop].reshape(frames, hop).astype(np.float64)
             energies.append(np.sqrt(np.mean(shaped * shaped, axis=1) + 1e-12).astype(np.float32))
+        bands.push(block[: frames * hop])
         carry = block[frames * hop:]
         seen += len(block) - len(carry)
         if progress and expected_duration_s:
             progress(min(1.0, seen / rate / expected_duration_s))
     if not energies:
         raise MediaError(f"No audio decoded from {os.path.basename(path)}")
-    return TrackEnvelope.from_energy(path, track, np.concatenate(energies), speed)
+    energy = np.concatenate(energies)
+    return TrackEnvelope.from_energy(path, track, energy, speed, bands.finish(len(energy)))
+
+
+class _BandFrames:
+    """The band-limited frame energies of a stream, built block by block.
+
+    A Hann window of BAND_WINDOW samples is centred on every ENVELOPE_HOP
+    frame of the full-band envelope, so frame ``i`` of a band and frame
+    ``i`` of the full band describe the same instant; the samples the
+    window needs beyond the block are kept back until the next block
+    arrives. Energy is the RMS of the band's part of the windowed frame,
+    on the same scale as the full-band RMS.
+    """
+
+    def __init__(self) -> None:
+        self.window = np.hanning(BAND_WINDOW).astype(np.float32)
+        freqs = np.fft.rfftfreq(BAND_WINDOW, 1.0 / ANALYSIS_SR)
+        self.masks = {name: (freqs >= lo) & (freqs < hi) for name, (lo, hi) in BANDS.items()}
+        # Parseval for a one-sided spectrum of a Hann-windowed frame.
+        self.scale = 2.0 / (BAND_WINDOW * float(np.sum(self.window ** 2)))
+        self.lead = BAND_WINDOW // 2 - ENVELOPE_HOP // 2
+        self.buffer = np.zeros(self.lead, dtype=np.float32)
+        self.done = 0
+        self.frames: Dict[str, List[np.ndarray]] = {name: [] for name in BANDS}
+
+    def push(self, samples: np.ndarray) -> None:
+        self.buffer = np.concatenate([self.buffer, samples.astype(np.float32)])
+        count = (len(self.buffer) - BAND_WINDOW) // ENVELOPE_HOP + 1
+        if count <= 0:
+            return
+        shaped = np.lib.stride_tricks.as_strided(
+            self.buffer, shape=(count, BAND_WINDOW),
+            strides=(self.buffer.strides[0] * ENVELOPE_HOP, self.buffer.strides[0]),
+        )
+        power = np.abs(np.fft.rfft(shaped * self.window, axis=1)) ** 2
+        for name, mask in self.masks.items():
+            self.frames[name].append(np.sqrt(power[:, mask].sum(axis=1) * self.scale + 1e-12).astype(np.float32))
+        self.buffer = self.buffer[count * ENVELOPE_HOP:].copy()
+        self.done += count
+
+    def finish(self, frames: int) -> Dict[str, np.ndarray]:
+        """The band energies, padded or cut to ``frames`` frames."""
+        self.push(np.zeros(BAND_WINDOW, dtype=np.float32))
+        out = {}
+        for name, parts in self.frames.items():
+            curve = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+            if len(curve) < frames:
+                curve = np.concatenate([curve, np.full(frames - len(curve), curve[-1] if len(curve) else 0.0, dtype=np.float32)])
+            out[name] = curve[:frames]
+        return out
 
 
 def _pool(values: np.ndarray, factor: int) -> np.ndarray:
@@ -569,20 +757,107 @@ def _parabolic(values: np.ndarray, index: int) -> float:
     return index + shift
 
 
+def _nearest_peak(row: np.ndarray, centre: int, share: float = 0.85, apart: int = 50) -> int:
+    """The index of the peak nearest ``centre`` among the local maxima that
+    reach ``share`` of the tallest and sit at least ``apart`` samples from
+    it. A rhythmic passage has a peak every beat, all about as tall, and
+    the tallest is not the right one -- the one nearest where the stretch
+    already sits is. A bump on the tallest peak's own shoulder is not
+    another peak, hence ``apart`` (100 ms at 2 ms frames)."""
+    if len(row) < 3:
+        return int(np.argmax(row))
+    tallest = int(np.argmax(row))
+    top = float(row[tallest])
+    inner = row[1:-1]
+    maxima = np.flatnonzero((inner >= share * top) & (inner >= row[:-2]) & (inner >= row[2:])) + 1
+    maxima = maxima[np.abs(maxima - tallest) >= apart]
+    if maxima.size == 0:
+        return tallest
+    candidates = np.concatenate([[tallest], maxima])
+    return int(candidates[np.argmin(np.abs(candidates - centre))])
+
+
+def _tallest_peaks(row: np.ndarray, count: int, apart: int) -> List[int]:
+    """Indices of the ``count`` tallest values of ``row`` that are at least
+    ``apart`` samples from each other, tallest first."""
+    out: List[int] = []
+    taken = np.zeros(len(row), dtype=bool)
+    work = np.array(row, dtype=np.float64)
+    for _ in range(count):
+        work[taken] = -np.inf
+        peak = int(np.argmax(work))
+        if not np.isfinite(work[peak]):
+            break
+        out.append(peak)
+        taken[max(0, peak - apart) : peak + apart + 1] = True
+    return out
+
+
+def _continuing_candidate(
+    candidates: Sequence[Tuple[float, float]],
+    position_s: float,
+    anchors: Sequence[Block],
+    previous: Optional[Tuple[float, float]],
+) -> Tuple[float, float]:
+    """Which of a window's credible peaks to keep (see ``_wide_blocks``)."""
+    if len(candidates) == 1:
+        return candidates[0]
+    nearby = [
+        b for b in anchors
+        if b.start_s - WIDE_ANCHOR_REACH_S <= position_s <= b.end_s + WIDE_ANCHOR_REACH_S
+    ]
+    if nearby:
+        anchor = min(nearby, key=lambda b: max(0.0, b.start_s - position_s, position_s - b.end_s))
+        local = [c for c in candidates if abs(c[0] - anchor.offset_s) <= WIDE_LOCAL_S]
+        if local:
+            return max(local, key=lambda c: c[1])
+    if previous is not None:
+        prev_position, prev_offset = previous
+        # Where the dub was at the previous window's end; a candidate that
+        # winds back from there by less than an episode is a repeat.
+        floor = prev_position + prev_offset + (position_s - prev_position) - WIDE_REWIND_SLACK_S
+        forward = [c for c in candidates if position_s + c[0] >= floor or position_s + c[0] < floor - WIDE_EPISODE_S]
+        if forward:
+            return max(forward, key=lambda c: c[1])
+    return max(candidates, key=lambda c: c[1])
+
+
+def _peak_dominance(row: np.ndarray, peak: int, apart: int = 50) -> float:
+    """How many times taller the peak is than the tallest other value more
+    than ``apart`` samples from it. A match stands alone; a chance
+    coincidence in a sparse band has company of its own size."""
+    if len(row) < 3:
+        return 0.0
+    away = np.abs(np.arange(len(row)) - peak) > apart
+    if not away.any():
+        return float("inf")
+    other = float(np.max(row[away]))
+    return float(row[peak]) / max(other, 1e-9)
+
+
 def _noise_units(row: np.ndarray, possible: np.ndarray) -> np.ndarray:
     """Express one window's correlations as multiples of its noise floor.
 
-    The floor is the median magnitude over every offset that could be tried,
-    scaled to a standard deviation. The true peak and its shoulders are a
-    vanishing fraction of the offsets, so they do not move the median; music
-    with a repeating structure does, and that is the right direction, since
-    every repeat is a chance for a coincidence.
+    The floor is the root mean square over every offset that could be
+    tried, less the tallest one percent (and always the tallest one): the
+    peak being measured must not be part of its own floor, which on a
+    short row it would be. For a row of dense onsets that is the standard
+    deviation the median magnitude used to estimate; for a row of sparse
+    ones -- a band with a few transients in it, a quiet scene -- the
+    median sits near zero and made a chance coincidence of two or three
+    spikes look ten floors tall, while the RMS still counts the spikes.
+    Music with a repeating structure raises it, and that is the right
+    direction, since every repeat is a chance for a coincidence.
     """
     out = np.full(len(row), -1e6, dtype=np.float32)
     if not possible.any():
         return out
     values = row[possible]
-    sigma = float(np.median(np.abs(values))) / 0.6745
+    magnitudes = np.abs(values).astype(np.float64)
+    if len(magnitudes) > 2:
+        drop = max(1, len(magnitudes) // 100)
+        magnitudes = np.partition(magnitudes, len(magnitudes) - drop)[: len(magnitudes) - drop]
+    sigma = float(np.sqrt(np.mean(magnitudes ** 2)))
     if sigma < 1e-6:
         out[possible] = 0.0
     else:
@@ -807,6 +1082,8 @@ class Block:
     readings: int = 0
     spread_ms: float = float("inf")
     """Range of the readings' offsets."""
+    effects: bool = False
+    """Whether the offset was read from the high band (see BANDS)."""
     trace: List[Tuple[float, float]] = field(default_factory=list)
     """(window start, offset) for every coarse window with evidence for
     this stretch: the path's own record of where the offset sat, which is
@@ -862,7 +1139,6 @@ def blocks_from_path(grid: ScoreGrid, path: List[Optional[int]], starts: List[bo
         if not run:
             return
         columns = np.array([path[i] for i in run], dtype=np.float64)
-        support = float(np.mean([grid.scores[i, path[i]] for i in run]))
         hop_s = grid.start_s(1) - grid.start_s(0) if len(grid.starts) > 1 else grid.window_s
         # Staying at an offset is free, so past a cut the path coasts on
         # windows with no evidence at all until the next offset's evidence
@@ -879,6 +1155,12 @@ def blocks_from_path(grid: ScoreGrid, path: List[Optional[int]], starts: List[bo
         # as its end.
         weak = [i for i in run if grid.scores[i, path[i]] >= MIN_BLOCK_Z] or [run[0], run[-1]]
         strong = [i for i in run if grid.scores[i, path[i]] >= MATCH_Z] or weak
+        # The stretch's support is the mean over the windows that matched
+        # outright, and its window count theirs: the windows the path
+        # coasted over carry no evidence either way, and averaged in they
+        # hid a stretch two windows of eight and five noise units had
+        # found. The bar a run must clear already scales with its length.
+        support = float(np.mean([grid.scores[i, path[i]] for i in strong]))
         # The stretch itself is taken as the span of its strong windows:
         # what it is measured on. Its true edges lie further out, inside
         # the brackets, and are placed there afterwards.
@@ -887,7 +1169,7 @@ def blocks_from_path(grid: ScoreGrid, path: List[Optional[int]], starts: List[bo
             end_s=grid.start_s(strong[-1]) + grid.window_s,
             offset_s=grid.offset_s(float(np.median(columns))),
             support=support,
-            windows=len(run),
+            windows=len(strong),
             start_lo=max(0.0, grid.start_s(weak[0]) - hop_s),
             start_hi=grid.start_s(strong[0]) + grid.window_s,
             end_lo=grid.start_s(strong[-1]),
@@ -978,6 +1260,12 @@ class DubSyncPlan:
     video_duration_s: float = 0.0
     dub_duration_s: float = 0.0
     """The dub's own length, before any speed change."""
+    video_fps: Optional[float] = None
+    """The video container's exact standard frame rate, when one was read
+    from the file (24000/1001 for 23.976). None for a bare audio file."""
+    dub_rate: Optional[float] = None
+    """The rate the dub was mastered at, as implied by ``speed`` against
+    ``video_fps``. Equal to ``video_fps`` when the rates match."""
     segments: List[Segment] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     """Things the reader should check: a fill, a drift, a stretch replaced."""
@@ -1009,6 +1297,8 @@ class DubSyncPlan:
             "fillGainDb": self.fill_gain_db,
             "videoDurationS": self.video_duration_s,
             "dubDurationS": self.dub_duration_s,
+            "videoFps": self.video_fps,
+            "dubRate": self.dub_rate,
             "segments": [s.to_dict() for s in self.segments],
             "warnings": list(self.warnings),
             "notes": list(self.notes),
@@ -1027,6 +1317,8 @@ class DubSyncPlan:
             fill_gain_db=float(data.get("fillGainDb", 0.0) or 0.0),
             video_duration_s=float(data.get("videoDurationS", 0.0) or 0.0),
             dub_duration_s=float(data.get("dubDurationS", 0.0) or 0.0),
+            video_fps=data.get("videoFps"),
+            dub_rate=data.get("dubRate"),
             segments=[Segment.from_dict(s) for s in data.get("segments", [])],
             warnings=list(data.get("warnings") or []),
             notes=list(data.get("notes") or []),
@@ -1042,7 +1334,18 @@ class DubSyncPlan:
             f"{len(fills)} fill{'s' if len(fills) != 1 else ''} from the original "
             f"({_clock(self.filled_s)} in all)"
         )
-        if abs(self.speed - 1.0) > 1e-9:
+        if self.video_fps is not None:
+            # The frame-rate verdict, read off the video's own metadata rather
+            # than left to the symptoms: matched, or mastered at another rate.
+            # dub_rate is rounded to 6 places, so equality is judged loosely.
+            if self.dub_rate is not None and abs(self.dub_rate - self.video_fps) > 1e-6:
+                head += (
+                    f", video {_format_fps(self.video_fps)} fps, dub mastered at "
+                    f"{_format_fps(self.dub_rate)} fps, played at {self.speed:.6f}x"
+                )
+            else:
+                head += f", video {_format_fps(self.video_fps)} fps, dub at the same rate"
+        elif abs(self.speed - 1.0) > 1e-9:
             head += f", dub played at {self.speed:.6f}x"
         if fills:
             head += f", fills at {self.fill_gain_db:+.1f} dB"
@@ -1270,19 +1573,40 @@ class _Aligner:
         secondary: TrackEnvelope,
         token: Optional[CancellationToken],
         log: Optional[LogFn],
+        frame_s: Optional[float] = None,
     ) -> None:
         self.primary = primary
         self.secondary = secondary
         self.token = token
         self.log = log or (lambda _message: None)
+        self.frame_s = frame_s
+        """One video frame, when the video's rate is known: the unit a
+        picture trim comes in, which tells a trim from a music artefact."""
         self._standardized: dict = {}
         self._pooled: dict = {}
 
-    def pooled(self, which: str, pool: int) -> np.ndarray:
-        key = (which, pool)
+    @property
+    def shared_bands(self) -> List[str]:
+        """The bands both envelopes carry, ``full`` first."""
+        return [b for b in self.primary.bands if b in self.secondary.bands]
+
+    @property
+    def detect_bands(self) -> List[str]:
+        """The bands a stretch may be *found* by: the full band and the low
+        band. The high band is bursts with silence between, whose chance
+        correlations are heavy-tailed (peaks of eight or nine floors where
+        nothing matches); it arbitrates the offset of a stretch already
+        found (see ``_read``), it does not vouch for one."""
+        return [b for b in self.shared_bands if b != "high"]
+
+    def onsets(self, which: str, band: str = "full") -> np.ndarray:
+        env = self.primary if which == "primary" else self.secondary
+        return env.onsets(band)
+
+    def pooled(self, which: str, pool: int, band: str = "full") -> np.ndarray:
+        key = (which, pool, band)
         if key not in self._pooled:
-            env = self.primary if which == "primary" else self.secondary
-            self._pooled[key] = _pool(env.onset, pool)
+            self._pooled[key] = _pool(self.onsets(which, band), pool)
         return self._pooled[key]
 
     # -- coarse -------------------------------------------------------------
@@ -1324,31 +1648,54 @@ class _Aligner:
 
     # -- polish -------------------------------------------------------------
 
-    def standardized_onsets(self, which: str) -> np.ndarray:
-        if which not in self._standardized:
-            env = self.primary if which == "primary" else self.secondary
-            self._standardized[which] = _local_standardize(
-                env.onset, int(LOCAL_STATS_S * ENVELOPE_RATE)
+    def standardized_onsets(self, which: str, band: str = "full") -> np.ndarray:
+        key = (which, band)
+        if key not in self._standardized:
+            self._standardized[key] = _local_standardize(
+                self.onsets(which, band), int(LOCAL_STATS_S * ENVELOPE_RATE)
             )
-        return self._standardized[which]
+        return self._standardized[key]
 
-    def agreement(self, offset_s: float, lo_s: float, hi_s: float) -> np.ndarray:
+    def agreement(
+        self, offset_s: float, lo_s: float, hi_s: float, bands: Optional[Sequence[str]] = None
+    ) -> np.ndarray:
         """How much the two envelopes agree at each 2 ms of this span, at one
-        offset: the product of the two standardised onset curves. Averages
-        to their correlation where they match and to zero where they do not."""
-        primary = self.standardized_onsets("primary")
-        secondary = self.standardized_onsets("secondary")
+        offset: the product of the two standardised onset curves, summed
+        over the bands (every shared band unless ``bands`` says which).
+        Each band's product averages to its correlation where the tracks
+        match and to zero where they do not, so a scene that only the low
+        band can see still shows its agreement, and a scene every band
+        sees shows more."""
         lo = max(0, int(round(lo_s * ENVELOPE_RATE)))
-        hi = min(len(primary), int(round(hi_s * ENVELOPE_RATE)))
+        hi = min(len(self.primary.onset), int(round(hi_s * ENVELOPE_RATE)))
         if hi <= lo:
             return np.zeros(0)
         shift = int(round(offset_s * ENVELOPE_RATE))
         out = np.zeros(hi - lo)
-        s_lo, s_hi = lo + shift, hi + shift
-        c_lo, c_hi = max(0, s_lo), min(len(secondary), s_hi)
-        if c_hi > c_lo:
-            out[c_lo - s_lo : c_hi - s_lo] = primary[c_lo - shift : c_hi - shift] * secondary[c_lo:c_hi]
+        for band in (bands if bands is not None else self.shared_bands):
+            primary = self.standardized_onsets("primary", band)
+            secondary = self.standardized_onsets("secondary", band)
+            s_lo, s_hi = lo + shift, hi + shift
+            c_lo, c_hi = max(0, s_lo), min(len(secondary), s_hi)
+            if c_hi > c_lo:
+                out[c_lo - s_lo : c_hi - s_lo] += primary[c_lo - shift : c_hi - shift] * secondary[c_lo:c_hi]
         return out
+
+    def edge_curve(self, offset_s: float, lo_s: float, hi_s: float) -> np.ndarray:
+        """The agreement an edge is placed on: the full band's where it has
+        any, every band's summed where it has none.
+
+        The full band's transients are two frames wide, so its agreement
+        turns at a cut within a frame or two; a band's are twenty frames
+        wide, and a band that matches far better than the others -- the
+        effects band on a bed the mixes share exactly -- dominates the
+        sum, so that its own passing dips read as the edge. Where the
+        full band is blind, a scene with no music in it, the sum is what
+        there is."""
+        full = self.agreement(offset_s, lo_s, hi_s, bands=["full"])
+        if full.size and float(full.mean()) >= AGREEMENT_FLOOR:
+            return full
+        return self.agreement(offset_s, lo_s, hi_s)
 
     def readings(self, block: Block, range_s: float = POLISH_RANGE_S) -> List[Tuple[float, float, float]]:
         """The offset measured at 2 ms at several places inside a stretch.
@@ -1375,25 +1722,61 @@ class _Aligner:
             starts = [block_lo + int(round(i * step)) for i in range(count)]
 
         shift = int(round(block.offset_s * rate))
-        primary = self.primary.onset
-        secondary = self.secondary.onset
-        found: List[Tuple[float, float, float]] = []
+        found: List[Tuple[float, float, float, str, float]] = []
         for start in starts:
+            reading = self._read(start, window, shift, margin)
+            if reading is not None:
+                found.append((start / rate, *reading))
+        return found
+
+    def _read(
+        self, start: int, window: int, shift: int, margin: int
+    ) -> Optional[Tuple[float, float, str, float]]:
+        """One window's offset, as (offset_s, match, band, noise units).
+
+        Every band is correlated and the one that peaks highest above its
+        own noise answers -- except that a confident high band (the
+        effects, see BANDS) answers regardless, looked for over the wider
+        EFFECTS_RANGE_S so a trim the music ran across is still seen.
+        Among the effects' peaks within 15% of the tallest, the one nearest
+        the stretch's own offset is taken: a beat makes peaks every period,
+        all about as tall, and only the nearest is the stretch's.
+        """
+        rate = ENVELOPE_RATE
+        best: Optional[Tuple[float, float, str, float]] = None
+        for band in self.shared_bands:
+            primary = self.onsets("primary", band)
+            secondary = self.onsets("secondary", band)
             template = primary[start : start + window]
+            effects = band == "high"
+            reach = max(margin, int(round(EFFECTS_RANGE_S * rate))) if effects else margin
             # A search range that runs off an end of the dub is cut to the
             # dub, not skipped: skipped, a stretch at the very start of the
             # file had no reading at all and was dropped as noise.
-            first = max(0, start + shift - margin)
-            last = min(len(secondary), start + window + shift + margin)
+            first = max(0, start + shift - reach)
+            last = min(len(secondary), start + window + shift + reach)
             if last - first < window or len(template) < window:
                 continue
             row = ncc_lags(template, secondary[first:last])
-            if row.size == 0:
+            if row.size < 3:
                 continue
-            peak = int(np.argmax(row))
+            units = _noise_units(row, np.ones(len(row), dtype=bool))
+            peak = _nearest_peak(row, start + shift - first) if effects else int(np.argmax(row))
+            z = float(units[peak])
             lag = (first + _parabolic(row, peak)) - start
-            found.append((start / rate, lag / rate, float(row[peak])))
-        return found
+            if effects:
+                # The effects decide outright when their peak is tall and
+                # alone: a band of bursts correlates by chance in several
+                # places at once, and none of those is a reading.
+                if z >= EFFECTS_Z and _peak_dominance(row, peak) >= EFFECTS_DOMINANCE:
+                    return (lag / rate, float(row[peak]), band, z)
+                # Otherwise it competes like any band, discounted: its
+                # chance peaks run a third taller than the full band's.
+                z *= EFFECTS_DISCOUNT
+            candidate = (lag / rate, float(row[peak]), band, z)
+            if best is None or z > best[3]:
+                best = candidate
+        return best
 
     def polish_offset(self, block: Block, wide: bool = False) -> Tuple[float, float, Optional[float]]:
         """Measure a stretch's offset at 2 ms, from several places inside it.
@@ -1410,14 +1793,25 @@ class _Aligner:
         block.consistency = 0.0
         if not found:
             return block.offset_s, 0.0, None
+        effects = [f for f in found if f[3] == "high" and f[4] >= EFFECTS_Z]
+        block.effects = bool(effects)
+        if effects:
+            # The effects are the picture's timing; where they were read
+            # they decide the offset, and the other readings only say
+            # whether the stretch is one level (consistency) or not.
+            found = effects + [f for f in found if f not in effects]
+            weights_scale = [1.0 if f in effects else 1e-3 for f in found]
+        else:
+            weights_scale = [1.0] * len(found)
         positions = np.array([f[0] for f in found])
         lags = np.array([f[1] for f in found])
-        weights = np.maximum(np.array([f[2] for f in found]), 1e-3)
+        weights = np.maximum(np.array([f[2] for f in found]), 1e-3) * np.array(weights_scale)
         order = np.argsort(lags)
         cumulative = np.cumsum(weights[order])
         median = lags[order][int(np.searchsorted(cumulative, cumulative[-1] / 2.0))]
-        block.consistency = float(np.mean(np.abs(lags - median) * 1000.0 <= CONSISTENT_MS))
-        block.spread_ms = float(np.ptp(lags) * 1000.0)
+        deciding = lags[: len(effects)] if effects else lags
+        block.consistency = float(np.mean(np.abs(deciding - median) * 1000.0 <= CONSISTENT_MS))
+        block.spread_ms = float(np.ptp(deciding) * 1000.0)
         drift = None
         if len(found) >= 3 and float(np.ptp(positions)) > 1.0:
             drift = float(np.polyfit(positions, lags * 1000.0, 1)[0])
@@ -1432,6 +1826,85 @@ class _Aligner:
             curve = self.agreement(offset_s + frame / ENVELOPE_RATE, lo_s, hi_s)
             if curve.size:
                 best = max(best, float(curve.mean()))
+        return best
+
+    def sharp_match(self, block: Block) -> float:
+        """The stretch's median match on the full band alone, from the
+        same sub-windows ``readings`` uses (see ``_fine_score``)."""
+        rate = ENVELOPE_RATE
+        window = int(POLISH_WINDOW_S * rate)
+        margin = int(round(POLISH_RANGE_S * rate))
+        block_lo = int(round(block.start_s * rate))
+        block_hi = int(round(block.end_s * rate))
+        length = block_hi - block_lo
+        if length < rate:
+            return 0.0
+        window = min(window, length)
+        count = max(1, min(length // window, max(3, int(block.length_s / POLISH_SPACING_S))))
+        starts = [block_lo + (length - window) // 2] if count == 1 else [
+            block_lo + int(round(i * (length - window) / (count - 1))) for i in range(count)
+        ]
+        shift = int(round(block.offset_s * rate))
+        primary, secondary = self.onsets("primary"), self.onsets("secondary")
+        matches = []
+        for start in starts:
+            template = primary[start : start + window]
+            first = max(0, start + shift - margin)
+            last = min(len(secondary), start + window + shift + margin)
+            if last - first < window or len(template) < window:
+                continue
+            row = ncc_lags(template, secondary[first:last])
+            if row.size:
+                matches.append(float(row.max()))
+        return float(np.median(matches)) if matches else 0.0
+
+    def credibility(self, block: Block) -> float:
+        """How far the stretch's own correlation peak stands above the
+        noise of the offsets around it, in the band that sees it best.
+
+        Taken over up to CREDIBILITY_SPAN_S of the stretch's middle and a
+        second of offsets either side. A short stretch can correlate well
+        by chance in a sparse band -- a few coincident spikes -- and its
+        match alone does not say so; the peak's height against the other
+        offsets does.
+        """
+        rate = ENVELOPE_RATE
+        length = min(block.length_s, CREDIBILITY_SPAN_S)
+        if length < 0.5:
+            return 0.0
+        middle = (block.start_s + block.end_s) / 2.0
+        # The span is kept inside both files: past either end of the dub
+        # there is nothing to correlate, and a stretch at the end of the
+        # film is measured on what it does cover.
+        primary_s = len(self.primary.onset) / rate
+        secondary_s = len(self.secondary.onset) / rate
+        lo_s = max(0.0, middle - length / 2.0, -block.offset_s)
+        hi_s = min(primary_s, middle + length / 2.0, secondary_s - block.offset_s)
+        if hi_s - lo_s < 0.5:
+            return 0.0
+        start = int(round(lo_s * rate))
+        window = int(round((hi_s - lo_s) * rate))
+        shift = int(round(block.offset_s * rate))
+        reach = int(round(CREDIBILITY_RANGE_S * rate))
+        best = 0.0
+        for band in self.detect_bands:
+            primary = self.onsets("primary", band)
+            secondary = self.onsets("secondary", band)
+            template = primary[start : start + window]
+            first = max(0, start + shift - reach)
+            last = min(len(secondary), start + window + shift + reach)
+            if len(template) < window or last - first < window + 10 or template.std() < 1e-9:
+                continue
+            row = ncc_lags(template, secondary[first:last])
+            if row.size < 10:
+                continue
+            centre = start + shift - first
+            peak = _nearest_peak(row, centre)
+            away = np.abs(np.arange(len(row)) - peak) > int(0.25 * rate)
+            if away.sum() < 10:
+                continue
+            noise = float(np.sqrt(np.mean(row[away] ** 2)))
+            best = max(best, float(row[peak]) / max(noise, 1e-9))
         return best
 
     def step_is_real(self, before: Block, after: Block) -> bool:
@@ -1460,9 +1933,11 @@ class _Aligner:
         if len(readings) < 4:
             return None
         # Only readings that found something: a sub-window on silence reads
-        # a random lag, and one of those is not a step.
-        floor = 0.5 * float(np.median([f[2] for f in readings]))
-        found = [f for f in readings if f[2] >= max(floor, 0.02)]
+        # a random lag, and one of those is not a step. Judged by how far
+        # the reading's peak stands above its row, not by the match: the
+        # bands' matches are not on one scale (a broad band peaks higher),
+        # and half the median of a mixed set threw out real readings.
+        found = [f for f in readings if f[4] >= READING_Z]
         if len(found) < 4:
             return None
         positions = [f[0] for f in found]
@@ -1474,8 +1949,10 @@ class _Aligner:
         # describe that, and asked for one step the fit refuses, so the
         # whole stretch would be played at one offset with a third of it a
         # tenth of a second late. Group the readings by level and split at
-        # every change of run instead.
+        # every change of run instead -- after the effects have had their
+        # say about which levels are real.
         runs = _level_runs(positions, offsets_ms)
+        runs, offsets_ms = self._effects_rule(found, runs, offsets_ms)
         if len(runs) >= 2:
             return self._split_at_runs(block, runs)
 
@@ -1504,6 +1981,168 @@ class _Aligner:
             f" at {_clock(head.end_s)}"
         )
         return [head, tail]
+
+    def _effects_rule(
+        self,
+        found: List[Tuple[float, float, float, str, float]],
+        runs: List[Tuple[float, float, float]],
+        offsets_ms: List[float],
+    ) -> Tuple[List[Tuple[float, float, float]], List[float]]:
+        """Fold the levels the effects contradict into the effects' level.
+
+        Where any run of readings is backed by the high band (see BANDS),
+        a run that is not is the music's level, and the music is not the
+        picture's timing: its readings are moved to the nearest
+        effects-backed level. Two effects-backed levels that are not a
+        whole number of frames apart cannot both be picture trims, so the
+        one with less behind it moves to the other. Runs that end up at one
+        level are joined. Returns the runs and the readings' offsets as
+        relabelled, so the single-step test that follows sees the same
+        picture.
+        """
+        if len(runs) < 2:
+            return runs, offsets_ms
+
+        def members(run: Tuple[float, float, float]) -> List[int]:
+            first_s, last_s, level = run
+            out = []
+            for index, f in enumerate(found):
+                if first_s - 1e-6 <= f[0] <= last_s + 1e-6:
+                    nearest = min(runs, key=lambda r: abs(r[2] - offsets_ms[index]))
+                    if nearest[2] == level:
+                        out.append(index)
+            return out
+
+        backing = []
+        for run in runs:
+            effects = [i for i in members(run) if found[i][3] == "high" and found[i][4] >= EFFECTS_Z]
+            backing.append((len(effects), sum(found[i][4] for i in effects)))
+
+        # An excursion: a run a good fraction of a second from the level
+        # either side of it, over in under a minute, with the level the
+        # same before and after. A dub does not gain a second and lose
+        # the same second again eighteen seconds later; a cue that repeats
+        # at that interval reads exactly so. Unless the effects put it
+        # there, it is folded into the level around it. (A step of a
+        # frame or two that comes back is a scene conformed a frame out,
+        # and is real; the size tells the two apart.)
+        levels = [run[2] for run in runs]
+        folded = False
+        for index in range(1, len(runs) - 1):
+            before_level, after_level = levels[index - 1], levels[index + 1]
+            size = abs(levels[index] - before_level)
+            if (
+                abs(before_level - after_level) <= MIN_LEVEL_GAP_MS
+                and size >= EXCURSION_MIN_MS
+                and runs[index + 1][0] - runs[index][0] <= EXCURSION_MAX_S
+                and not backing[index][0]
+            ):
+                self.log(
+                    f"  a {size:+.0f}ms excursion at {_clock(runs[index][0])} returns to "
+                    f"{before_level / 1000.0:+.3f}s within {runs[index + 1][0] - runs[index][0]:.0f}s: a repeat, not a cut"
+                )
+                levels[index] = before_level
+                folded = True
+        if folded:
+            relabelled = list(offsets_ms)
+            for index, run in enumerate(runs):
+                for i in members(run):
+                    relabelled[i] = levels[index]
+            joined: List[Tuple[float, float, float]] = []
+            for run, level in zip(runs, levels):
+                if joined and abs(joined[-1][2] - level) <= 1e-9:
+                    joined[-1] = (joined[-1][0], run[1], level)
+                else:
+                    joined.append((run[0], run[1], level))
+            runs, offsets_ms = (joined if len(joined) >= 2 else []), relabelled
+            if len(runs) < 2:
+                return runs, offsets_ms
+            backing = []
+            for run in runs:
+                effects = [i for i in members(run) if found[i][3] == "high" and found[i][4] >= EFFECTS_Z]
+                backing.append((len(effects), sum(found[i][4] for i in effects)))
+        if not any(count for count, _ in backing):
+            return runs, offsets_ms
+
+        levels = [run[2] for run in runs]
+        strong = [index for index, (count, _) in enumerate(backing) if count]
+        moved = False
+        for index, run in enumerate(runs):
+            if backing[index][0]:
+                continue
+            target = min(strong, key=lambda j: abs(levels[j] - levels[index]))
+            if abs(levels[target] - levels[index]) <= MIN_LEVEL_GAP_MS:
+                levels[index] = levels[target]
+                continue
+            # The run had no confident effects reading of its own. Asked
+            # on the run's windows, do the effects sit at the run's level
+            # (a real step every band agrees on) or at the effects run's
+            # level (the music ran across a trim the effects followed)?
+            positions = [found[i][0] for i in members(run)]
+            if not self._effects_prefer(positions, levels[target], levels[index]):
+                continue
+            self.log(
+                f"  the music sits at {levels[index] / 1000.0:+.3f}s around {_clock(run[0])}; the effects say "
+                f"{levels[target] / 1000.0:+.3f}s, and the dialogue goes with the effects"
+            )
+            levels[index] = levels[target]
+            moved = True
+        if self.frame_s:
+            frame_ms = 1000.0 * self.frame_s
+            for index in strong:
+                for other in strong:
+                    if other <= index or levels[index] == levels[other]:
+                        continue
+                    gap = abs(levels[index] - levels[other])
+                    if abs(gap / frame_ms - round(gap / frame_ms)) * frame_ms > FRAME_TOLERANCE_MS:
+                        weak, keep = (index, other) if backing[index] < backing[other] else (other, index)
+                        self.log(
+                            f"  the effects read {levels[weak] / 1000.0:+.3f}s around {_clock(runs[weak][0])}, "
+                            f"{gap / frame_ms:.2f} frames from {levels[keep] / 1000.0:+.3f}s: not a trim, folded"
+                        )
+                        levels[weak] = levels[keep]
+                        moved = True
+        if not moved and len(set(levels)) == len(levels):
+            return runs, offsets_ms
+        relabelled = list(offsets_ms)
+        for index, run in enumerate(runs):
+            for i in members(run):
+                relabelled[i] = levels[index]
+        joined: List[Tuple[float, float, float]] = []
+        for run, level in zip(runs, levels):
+            if joined and abs(joined[-1][2] - level) <= 1e-9:
+                joined[-1] = (joined[-1][0], run[1], level)
+            else:
+                joined.append((run[0], run[1], level))
+        return (joined if len(joined) >= 2 else []), relabelled
+
+    def _effects_prefer(self, positions: Sequence[float], level_ms: float, other_ms: float) -> bool:
+        """Whether the high band, read on windows at ``positions``, agrees
+        better at ``level_ms`` than at ``other_ms`` (a twentieth better,
+        so a band that sees nothing at either says nothing)."""
+        if "high" not in self.shared_bands or not positions:
+            return False
+        rate = ENVELOPE_RATE
+        window = int(POLISH_WINDOW_S * rate)
+        slack = int(round(EFFECTS_VOTE_SLACK_S * rate))
+        primary = self.onsets("primary", "high")
+        secondary = self.onsets("secondary", "high")
+
+        def agreement_at(offset_ms: float) -> float:
+            shift = int(round(offset_ms / 1000.0 * rate))
+            total = 0.0
+            for position in positions:
+                start = int(round(position * rate))
+                template = primary[start : start + window]
+                first, last = start + shift - slack, start + window + shift + slack
+                if len(template) < window or first < 0 or last > len(secondary) or template.std() < 1e-9:
+                    continue
+                row = ncc_lags(template, secondary[first:last])
+                if row.size:
+                    total += float(row.max())
+            return total
+
+        return agreement_at(level_ms) > 1.05 * agreement_at(other_ms)
 
     def _split_at_runs(self, block: Block, runs: List[Tuple[float, float, float]]) -> Optional[List[Block]]:
         """Cut a stretch into one piece per run of readings at one level.
@@ -1635,7 +2274,10 @@ class _Aligner:
         length = min(SHARPEN_INTERIOR_S, in_hi - in_lo)
         if length < 1.0:
             return None
-        curve = self.agreement(block.offset_s, in_lo, in_hi)
+        # The full band chooses the interior: the waveform is whitened, and
+        # what it can lock onto is what the full band's sharp transients
+        # see, not what a band's broad ones do.
+        curve = self.agreement(block.offset_s, in_lo, in_hi, bands=["full"])
         window = max(1, int(length * ENVELOPE_RATE))
         if curve.size < window:
             return None
@@ -1934,7 +2576,30 @@ def plan_dubsync(
         )
 
         secondary = secondary_native.at_speed(speed) if speed else secondary_native
-        aligner = _Aligner(primary, secondary, token, say)
+        frame_s = None
+        if video_info.fps and exact_rate(float(video_info.fps)) is not None:
+            frame_s = 1.0 / float(exact_rate(float(video_info.fps)))
+        aligner = _Aligner(primary, secondary, token, say, frame_s)
+
+        if speed is None and video_info.fps:
+            # Verify the frame rate before anything else trusts an offset. The
+            # video's own metadata names its rate, the dub's mastering rate is
+            # one of the standard ones, so the possible speedups are a short
+            # list: ask each on the audio itself, before the coarse pass could
+            # misread a rate mismatch as a flood of cuts. A bare audio file
+            # carries no rate; for that the symptom-driven passes below stand.
+            video_rate = exact_rate(float(video_info.fps))
+            if video_rate is not None:
+                plan.video_fps = float(video_rate)
+                report(38, "checking the frame rate")
+                say(f"video is {_format_fps(plan.video_fps)} fps; checking the dub's rate")
+                trial = _try_speeds(
+                    aligner, primary, secondary_native, search_s, say,
+                    candidates=_fps_speed_candidates(video_rate),
+                )
+                if trial is not None:
+                    secondary = trial
+                    aligner = _Aligner(primary, secondary, token, say, frame_s)
 
         report(40, "finding the offsets")
         grid, blocks = _coarse_blocks(aligner, search_s, report, say)
@@ -1943,10 +2608,10 @@ def plan_dubsync(
             # Too little to trust as they are. A rate conversion looks
             # exactly like this -- the peak smears across the window -- and
             # it has a short list of possible values, so try them.
-            trial = _try_speeds(aligner, primary, secondary_native, grid, search_s, say)
+            trial = _try_speeds(aligner, primary, secondary_native, search_s, say)
             if trial is not None:
                 secondary = trial
-                aligner = _Aligner(primary, secondary, token, say)
+                aligner = _Aligner(primary, secondary, token, say, frame_s)
                 grid, blocks = _coarse_blocks(aligner, search_s, report, say)
 
         if speed is None and blocks:
@@ -1962,9 +2627,13 @@ def plan_dubsync(
                     break
                 secondary, aligner, grid, blocks = trial
         plan.speed = secondary.speed
+        if plan.video_fps is not None:
+            # The rate the dub was mastered at, implied by the final speed:
+            # the dub runs at ``speed`` times the video's clock.
+            plan.dub_rate = round(plan.speed * plan.video_fps, 6)
 
         if _coverage(blocks, primary.duration_s) < WIDE_PASS_COVERAGE:
-            wide = _wide_blocks(aligner, lambda f: report(56 + 4 * f, "searching the whole dub"), say)
+            wide = _wide_blocks(aligner, lambda f: report(56 + 4 * f, "searching the whole dub"), say, blocks)
             if wide:
                 blocks = _credible(_measure_and_split(aligner, _merge_blocks(blocks, wide)), aligner)
                 say(
@@ -1988,7 +2657,7 @@ def plan_dubsync(
         plan.fill_gain_db = float(fill_gain_db)
         plan.segments = _assemble(
             blocks, primary.duration_s, secondary.duration_s, primary, secondary,
-            keep_unmatched_dub, plan.warnings, plan.notes,
+            keep_unmatched_dub, plan.warnings, plan.notes, aligner,
         )
         if not plan.dub_segments:
             plan.error = "No part of the dub could be placed on the video"
@@ -2072,10 +2741,14 @@ def _snap_speed(speed: float) -> float:
     return speed
 
 
-def _fine_score(blocks: List[Block]) -> float:
+def _fine_score(blocks: List[Block], aligner: _Aligner) -> float:
     """How well the stretches measure at 2ms: the length-weighted median
-    match of every stretch long enough to have been measured properly."""
-    long = [(b.match, b.length_s) for b in blocks if b.windows >= 3 and b.length_s > 0]
+    full-band match of every stretch long enough to have been measured
+    properly. The full band only: its transients are two frames wide, so
+    a speed error of a millisecond a second smears them across a window
+    and the match collapses, which is the symptom being judged; a band's
+    onsets are twenty frames wide and hardly notice."""
+    long = [(aligner.sharp_match(b), b.length_s) for b in blocks if b.windows >= 3 and b.length_s > 0]
     if not long:
         return 0.0
     values = np.array([m for m, _ in long])
@@ -2113,11 +2786,11 @@ def _speed_from_drift(
     candidate = _snap_speed(current / (1.0 + drift / 1000.0))
     if abs(candidate - current) < 1e-9:
         return None
-    baseline = _fine_score(blocks)
+    baseline = _fine_score(blocks, aligner)
     trial = secondary_native.at_speed(candidate)
-    trial_aligner = _Aligner(primary, trial, token, say)
+    trial_aligner = _Aligner(primary, trial, token, say, aligner.frame_s)
     grid, trial_blocks = _coarse_blocks(trial_aligner, search_s, report, say)
-    score = _fine_score(trial_blocks)
+    score = _fine_score(trial_blocks, trial_aligner)
     say(f"  at {candidate:.6f}x the stretches measure at {score:.2f}, against {baseline:.2f} as they were")
     if not trial_blocks or score < SPEED_FINE_GAIN * baseline:
         return None
@@ -2125,7 +2798,12 @@ def _speed_from_drift(
     return trial, trial_aligner, grid, trial_blocks
 
 
-def _wide_blocks(aligner: _Aligner, report: Callable[[float, str], None], say: LogFn) -> List[Block]:
+def _wide_blocks(
+    aligner: _Aligner,
+    report: Callable[[float, str], None],
+    say: LogFn,
+    anchors: Sequence[Block] = (),
+) -> List[Block]:
     """Stretches found by searching every window of the video across the
     whole dub at 2 ms (see WIDE_PASS_COVERAGE).
 
@@ -2133,27 +2811,59 @@ def _wide_blocks(aligner: _Aligner, report: Callable[[float, str], None], say: L
     of the whole search; runs of consecutive windows agreeing on an offset
     are stretches, bracketed the way the coarse pass brackets its own. The
     stretches are measured and their edges placed afterwards like any other.
+
+    "Best" is not simply tallest. A cue that recurs -- a theme heard four
+    times, an episode's opening -- correlates at every occurrence, and the
+    tallest peak is the occurrence mixed loudest, not the one this window
+    belongs to. So every window keeps its few tallest peaks, and the one
+    taken is the one that continues what is already known: within
+    WIDE_LOCAL_S of the offset the coarse stretches (``anchors``) give the
+    neighbourhood, when such a peak is credible on its own; failing that,
+    one that does not wind the dub back a little way from the previous
+    window (a repeat within the same scene rewinds by a minute or two; a
+    dub made of episodes out of order rewinds by a whole episode, which is
+    allowed); failing that, the tallest.
     """
     rate = ENVELOPE_RATE
-    primary, secondary = aligner.primary.onset, aligner.secondary.onset
     window = int(WIDE_WINDOW_S * rate)
     hop = int(WIDE_HOP_S * rate)
-    if len(primary) < window or len(secondary) < window:
+    primary_n = len(aligner.primary.onset)
+    secondary_n = len(aligner.secondary.onset)
+    if primary_n < window or secondary_n < window:
         return []
-    starts = list(range(0, len(primary) - window + 1, hop))
-    possible = np.ones(len(secondary) - window + 1, dtype=bool)
+    starts = list(range(0, primary_n - window + 1, hop))
+    possible = np.ones(secondary_n - window + 1, dtype=bool)
+    apart = int(WIDE_PEAK_APART_S * rate)
     hits: List[Tuple[float, float, float]] = []  # (window start, offset, noise units)
+    previous: Optional[Tuple[float, float]] = None  # (window start, offset) of the last hit
     for index, start in enumerate(starts):
         if aligner.token:
             aligner.token.raise_if_cancelled()
-        row = ncc_lags(primary[start : start + window], secondary)
-        if row.size < 3:
-            continue
-        peak = int(np.argmax(row))
-        z = float(_noise_units(row, possible)[peak])
-        if z >= WIDE_Z:
-            hits.append((start / rate, (_parabolic(row, peak) - start) / rate, z))
+        candidates: List[Tuple[float, float]] = []  # (offset, noise units)
+        for band in aligner.detect_bands:
+            template = aligner.onsets("primary", band)[start : start + window]
+            row = ncc_lags(template, aligner.onsets("secondary", band))
+            if row.size < 3:
+                continue
+            units = _noise_units(row, possible)
+            for peak in _tallest_peaks(units, WIDE_PEAKS, apart):
+                z = float(units[peak])
+                if z < WIDE_Z:
+                    break
+                offset = (_parabolic(row, peak) - start) / rate
+                near = [c for c in candidates if abs(c[0] - offset) <= WIDE_SAME_OFFSET_S]
+                if near:
+                    if z > near[0][1]:
+                        candidates[candidates.index(near[0])] = (offset, z)
+                else:
+                    candidates.append((offset, z))
         report((index + 1) / len(starts))
+        if not candidates:
+            continue
+        position = start / rate
+        chosen = _continuing_candidate(candidates, position, anchors, previous)
+        hits.append((position, chosen[0], chosen[1]))
+        previous = (position, chosen[0])
 
     blocks: List[Block] = []
     run: List[Tuple[float, float, float]] = []
@@ -2249,13 +2959,32 @@ def _coverage(blocks: List[Block], duration_s: float) -> float:
     return min(1.0, sum(b.length_s for b in blocks) / duration_s)
 
 
+def _fps_speed_candidates(video_rate: Fraction) -> List[Tuple[float, float]]:
+    """Every mastering rate worth trying for a dub against a video of known
+    frame rate, as (playback speed, mastering rate) pairs, likeliest first.
+
+    The video's own metadata says its rate; the dub's rate is one of the
+    standard ones, so the possible speeds are exactly audio/video for each
+    standard audio rate. Ordering by how close each is to 1.0 tries the
+    matched rate and the small conversions before the large ones.
+    """
+    pairs = [
+        (float(audio_rate / video_rate), float(audio_rate))
+        for audio_rate in COMMON_RATES
+        if audio_rate != video_rate
+        and abs(float(audio_rate / video_rate) - 1.0) <= SPEED_BAND
+    ]
+    pairs.sort(key=lambda pair: abs(pair[0] - 1.0))
+    return pairs
+
+
 def _try_speeds(
     aligner: _Aligner,
     primary: TrackEnvelope,
     secondary_native: TrackEnvelope,
-    grid: ScoreGrid,
     search_s: float,
     say: LogFn,
+    candidates: Optional[List[Tuple[float, float]]] = None,
 ) -> Optional[TrackEnvelope]:
     """Find a standard playback speed at which the pair correlates.
 
@@ -2263,10 +2992,19 @@ def _try_speeds(
     speed is a time-stretch and the envelope is a curve in time. Three
     windows in the middle of the file are enough to ask: at the right speed
     the peak stands well clear of every other.
+
+    ``candidates`` narrows the question to explicit (speed, mastering rate)
+    pairs -- the frame-rate verdict the video's own metadata suggests. When
+    omitted, every standard conversion is tried, ordered by the durations.
     """
+    if candidates is None:
+        candidates = [
+            (float(c), 0.0)
+            for c in speed_candidates(primary.duration_s, secondary_native.duration_s)
+        ]
     candidates = [
-        c for c in speed_candidates(primary.duration_s, secondary_native.duration_s)
-        if abs(float(c) - 1.0) <= SPEED_BAND
+        (speed, rate) for speed, rate in candidates
+        if abs(speed - 1.0) <= SPEED_BAND and abs(speed - 1.0) > 1e-9
     ]
     if not candidates:
         return None
@@ -2293,10 +3031,10 @@ def _try_speeds(
     say(f"  at the files' own speed the trial windows peak at {baseline:.1f} noise units")
 
     best: Optional[Tuple[float, TrackEnvelope]] = None
-    for candidate in candidates:
-        trial = secondary_native.at_speed(float(candidate))
+    for candidate, _mastering_rate in candidates:
+        trial = secondary_native.at_speed(candidate)
         peak = trial_peak(trial)
-        say(f"  trying {float(candidate):.6f}x: peak {peak:.1f} noise units")
+        say(f"  trying {candidate:.6f}x: peak {peak:.1f} noise units")
         if peak >= max(SPEED_MIN_Z, SPEED_GAIN * baseline) and (best is None or peak > best[0]):
             best = (peak, trial)
     if best is not None:
@@ -2340,6 +3078,16 @@ def _refine(
         _place_all_edges(aligner, blocks, primary_s, secondary_s)
 
     blocks = [b for b in blocks if b.length_s >= MIN_BLOCK_S]
+    # The edges moved: a stretch whose start was pulled back over material
+    # the readings put at another level (an edge placed inside the bracket
+    # an early, coarse split left it) now shows that level in its own
+    # readings, and is split once more, on exactly what is inside it.
+    report(83, "checking every stretch once more")
+    resplit = _credible(_measure_and_split(aligner, blocks), aligner)
+    if len(resplit) != len(blocks):
+        blocks = resplit
+        _place_all_edges(aligner, blocks, primary_s, secondary_s)
+        blocks = [b for b in blocks if b.length_s >= MIN_BLOCK_S]
     for block in blocks:
         # The offset was measured before the edges moved; measure it again on
         # exactly the material that is now inside the stretch.
@@ -2349,7 +3097,43 @@ def _refine(
                 f"the dub drifts by {drift:+.2f} ms/s across {_clock(block.start_s)} - "
                 f"{_clock(block.end_s)}; it may run at a different speed (see --speed)"
             )
+    _follow_effects(aligner, blocks)
     return blocks
+
+
+def _follow_effects(aligner: _Aligner, blocks: List[Block]) -> None:
+    """A stretch the music placed, between stretches the effects placed at
+    another offset a few frames away, is asked which the effects on its
+    own span prefer -- and follows them if they prefer the neighbours'.
+
+    The case is a picture trim the music was left running across (see
+    BANDS): the dialogue and effects step with the picture, the music
+    does not until it is next re-laid, and a stretch found on the music
+    alone sits a few frames from the dialogue. Only a neighbour within a
+    few frames and a few seconds is asked about; farther apart the two
+    are different cuts.
+    """
+    for index, block in enumerate(blocks):
+        if block.effects:
+            continue
+        for other in (blocks[index - 1] if index else None, blocks[index + 1] if index + 1 < len(blocks) else None):
+            if other is None or not other.effects:
+                continue
+            apart = abs(other.offset_s - block.offset_s)
+            touching = min(abs(other.end_s - block.start_s), abs(other.start_s - block.end_s)) <= FOLLOW_EFFECTS_GAP_S
+            if not touching or apart <= SAME_OFFSET_S or apart > FOLLOW_EFFECTS_STEP_S:
+                continue
+            rate = ENVELOPE_RATE
+            window = min(POLISH_WINDOW_S, block.length_s)
+            positions = [block.start_s + i * (block.length_s - window) / max(1, int(block.length_s / window)) for i in range(int(block.length_s / window) + 1)]
+            if aligner._effects_prefer(positions, other.offset_s * 1000.0, block.offset_s * 1000.0):
+                aligner.log(
+                    f"  the music put {_clock(block.start_s)} - {_clock(block.end_s)} at {block.offset_s:+.3f}s; "
+                    f"the effects prefer the neighbour's {other.offset_s:+.3f}s, and the dialogue goes with the effects"
+                )
+                block.offset_s = other.offset_s
+                block.effects = True
+                break
 
 
 def _credible(blocks: List[Block], aligner: _Aligner) -> List[Block]:
@@ -2387,6 +3171,18 @@ def _credible(blocks: List[Block], aligner: _Aligner) -> List[Block]:
             aligner.log(
                 f"  dropped {_clock(block.start_s)} - {_clock(block.end_s)} at {block.offset_s:+.2f}s:"
                 f" match {block.match:.2f} is noise"
+            )
+            continue
+        # A match can be high by chance where a band is sparse; a stretch
+        # fewer than three windows matched outright has to show its peak
+        # standing above the offsets around it as well. Three windows
+        # that matched are their own evidence: a quiet scene the gap
+        # search had found over thirty-seven of them measured 4.6 here.
+        z = aligner.credibility(block) if block.windows < 3 else float("inf")
+        if z < CREDIBLE_Z:
+            aligner.log(
+                f"  dropped {_clock(block.start_s)} - {_clock(block.end_s)} at {block.offset_s:+.2f}s:"
+                f" its peak is only {z:.1f} noise units above the offsets around it"
             )
             continue
         kept.append(block)
@@ -2457,8 +3253,8 @@ def _place_edge(
     # narrows them: the waveform pass searches these.
     coarse_before = (before.end_lo, before.end_hi) if before else None
     coarse_after = (after.start_lo, after.start_hi) if after else None
-    curve_before = aligner.agreement(before.offset_s, lo_s, hi_s) if before else None
-    curve_after = aligner.agreement(after.offset_s, lo_s, hi_s) if after else None
+    curve_before = aligner.edge_curve(before.offset_s, lo_s, hi_s) if before else None
+    curve_after = aligner.edge_curve(after.offset_s, lo_s, hi_s) if after else None
     _fit_edges(
         before, after, curve_before, curve_after,
         before.match if before else 0.0, after.match if after else 0.0,
@@ -2675,8 +3471,6 @@ def _recover_from_gaps(
     """
     pool = GAP_POOL
     rate = ENVELOPE_RATE / pool
-    primary = aligner.pooled("primary", pool)
-    secondary = aligner.pooled("secondary", pool)
     found: List[Block] = []
 
     gaps: List[Tuple[float, float, Optional[Block], Optional[Block]]] = []
@@ -2720,7 +3514,7 @@ def _recover_from_gaps(
                 if sub_hi - sub_lo < RECOVER_MIN_S:
                     continue
                 pieces = _search_gap(
-                    aligner, primary, secondary, rate, sub_lo, sub_hi, lo_s, hi_s,
+                    aligner, pool, rate, sub_lo, sub_hi, lo_s, hi_s,
                     min(window_s, sub_hi - sub_lo), secondary_s,
                 )
                 found.extend(pieces)
@@ -2737,10 +3531,20 @@ def _recover_from_gaps(
     return found
 
 
+def _gap_candidates(grid: ScoreGrid, floor: float, window_s: float) -> List[Block]:
+    """The stretches one gap-search grid supports: the best path through
+    it, cut into runs, each kept when it clears the bar for its length."""
+    path, run_starts = best_path(grid.scores, GAP_JUMP_COST, GAP_NULL_REWARD, GAP_NULL_COST, WOBBLE_COST)
+    lags = grid.scores.shape[1]
+    return [
+        block for block in blocks_from_path(grid, path, run_starts)
+        if block.support >= max(floor, _block_bar(block.windows, lags, window_s / GAP_HOP_S))
+    ]
+
+
 def _search_gap(
     aligner: _Aligner,
-    primary: np.ndarray,
-    secondary: np.ndarray,
+    pool: int,
     rate: float,
     gap_lo: float,
     gap_hi: float,
@@ -2750,24 +3554,57 @@ def _search_gap(
     secondary_s: float,
 ) -> List[Block]:
     """One scale of the gap search: windows of ``window_s`` every GAP_HOP_S
-    across [gap_lo, gap_hi), over offsets [lo_s, hi_s]."""
+    across [gap_lo, gap_hi), over offsets [lo_s, hi_s].
+
+    Every band is scored and the scores are summed, in noise units, and
+    put back on a unit floor: a scene with no music is found by the low
+    band, one with no bass by the full band. The sum rather than the best,
+    because a sparse band -- a few transients in a quiet scene -- has a
+    heavy-tailed noise, and its lone coincidences stood up as stretches
+    when the best band was taken; a real stretch shows in more than one
+    band, and the sum keeps that and not the coincidence.
+    """
     window = max(1, int(round(window_s * rate)))
     hop = max(1, int(round(GAP_HOP_S * rate)))
     first = int(round(gap_lo * rate))
     last = int(round(gap_hi * rate)) - window
     starts = list(range(first, max(first, last) + 1, hop))
-    grid = score_windows(
-        primary, secondary, rate, starts, window,
-        int(round(lo_s * rate)), int(round(hi_s * rate)), aligner.token,
-    )
-    path, run_starts = best_path(
-        grid.scores, GAP_JUMP_COST, GAP_NULL_REWARD, GAP_NULL_COST, WOBBLE_COST
-    )
-    lags = grid.scores.shape[1]
+    grid: Optional[ScoreGrid] = None
+    bands = aligner.detect_bands
+    for band in bands:
+        scored = score_windows(
+            aligner.pooled("primary", pool, band), aligner.pooled("secondary", pool, band), rate,
+            starts, window, int(round(lo_s * rate)), int(round(hi_s * rate)), aligner.token,
+        )
+        if grid is None:
+            grid = scored
+        else:
+            possible = (grid.scores > -1e5) & (scored.scores > -1e5)
+            grid.scores[possible] += scored.scores[possible]
+            grid.scores[~possible] = -1e6
+    assert grid is not None
+    if len(bands) > 1:
+        possible = grid.scores > -1e5
+        grid.scores[possible] /= math.sqrt(len(bands))
     found: List[Block] = []
-    for block in blocks_from_path(grid, path, run_starts):
-        if block.support < max(RECOVER_Z, _block_bar(block.windows, lags, window_s / GAP_HOP_S)):
-            continue
+    candidates = _gap_candidates(grid, RECOVER_Z, window_s)
+    if "high" in aligner.shared_bands:
+        # The effects on their own, held to a higher bar: a scene whose bed
+        # is footsteps and room tone shows in the 4-8 kHz band alone, but
+        # that band's chance peaks are tall (see ``detect_bands``), so only
+        # a run of several windows that match outright is believed, and
+        # only where the other bands found nothing.
+        effects = score_windows(
+            aligner.pooled("primary", pool, "high"), aligner.pooled("secondary", pool, "high"), rate,
+            starts, window, int(round(lo_s * rate)), int(round(hi_s * rate)), aligner.token,
+        )
+        for block in _gap_candidates(effects, EFFECTS_RECOVER_Z, window_s):
+            if block.windows < EFFECTS_RECOVER_WINDOWS:
+                continue
+            if any(min(block.end_s, c.end_s) - max(block.start_s, c.start_s) > 0.0 for c in candidates):
+                continue
+            candidates.append(block)
+    for block in sorted(candidates, key=lambda b: b.start_s):
         block.start_s = max(gap_lo, block.start_s, -block.offset_s)
         block.end_s = min(gap_hi, block.end_s, secondary_s - block.offset_s)
         if block.end_s - block.start_s < MIN_BLOCK_S:
@@ -2885,6 +3722,37 @@ def _join(last: Block, block: Block, weaker: bool = False) -> None:
     last.match = min(last.match, block.match) if weaker else max(last.match, block.match)
 
 
+def _place_step(aligner: _Aligner, lo_s: float, hi_s: float, before_s: float, after_s: float) -> Tuple[float, bool]:
+    """Where inside [lo_s, hi_s] a stretch at ``before_s`` gives way to one
+    at ``after_s``: the point that leaves the most agreement at the first
+    offset before it and at the second after it (after the frames the dub
+    lacks, when the offset falls). Returns the point and whether the
+    agreement said anything at all; when it did not, the middle."""
+    rate = ENVELOPE_RATE
+    drop = max(0.0, before_s - after_s)
+    room = max(0.0, hi_s - lo_s - drop)
+    a = aligner.agreement(before_s, lo_s, hi_s)
+    b = aligner.agreement(after_s, lo_s, hi_s)
+    n = min(len(a), len(b))
+    if n < 2 or room <= 0.0:
+        return lo_s + room / 2.0, False
+    a, b = a[:n], b[:n]
+    if max(float(np.abs(a).mean()), float(np.abs(b).mean())) < AGREEMENT_FLOOR:
+        return lo_s + room / 2.0, False
+    skip = int(round(drop * rate))
+    ahead = np.concatenate([[0.0], np.cumsum(a)])          # agreement at the first offset up to k
+    behind = np.concatenate([np.cumsum(b[::-1])[::-1], [0.0]])  # agreement at the second from k on
+    last = n - skip
+    if last <= 0:
+        return lo_s + room / 2.0, False
+    scores = ahead[: last + 1] + behind[skip : skip + last + 1]
+    k = int(np.argmax(scores))
+    # Said only when the choice stands out: a flat score is no placement.
+    spread = float(scores.max() - np.median(scores))
+    measured = spread > STEP_EVIDENCE * max(float(np.abs(a).mean()), float(np.abs(b).mean())) * rate
+    return (lo_s + k / rate) if measured else lo_s + room / 2.0, measured
+
+
 def _assemble(
     blocks: List[Block],
     primary_s: float,
@@ -2894,6 +3762,7 @@ def _assemble(
     keep_unmatched_dub: bool,
     warnings: List[str],
     notes: List[str],
+    aligner: Optional[_Aligner] = None,
 ) -> List[Segment]:
     """Turn stretches into a contiguous list of pieces covering the video."""
     blocks = _trim_uncertain_edges(sorted((b for b in blocks if b.length_s > 0), key=lambda b: b.start_s))
@@ -2937,10 +3806,35 @@ def _assemble(
     # twelve-second head's offset over an hour, nineteen milliseconds out.
     unmatched: set = set()
     kept: List[Block] = [merged[0]]
+    aligner = aligner or _Aligner(primary, secondary, None, None)
     for block in merged[1:]:
         last = kept[-1]
         gap = block.start_s - last.end_s
         bridge = False
+        step = last.offset_s - block.offset_s   # > 0: the video has this much the dub lacks
+        exposure = (gap - max(step, 0.0)) / 2.0  # dub a wrongly placed step would misplace
+        if (
+            gap > MIN_FILL_S and NEAR_OFFSET_S < abs(step)
+            and (abs(step) <= BRIDGE_STEP_S or exposure <= BRIDGE_EXPOSURE_S)
+            and gap - max(step, 0.0) >= 0.0
+            and keep_unmatched_dub and dub_audible(last.end_s, block.start_s, last.offset_s)
+        ):
+            # The dub is there but did not correlate, and the offset steps
+            # somewhere inside: a scene the two edits trim differently. Put
+            # the step where the agreement changes from one offset to the
+            # other; where neither offset agrees anywhere, in the middle,
+            # which misplaces at most ``exposure`` seconds of dub, said in
+            # the note. The frames the dub lacks are filled at the step.
+            cut, measured = _place_step(aligner, last.end_s, block.start_s, last.offset_s, block.offset_s)
+            how = "placed where the agreement changes" if measured else f"guessed; up to {exposure:.1f}s of dub may sit {abs(step):.1f}s off"
+            notes.append(
+                f"kept the dub across {_clock(last.end_s)} - {_clock(block.start_s)}: it did not "
+                f"correlate there, but the offset steps by only {step * 1000.0:+.0f} ms inside it; the step was {how}"
+            )
+            last.end_s = last.end_lo = last.end_hi = cut
+            block.start_s = block.start_lo = block.start_hi = cut + max(step, 0.0)
+            kept.append(block)
+            continue
         if gap > MIN_FILL_S and abs(block.offset_s - last.offset_s) <= NEAR_OFFSET_S:
             if dub_audible(last.end_s, block.start_s, last.offset_s):
                 if keep_unmatched_dub:
@@ -3186,6 +4080,7 @@ def verify_output(
     result = Verification()
     rate = ENVELOPE_RATE
     duration = min(primary.duration_s, output.duration_s)
+    bands = [b for b in primary.bands if b in output.bands]
 
     # Spot checks.
     window = int(VERIFY_SPOT_WINDOW_S * rate)
@@ -3203,7 +4098,9 @@ def verify_output(
                 result.spots.append(SpotCheck(position, None, 0.0, "filled from the original"))
                 result.fills_skipped += 1
                 continue
-            residual, match, z = _measure(primary.onset, output.onset, start, window, margin, rate)
+            residual, match, z = _measure(
+                [primary.onsets(b) for b in bands], [output.onsets(b) for b in bands], start, window, margin, rate, bands
+            )
             if residual is None or z < MATCH_Z:
                 result.spots.append(SpotCheck(position, None, match, "silence or music-only; not measurable"))
             else:
@@ -3212,8 +4109,8 @@ def verify_output(
     # Sweep.
     pool = VERIFY_SWEEP_POOL
     sweep_rate = rate / pool
-    p = _pool(primary.onset, pool)
-    o = _pool(output.onset, pool)
+    p = [_pool(primary.onsets(b), pool) for b in bands]
+    o = [_pool(output.onsets(b), pool) for b in bands]
     window = int(VERIFY_SWEEP_WINDOW_S * sweep_rate)
     margin = int(VERIFY_SWEEP_RANGE_S * sweep_rate)
     residuals: List[Tuple[float, float]] = []
@@ -3226,7 +4123,7 @@ def verify_output(
             continue
         result.sweep_windows += 1
         start = int(position * sweep_rate)
-        residual, _match, z = _measure(p, o, start, window, margin, sweep_rate)
+        residual, _match, z = _measure(p, o, start, window, margin, sweep_rate, bands)
         if residual is None or z < VERIFY_SWEEP_Z:
             continue
         result.sweep_measured += 1
@@ -3255,18 +4152,49 @@ def verify_output(
 
 
 def _measure(
-    primary: np.ndarray, other: np.ndarray, start: int, window: int, margin: int, rate: float
+    primary: Sequence[np.ndarray], other: Sequence[np.ndarray], start: int, window: int, margin: int, rate: float,
+    bands: Optional[Sequence[str]] = None,
 ) -> Tuple[Optional[float], float, float]:
-    """Residual offset (ms, positive = other is late) of one window."""
-    template = primary[start : start + window]
+    """Residual offset (ms, positive = other is late) of one window.
+
+    ``primary`` and ``other`` are the same bands of the two tracks. Each
+    band's correlation is put in its own noise units and the bands are
+    summed: a beat gives the full band a peak every period, about as tall
+    as the true one, and only the true one is in every band. Among the
+    summed peaks within 15% of the tallest, the one nearest zero lag is
+    the answer -- this is a check that the track sits where it should,
+    and a track that does gives a peak there.
+    """
+    total: Optional[np.ndarray] = None
+    effects: Optional[np.ndarray] = None
+    best_match = 0.0
     first, last = start - margin, start + window + margin
-    if len(template) < window or first < 0 or last > len(other):
+    for index, (p, o) in enumerate(zip(primary, other)):
+        template = p[start : start + window]
+        if len(template) < window or first < 0 or last > len(o):
+            continue
+        row = ncc_lags(template, o[first:last])
+        if row.size < 3:
+            continue
+        if bands is not None and index < len(bands) and bands[index] == "high":
+            effects = row.astype(np.float64)
+        units = _noise_units(row, np.ones(len(row), dtype=bool))
+        total = units.astype(np.float64) if total is None else total + units
+        best_match = max(best_match, float(row.max()))
+    if total is None:
         return None, 0.0, 0.0
-    row = ncc_lags(template, other[first:last])
-    if row.size < 3:
-        return None, 0.0, 0.0
-    peak = int(np.argmax(row))
-    possible = np.ones(len(row), dtype=bool)
-    z = float(_noise_units(row, possible)[peak])
-    lag = (first + _parabolic(row, peak)) - start
-    return lag / rate * 1000.0, float(row[peak]), z
+    if effects is not None:
+        # The effects decide here as they do in the plan (see BANDS): a
+        # cue laid twice puts the music's peak a tenth of a second from
+        # the dialogue's, and it is the dialogue the check is about.
+        peak = _nearest_peak(effects, margin)
+        units = _noise_units(effects, np.ones(len(effects), dtype=bool))
+        if float(units[peak]) >= EFFECTS_Z and _peak_dominance(effects, peak) >= EFFECTS_DOMINANCE:
+            lag = (first + _parabolic(effects, peak)) - start
+            return lag / rate * 1000.0, best_match, float(units[peak])
+    peak = _nearest_peak(total, margin)
+    away = np.abs(np.arange(len(total)) - peak) > max(3, int(0.25 * rate))
+    noise = float(np.std(total[away])) if away.sum() > 8 else 1.0
+    z = float(total[peak]) / max(noise, 1e-9)
+    lag = (first + _parabolic(total, peak)) - start
+    return lag / rate * 1000.0, best_match, z
