@@ -1313,12 +1313,11 @@ mod tests {
         );
         let _ = fs::remove_file(&other);
 
-        // The right naming, but outside the temp dir: the sibling of the
-        // temp dir itself stands in for anywhere else on the disk.
-        let outside_dir = std::env::temp_dir()
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default()
+        // The right naming, but outside the temp dir. The repo's own
+        // directory stands in for anywhere else on the disk: it is always
+        // writable where the tests run, unlike the temp dir's parent,
+        // which is `/` on Linux.
+        let outside_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(format!("audiosync-guard-{}", std::process::id()));
         fs::create_dir_all(&outside_dir).expect("should create");
         let outside = outside_dir.join(format!("audiosync-dub-preview-{}.bin", std::process::id()));
