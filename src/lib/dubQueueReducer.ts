@@ -27,12 +27,24 @@ export interface DubQueueJob {
   /** Video (or original-language track) basename, for the row. */
   name: string;
   dubName: string;
+  /** The files, for the waveform view before any plan names them. */
+  videoPath: string;
+  dubPath: string;
+  videoTrack: number;
+  dubTrack: number;
   status: DubJobStatus;
   /** 0-100 within the current stage; the engine restarts it per stage. */
   percent: number;
   stage: string | null;
-  /** Arrives as soon as the analysis is done, before the track is written. */
+  /** Arrives as soon as the analysis is done, before the track is written.
+   *  After the cuts were edited by hand, the plan the track was written from. */
   plan: DubSyncPlan | null;
+  /** The engine's own plan, kept when the cuts are edited so the editor can
+   *  always go back to it. */
+  enginePlan: DubSyncPlan | null;
+  /** The plan as it stands mid-analysis, stage by stage, until the plan
+   *  arrives; what the waveform view shows being laid down live. */
+  draft: DubSyncPlan | null;
   output: DubOutput | null;
   verification: DubVerification | null;
   muxedPath: string | null;
@@ -46,6 +58,12 @@ export interface DubQueueState {
   done: number;
   startedAt: number | null;
   error: string | null;
+  /** A finished job whose track is being written again from cuts edited by
+   *  hand: the queue status to go back to once it is, and the row as it
+   *  was, which a stopped or failed write goes back to since the track on
+   *  disk is still the old one. The queue counts as running meanwhile: the
+   *  engine takes one command at a time. */
+  rerender: { job: number; resume: DubQueueStatus; previous: DubQueueJob } | null;
 }
 
 export const initialDubQueueState: DubQueueState = {
@@ -54,16 +72,30 @@ export const initialDubQueueState: DubQueueState = {
   done: 0,
   startedAt: null,
   error: null,
+  rerender: null,
 };
 
 export type DubQueueAction =
-  | { type: "queueStarted"; jobs: { name: string; dubName: string }[] }
+  | {
+      type: "queueStarted";
+      jobs: {
+        name: string;
+        dubName: string;
+        videoPath?: string;
+        dubPath?: string;
+        videoTrack?: number;
+        dubTrack?: number;
+      }[];
+    }
   | { type: "jobStart"; job: number }
   | { type: "jobProgress"; job: number; percent: number; stage: string }
+  | { type: "jobDraft"; job: number; plan: DubSyncPlan }
   | { type: "jobPlan"; job: number; plan: DubSyncPlan }
   | { type: "jobDone"; outcome: DubJobOutcome }
   | { type: "batchDone"; outcomes: DubJobOutcome[]; cancelled: boolean }
   | { type: "batchFailed"; message: string }
+  | { type: "rerenderStart"; job: number; plan: DubSyncPlan }
+  | { type: "rerenderDone"; outcome: DubJobOutcome }
   | { type: "reset" };
 
 function updateJob(state: DubQueueState, job: number, patch: Partial<DubQueueJob>): DubQueueState {
@@ -79,6 +111,8 @@ function outcomeToJob(outcome: DubJobOutcome): Partial<DubQueueJob> {
   return {
     status: outcome.cancelled ? "cancelled" : error ? "failed" : "done",
     plan: outcome.plan ?? null,
+    enginePlan: outcome.plan ?? null,
+    draft: null,
     output: outcome.output ?? null,
     verification: outcome.verification ?? null,
     muxedPath: outcome.muxedPath ?? null,
@@ -104,10 +138,16 @@ export function dubQueueReducer(state: DubQueueState, action: DubQueueAction): D
           id: index,
           name: job.name,
           dubName: job.dubName,
+          videoPath: job.videoPath ?? "",
+          dubPath: job.dubPath ?? "",
+          videoTrack: job.videoTrack ?? 0,
+          dubTrack: job.dubTrack ?? 0,
           status: "queued",
           percent: 0,
           stage: null,
           plan: null,
+          enginePlan: null,
+          draft: null,
           output: null,
           verification: null,
           muxedPath: null,
@@ -124,8 +164,13 @@ export function dubQueueReducer(state: DubQueueState, action: DubQueueAction): D
       if (state.status !== "running") return state;
       return updateJob(state, action.job, { percent: action.percent, stage: action.stage });
 
+    case "jobDraft":
+      if (state.status !== "running") return state;
+      return updateJob(state, action.job, { draft: action.plan });
+
     case "jobPlan":
-      return updateJob(state, action.job, { plan: action.plan });
+      // The plan supersedes every draft.
+      return updateJob(state, action.job, { plan: action.plan, draft: null });
 
     case "jobDone": {
       const next = updateJob(state, action.outcome.job, outcomeToJob(action.outcome));
@@ -166,6 +211,44 @@ export function dubQueueReducer(state: DubQueueState, action: DubQueueAction): D
         startedAt: null,
       };
 
+    case "rerenderStart": {
+      // Only a finished job can be written again, and only while the engine
+      // is free: it takes one command at a time.
+      const job = state.jobs[action.job];
+      if (state.status === "running" || !job || job.status !== "done") return state;
+      const next = updateJob(state, action.job, {
+        status: "running",
+        percent: 0,
+        stage: "writing the track with the edited cuts",
+        plan: action.plan,
+        error: null,
+      });
+      return {
+        ...next,
+        status: "running",
+        done: countDone(next.jobs),
+        rerender: { job: action.job, resume: state.status, previous: job },
+      };
+    }
+
+    case "rerenderDone": {
+      if (!state.rerender || state.rerender.job !== action.outcome.job) return state;
+      const { job, resume, previous } = state.rerender;
+      const failed = action.outcome.cancelled || !!(action.outcome.error ?? action.outcome.plan?.error);
+      // The write is staged, so a stopped or failed one leaves the track
+      // that was there: the row goes back to describing it. The editor
+      // keeps the edited cuts on screen for another try.
+      const next = failed
+        ? updateJob(state, job, previous)
+        : updateJob(state, job, { ...outcomeToJob(action.outcome), enginePlan: previous.enginePlan });
+      return {
+        ...next,
+        status: resume,
+        done: countDone(next.jobs),
+        rerender: null,
+      };
+    }
+
     case "reset":
       return initialDubQueueState;
 
@@ -196,8 +279,35 @@ export function describePlan(plan: DubSyncPlan): string {
     } else {
       parts.push(`video ${formatFps(plan.videoFps)} fps, dub at the same rate`);
     }
+    if (plan.rateConfirmed === false) {
+      parts[parts.length - 1] += " (not confirmed by the audio)";
+    }
   } else if (Math.abs(plan.speed - 1) > 1e-9) {
     parts.push(`dub played at ${plan.speed.toFixed(6)}×`);
   }
   return parts.join(", ");
+}
+
+/** A stage name as the engine reports it, said the way the row says it. */
+export function describeStage(stage: string | null): string {
+  if (!stage) return "Starting…";
+  const known: Record<string, string> = {
+    starting: "Starting…",
+    probing: "Reading the files",
+    "reading the original": "Reading the original",
+    "reading the dub": "Reading the dub",
+    "checking the frame rate": "Checking the frame rate",
+    "finding the offsets": "Finding where the dub belongs",
+    "placing the cuts": "Placing the cuts",
+    "measuring the offsets": "Measuring each stretch",
+    "looking for dub inside the gaps": "Looking for dub inside the gaps",
+    "assembling the plan": "Assembling the plan",
+    "checking the finished track": "Checking the finished track against the video",
+    "writing the track with the edited cuts": "Writing the track with the edited cuts",
+    muxing: "Adding the track to a copy of the video",
+    done: "Done",
+  };
+  if (known[stage]) return known[stage];
+  if (stage.startsWith("writing ")) return `Writing ${stage.slice("writing ".length)}`;
+  return stage[0].toUpperCase() + stage.slice(1);
 }

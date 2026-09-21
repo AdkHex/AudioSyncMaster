@@ -24,6 +24,7 @@ import tempfile
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if hasattr(sys, "_MEIPASS"):
@@ -47,10 +48,13 @@ try:
         pair_movie_mode,
         validate_pattern,
     )
-    from audiosync.dubrender import RenderOptions, default_output_path, resolve_codec
+    from audiosync.dubrender import EXCERPT_KINDS, RenderOptions, default_output_path, excerpt, resolve_codec
     from audiosync.dubrender import mux as mux_dub
     from audiosync.dubrender import render as render_dub
     from audiosync.dubsync import DubSyncPlan, build_envelope, plan_dubsync, verify_output
+    from audiosync.waveform import is_loaded as waveform_loaded
+    from audiosync.waveform import load as waveform_load
+    from audiosync.waveform import peaks as waveform_peaks
     from audiosync.media import Cancelled, CancellationToken, MediaError, has_ffmpeg, probe
     from audiosync.mux import (
         apply_correction,
@@ -571,9 +575,11 @@ def handle_dubsync(request: dict) -> None:
                 dub_track=int(request.get("dubTrack", 0) or 0),
                 search_s=float(request.get("searchSeconds", 120.0) or 120.0),
                 speed=request.get("speed"),
+                dub_rate=request.get("dubRate"),
                 fill_gain_db=request.get("fillGainDb"),
                 keep_unmatched_dub=not bool(request.get("fillUnmatched")),
                 token=token, progress=progress, log=emit_log, envelopes=envelopes,
+                draft=lambda sketch: emit({"type": "dubsyncDraft", "plan": sketch.to_dict()}),
             )
         started["plan"] = plan
         emit({"type": "dubsyncPlan", "plan": plan.to_dict(), "description": plan.describe()})
@@ -680,9 +686,11 @@ def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken)
             dub_track=int(job.get("dubTrack", 0) or 0),
             search_s=float(options.get("searchSeconds", 120.0) or 120.0),
             speed=options.get("speed"),
+            dub_rate=options.get("dubRate"),
             fill_gain_db=options.get("fillGainDb"),
             keep_unmatched_dub=not bool(options.get("fillUnmatched")),
             token=token, progress=progress, log=log, envelopes=envelopes,
+            draft=lambda sketch: emit({"type": "dubsyncJobDraft", "job": index, "plan": sketch.to_dict()}),
         )
     except Cancelled:
         return outcome(cancelled=True)
@@ -794,6 +802,121 @@ def handle_dubsync_batch(request: dict) -> None:
     emit({"type": "dubsyncBatchDone", "outcomes": ordered, "cancelled": token.cancelled})
 
 
+def _waveform_progress(path: str, track: int, request_id) -> Callable[[float], None]:
+    """Progress of a first read of a file, once per whole percent."""
+    last = [-1]
+
+    def report(fraction: float) -> None:
+        percent = int(100 * max(0.0, min(1.0, fraction)))
+        if percent != last[0]:
+            last[0] = percent
+            emit({"type": "waveformProgress", "path": path, "track": track,
+                  "requestId": request_id, "percent": percent})
+
+    return report
+
+
+def handle_waveform_build(request: dict) -> None:
+    """Read a track's waveform into the cache, so the views that follow are
+    immediate. Reports progress; the app asks for this as soon as a pair
+    is on screen."""
+    path = request.get("path")
+    track = int(request.get("track", 0) or 0)
+    request_id = request.get("requestId")
+    if not path or not os.path.isfile(path):
+        emit_error("The file to draw was not found.")
+        emit({"type": "waveformReady", "path": path, "track": track, "requestId": request_id,
+              "error": "file not found"})
+        return
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        wave = waveform_load(path, track, token, _waveform_progress(path, track, request_id))
+        emit({"type": "waveformReady", "path": path, "track": track, "requestId": request_id,
+              "durationS": wave.duration_s, "channels": wave.channels, "sampleRate": wave.sample_rate})
+    except Cancelled:
+        emit({"type": "waveformReady", "path": path, "track": track, "requestId": request_id, "cancelled": True})
+    except (MediaError, OSError) as exc:
+        emit_error(f"Could not read the waveform: {exc}")
+        emit({"type": "waveformReady", "path": path, "track": track, "requestId": request_id, "error": str(exc)})
+    finally:
+        _set_token(None)
+
+
+def handle_waveform_peaks(request: dict) -> None:
+    """Waveform peaks of one track over a span, for the dub sync view: per
+    channel, the lowest and highest sample and the RMS in each bucket.
+
+    ``startS``/``endS`` are on the timeline the plan uses for the file: the
+    video's own clock, on which a dub played at ``speed`` is stretched. A
+    file not read yet is read first, with progress.
+    """
+    path = request.get("path")
+    track = int(request.get("track", 0) or 0)
+    request_id = request.get("requestId")
+    if not path or not os.path.isfile(path):
+        emit_error("The file to draw was not found.")
+        emit({"type": "waveformPeaks", "path": path, "requestId": request_id, "error": "file not found"})
+        return
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        progress = None if waveform_loaded(path, track) else _waveform_progress(path, track, request_id)
+        result = waveform_peaks(
+            path, track,
+            float(request.get("startS", 0.0) or 0.0), float(request.get("endS", 0.0) or 0.0),
+            int(request.get("buckets", 1000) or 1000), float(request.get("speed", 1.0) or 1.0),
+            token, progress,
+        )
+        result.update({"type": "waveformPeaks", "path": path, "track": track, "requestId": request_id})
+        emit(result)
+    except Cancelled:
+        emit({"type": "waveformPeaks", "path": path, "requestId": request_id, "cancelled": True})
+    except (MediaError, OSError) as exc:
+        emit_error(f"Could not read the waveform: {exc}")
+        emit({"type": "waveformPeaks", "path": path, "requestId": request_id, "error": str(exc)})
+    finally:
+        _set_token(None)
+
+
+def handle_dubsync_preview(request: dict) -> None:
+    """Render a span of a plan -- as edited in the app -- to play back.
+
+    ``what`` chooses the piece (see ``dubrender.excerpt``): ``both`` (the
+    default; also ``video: false`` for ``audio``) for an outside player,
+    ``picture`` / ``audio`` / ``original`` for the app's own player, which
+    draws the picture from one file and plays the sound from another. The
+    reply carries the span actually cut: a cut with a picture starts on a
+    frame, and the sound for the same window must be asked for from that
+    start.
+    """
+    if not request.get("plan"):
+        emit_error("A preview needs a plan.")
+        emit({"type": "dubsyncPreviewDone", "path": None})
+        return
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        plan = DubSyncPlan.from_dict(request["plan"])
+        lo = float(request.get("startS", 0.0) or 0.0)
+        hi = float(request.get("endS", lo + 12.0) or (lo + 12.0))
+        what = request.get("what") or ("both" if request.get("video", True) else "audio")
+        if what not in EXCERPT_KINDS:
+            raise MediaError(f"Unknown excerpt {what!r}")
+        key = abs(hash((plan.video_path, plan.dub_path, round(lo, 3), round(hi, 3), what, json.dumps(request["plan"], sort_keys=True))))
+        ext = "mp4" if what in ("both", "picture") else "wav"
+        output = os.path.join(tempfile.gettempdir(), f"audiosync-dub-preview-{key}.{ext}")
+        path, start, end = excerpt(plan, lo, hi, output, what, token=token, log=emit_log)
+        emit({"type": "dubsyncPreviewDone", "path": path, "what": what, "startS": start, "endS": end})
+    except Cancelled:
+        emit({"type": "dubsyncPreviewDone", "path": None, "cancelled": True})
+    except (MediaError, OSError) as exc:
+        emit_error(f"Could not render the preview: {exc}")
+        emit({"type": "dubsyncPreviewDone", "path": None, "error": str(exc)})
+    finally:
+        _set_token(None)
+
+
 def handle_cancel(request: dict) -> None:
     with _token_lock:
         token = _active_token
@@ -813,6 +936,9 @@ HANDLERS = {
     "apply": handle_apply,
     "dubsync": handle_dubsync,
     "dubsyncBatch": handle_dubsync_batch,
+    "waveformPeaks": handle_waveform_peaks,
+    "waveformBuild": handle_waveform_build,
+    "dubsyncPreview": handle_dubsync_preview,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }

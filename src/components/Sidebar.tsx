@@ -5,6 +5,7 @@ import { FilePanel } from "@/components/FilePanel";
 import { cx } from "@/lib/cx";
 import {
   DUB_CODECS,
+  DUB_RATES,
   type AppSettings,
   type DubScope,
   type FileItem,
@@ -17,7 +18,7 @@ import {
  *  what to write, and whether to put it into a copy of the video. */
 export type DubOutputOptions = Pick<
   AppSettings,
-  "dubCodec" | "dubMux" | "dubLanguage" | "maxWorkers"
+  "dubCodec" | "dubMux" | "dubLanguage" | "maxWorkers" | "dubRate"
 >;
 
 interface SidebarProps {
@@ -356,6 +357,35 @@ function DubOutput({
           />
         </div>
       )}
+
+      <label htmlFor={`${ids}-rate`} className="mt-3 block text-[11.5px] text-muted-foreground">
+        The dub was mastered at
+      </label>
+      <select
+        id={`${ids}-rate`}
+        value={options.dubRate === null ? "auto" : String(options.dubRate)}
+        disabled={disabled}
+        onChange={(event) =>
+          onChange({ dubRate: event.target.value === "auto" ? null : Number(event.target.value) })
+        }
+        className="mt-1 w-full appearance-none rounded-md bg-elevated px-2 py-1.5 pr-6 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+        style={{
+          backgroundImage: SELECT_ARROW,
+          backgroundRepeat: "no-repeat",
+          backgroundPosition: "right 7px center",
+        }}
+      >
+        <option value="auto">Find out from the audio</option>
+        {DUB_RATES.map((rate) => (
+          <option key={rate.value} value={String(rate.value)}>
+            {rate.label}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-[10.5px] leading-snug text-muted-foreground/80">
+        Leave it to the audio unless the plan says the rate could not be confirmed. A dub
+        timed to a 23.976 fps master on a 24 fps video runs 0.1% slow, a millisecond a second.
+      </p>
 
       <p className="mt-3 text-[10.5px] leading-snug text-muted-foreground/80">
         Pairs are synced in parallel, up to {options.maxWorkers} at a time (Settings → Workers).

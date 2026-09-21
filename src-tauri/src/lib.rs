@@ -11,7 +11,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 
-use bridge::BridgeHandle;
+use bridge::{BridgeHandle, WaveformBridge};
 
 /// How long to wait for a single engine event before assuming it has stalled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -670,6 +670,177 @@ async fn render_preview<R: tauri::Runtime>(
     .map_err(|err| err.to_string())?
 }
 
+/// Waveform peaks of one track over a span, for the dub sync editor. The
+/// engine keeps the decoded envelope, so after the first request for a file
+/// the answer is immediate.
+#[tauri::command]
+async fn waveform_peaks<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, WaveformBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    waveform_exchange(app, handle.inner().0.clone(), request, "waveformPeaks").await
+}
+
+/// Read a track's waveform into the engine's cache ahead of any view of it,
+/// reporting progress as `waveform-progress` events. Resolves with the
+/// track's length, channel count and rate.
+#[tauri::command]
+async fn waveform_build<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, WaveformBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    waveform_exchange(app, handle.inner().0.clone(), request, "waveformBuild").await
+}
+
+/// One waveform command on the waveform engine: `waveformBuild` answers with
+/// `waveformReady`, `waveformPeaks` with `waveformPeaks`; either may first
+/// stream `waveformProgress` while a file is read for the first time.
+async fn waveform_exchange<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: BridgeHandle,
+    request: Value,
+    command: &'static str,
+) -> Result<Value, String> {
+    let app_for_task = app.clone();
+    let reply = if command == "waveformBuild" {
+        "waveformReady"
+    } else {
+        "waveformPeaks"
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String(command.into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(Duration::from_secs(600)) {
+                    Ok(event) => match event.get("type").and_then(Value::as_str) {
+                        Some(kind) if kind == reply => {
+                            if let Some(message) = event.get("error").and_then(Value::as_str) {
+                                return Err(message.to_string());
+                            }
+                            if event.get("cancelled").and_then(Value::as_bool) == Some(true) {
+                                return Err("Reading the waveform was stopped.".into());
+                            }
+                            return Ok(event);
+                        }
+                        Some("waveformProgress") => {
+                            let _ = app_for_task.emit("waveform-progress", &event);
+                        }
+                        Some("error") => {
+                            let _ = app_for_task.emit(
+                                "sync-log",
+                                event.get("message").and_then(Value::as_str).unwrap_or(""),
+                            );
+                        }
+                        _ => {}
+                    },
+                    Err(_) => return Err("Timed out reading the waveform.".into()),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// A short excerpt of a dub sync plan as edited in the app, rendered to
+/// play: the picture, the synced sound, the original's sound, or the
+/// picture with the sound under it (`what`). Returns the engine's reply --
+/// the temporary file's path and the span actually cut, which for a
+/// picture starts on a frame -- or None when nothing could be rendered.
+#[tauri::command]
+async fn render_dub_preview<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, WaveformBridge>,
+    request: Value,
+) -> Result<Option<Value>, String> {
+    let handle = handle.inner().0.clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String("dubsyncPreview".into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(Duration::from_secs(600)) {
+                    Ok(event) => match event.get("type").and_then(Value::as_str) {
+                        Some("dubsyncPreviewDone") => {
+                            return Ok(if event.get("path").and_then(Value::as_str).is_some() {
+                                Some(event)
+                            } else {
+                                None
+                            });
+                        }
+                        Some("log") => {
+                            if let Some(m) = event.get("message").and_then(Value::as_str) {
+                                let _ = app_for_task.emit("sync-log", m);
+                            }
+                        }
+                        Some("error") => {
+                            let _ = app_for_task.emit(
+                                "sync-log",
+                                event.get("message").and_then(Value::as_str).unwrap_or(""),
+                            );
+                        }
+                        _ => {}
+                    },
+                    Err(_) => return Err("Timed out rendering the preview.".into()),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Bytes of one of the engine's preview excerpts, for the in-app player.
+///
+/// The webview cannot reach the OS filesystem, and the excerpts must not
+/// be exposed through the asset protocol, so the bytes cross the IPC. Only
+/// files the engine wrote for that purpose are served: inside the OS temp
+/// dir and named `audiosync-dub-preview-*`, so a crafted path cannot be
+/// used to read anything else on the disk.
+#[tauri::command]
+async fn read_preview_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    let path = PathBuf::from(path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = preview_bytes_guard(&path)?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// The guard the preview reader enforces, separated so it can be tested
+/// without an app. Both sides are canonicalised first: macOS reports its
+/// temp dir as /var/folders/... while its real location is /private/var/...,
+/// so a naive prefix check would refuse everything the engine wrote.
+fn preview_bytes_guard(path: &Path) -> Result<Vec<u8>, String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|_| "That preview no longer exists.".to_string())?;
+    let temp = fs::canonicalize(std::env::temp_dir()).map_err(|err| err.to_string())?;
+    if !canonical.starts_with(&temp) {
+        return Err("That file is not a preview.".into());
+    }
+    let named = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("audiosync-dub-preview-"));
+    if !named {
+        return Err("That file is not a preview.".into());
+    }
+    fs::read(&canonical).map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 async fn apply_corrections<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -748,6 +919,9 @@ async fn start_dubsync<R: tauri::Runtime>(
                             "dubsyncProgress" => {
                                 let _ = app_for_task.emit("dubsync-progress", &event);
                             }
+                            "dubsyncDraft" => {
+                                let _ = app_for_task.emit("dubsync-draft", &event);
+                            }
                             "dubsyncPlan" => {
                                 let _ = app_for_task.emit("dubsync-plan", &event);
                             }
@@ -811,6 +985,9 @@ async fn start_dubsync_batch<R: tauri::Runtime>(
                             }
                             "dubsyncJobProgress" => {
                                 let _ = app_for_task.emit("dubsync-job-progress", &event);
+                            }
+                            "dubsyncJobDraft" => {
+                                let _ = app_for_task.emit("dubsync-job-draft", &event);
                             }
                             "dubsyncJobPlan" => {
                                 let _ = app_for_task.emit("dubsync-job-plan", &event);
@@ -1012,6 +1189,7 @@ pub fn run() {
 
     builder
         .manage(BridgeHandle::default())
+        .manage(WaveformBridge::default())
         .invoke_handler(tauri::generate_handler![
             pick_video_folder,
             pick_audio_folder,
@@ -1028,6 +1206,10 @@ pub fn run() {
             probe_media,
             list_audio_tracks,
             render_preview,
+            waveform_peaks,
+            waveform_build,
+            render_dub_preview,
+            read_preview_bytes,
             export_csv,
             export_json,
             reveal_path,
@@ -1037,6 +1219,9 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(handle) = window.app_handle().try_state::<BridgeHandle>() {
                     handle.shutdown();
+                }
+                if let Some(handle) = window.app_handle().try_state::<WaveformBridge>() {
+                    handle.0.shutdown();
                 }
             }
         })
@@ -1103,6 +1288,54 @@ mod tests {
         let payload = serde_json::json!({ "videoFile": "a.mkv", "audioFile": "b.eac3" });
         let result: SyncResult = serde_json::from_value(payload).expect("should deserialize");
         assert!(result.rate_diagnosis.is_none());
+    }
+
+    /// The preview reader serves only what the engine wrote: a file in the
+    /// temp dir named `audiosync-dub-preview-*` reads back, anything else
+    /// -- another name, another directory, a missing file -- is refused.
+    #[test]
+    fn preview_reader_refuses_anything_but_the_engines_previews() {
+        let inside = std::env::temp_dir().join(format!(
+            "audiosync-dub-preview-guard-{}.bin",
+            std::process::id()
+        ));
+        fs::write(&inside, b"frame bytes").expect("should write");
+        let served = preview_bytes_guard(&inside).expect("a real preview is served");
+        assert_eq!(served, b"frame bytes");
+        let _ = fs::remove_file(&inside);
+
+        // The right place, but not the engine's naming.
+        let other = std::env::temp_dir().join(format!("guard-other-{}.bin", std::process::id()));
+        fs::write(&other, b"nope").expect("should write");
+        assert_eq!(
+            preview_bytes_guard(&other),
+            Err("That file is not a preview.".into())
+        );
+        let _ = fs::remove_file(&other);
+
+        // The right naming, but outside the temp dir: the sibling of the
+        // temp dir itself stands in for anywhere else on the disk.
+        let outside_dir = std::env::temp_dir()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+            .join(format!("audiosync-guard-{}", std::process::id()));
+        fs::create_dir_all(&outside_dir).expect("should create");
+        let outside = outside_dir.join(format!("audiosync-dub-preview-{}.bin", std::process::id()));
+        fs::write(&outside, b"nope").expect("should write");
+        assert_eq!(
+            preview_bytes_guard(&outside),
+            Err("That file is not a preview.".into())
+        );
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir(&outside_dir);
+
+        // And a path that no longer exists at all.
+        let gone = std::env::temp_dir().join("audiosync-dub-preview-gone.mp4");
+        assert_eq!(
+            preview_bytes_guard(&gone),
+            Err("That preview no longer exists.".into())
+        );
     }
 
     /// The dub sync command, end to end: the request the webview sends, the
@@ -1211,6 +1444,174 @@ mod tests {
         let worst = outcome["verification"]["worstMs"].as_f64().unwrap();
         assert!(worst <= 5.0, "finished track is {worst}ms out at worst");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The pair the engine tests are written against, generated by the
+    /// Python fixture script: DIR/org.wav and DIR/dub.wav, five minutes with
+    /// four cuts, or `minutes` of one uncut stretch.
+    fn synthetic_pair(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        tag: &str,
+        minutes: Option<u32>,
+    ) -> PathBuf {
+        let root = bridge::project_root(&app.handle().clone());
+        let dir = std::env::temp_dir().join(format!("audiosync-e2e-{tag}-{}", std::process::id()));
+        let mut command = Command::new(bridge::find_python(&root));
+        command
+            .arg(root.join("tests").join("test_dubsync.py"))
+            .arg(&dir);
+        if let Some(minutes) = minutes {
+            command.arg(minutes.to_string());
+        }
+        let status = command.status().expect("fixture script should run");
+        assert!(status.success(), "fixture generation failed");
+        dir
+    }
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        cmd: &str,
+        body: Value,
+    ) -> Result<tauri::ipc::InvokeResponseBody, Value> {
+        tauri::test::get_ipc_response(
+            webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+    }
+
+    /// Stop reaches a run in flight. The cancel used to queue behind the
+    /// run's own lock, so it was written only once the run had finished
+    /// on its own -- and, sent from the main thread, froze the window
+    /// meanwhile. Here a five-minute pair's sync is stopped a moment after
+    /// it starts and must come back cancelled within seconds, not minutes.
+    #[test]
+    fn cancel_reaches_a_dub_sync_in_flight() {
+        if std::env::var_os("AUDIOSYNC_E2E").is_none() {
+            eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
+            return;
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(BridgeHandle::default())
+            .invoke_handler(tauri::generate_handler![start_dubsync, cancel_sync])
+            .build(context())
+            .expect("app should build");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview should build");
+        // Forty minutes: a sync the engine cannot finish in the moment
+        // before it is stopped.
+        let dir = synthetic_pair(&app, "cancel", Some(40));
+        let request = serde_json::json!({
+            "request": {
+                "videoPath": dir.join("org.wav"),
+                "dubPath": dir.join("dub.wav"),
+                "videoTrack": 0,
+                "dubTrack": 0,
+                "codec": "wav",
+                "outputPath": dir.join("synced.wav"),
+                "mux": false,
+                "language": null,
+                "fillUnmatched": false,
+                "overwrite": true,
+            }
+        });
+
+        let runner = webview.clone();
+        let started = std::time::Instant::now();
+        let run = std::thread::spawn(move || invoke(&runner, "start_dubsync", request));
+        // Let the engine start reading before stopping it.
+        std::thread::sleep(Duration::from_secs(3));
+        let cancel_sent = std::time::Instant::now();
+        invoke(&webview, "cancel_sync", serde_json::json!({})).expect("cancel should be accepted");
+        assert!(
+            cancel_sent.elapsed() < Duration::from_secs(2),
+            "cancel took {:?}: it waited for the run",
+            cancel_sent.elapsed()
+        );
+
+        let outcome: Value = run
+            .join()
+            .expect("run thread")
+            .expect("the command should resolve")
+            .deserialize()
+            .expect("the outcome should be JSON");
+        app.state::<BridgeHandle>().shutdown();
+        assert_eq!(outcome["cancelled"], true, "outcome: {outcome}");
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the run took {:?} to stop",
+            started.elapsed()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The waveform engine: a track read once with progress, then peaks per
+    /// channel over any span of the plan's clock -- what the dub sync view
+    /// draws, served by a process of its own so a sync in flight on the
+    /// other cannot hold it up.
+    #[test]
+    fn waveform_engine_serves_peaks_per_channel() {
+        if std::env::var_os("AUDIOSYNC_E2E").is_none() {
+            eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
+            return;
+        }
+
+        let app = tauri::test::mock_builder()
+            .manage(BridgeHandle::default())
+            .manage(WaveformBridge::default())
+            .invoke_handler(tauri::generate_handler![waveform_build, waveform_peaks])
+            .build(context())
+            .expect("app should build");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview should build");
+        let dir = synthetic_pair(&app, "waveform", None);
+        let path = dir.join("org.wav");
+
+        let ready: Value = invoke(
+            &webview,
+            "waveform_build",
+            serde_json::json!({ "request": { "path": path, "track": 0 } }),
+        )
+        .expect("build should succeed")
+        .deserialize()
+        .expect("ready should be JSON");
+        assert_eq!(ready["type"], "waveformReady");
+        assert!(
+            (ready["durationS"].as_f64().unwrap() - 300.0).abs() < 0.1,
+            "{ready}"
+        );
+        assert_eq!(ready["channels"], 1);
+
+        let peaks: Value = invoke(
+            &webview,
+            "waveform_peaks",
+            serde_json::json!({ "request": {
+                "path": path, "track": 0, "startS": 0.0, "endS": 300.0, "buckets": 600, "speed": 1.0,
+            } }),
+        )
+        .expect("peaks should succeed")
+        .deserialize()
+        .expect("peaks should be JSON");
+        app.state::<WaveformBridge>().0.shutdown();
+        let max = peaks["max"].as_array().expect("max per channel");
+        assert_eq!(max.len(), 1, "{peaks}");
+        let row = max[0].as_array().expect("one value per bucket");
+        assert_eq!(row.len(), 600);
+        let loudest = row.iter().filter_map(Value::as_f64).fold(0.0, f64::max);
+        assert!(loudest > 0.1, "the fixture is not silent: {loudest}");
+        let rms = peaks["rms"][0].as_array().expect("rms per bucket");
+        assert!(rms.iter().filter_map(Value::as_f64).all(|v| v <= loudest));
         let _ = fs::remove_dir_all(&dir);
     }
 }

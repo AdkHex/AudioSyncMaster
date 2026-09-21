@@ -138,6 +138,117 @@ export async function renderPreview(request: PreviewRequest): Promise<string | n
   return invoke<string | null>("render_preview", { request });
 }
 
+export interface WaveformRequest {
+  path: string;
+  track: number;
+  /** Span on the timeline the plan uses for the file: the video's clock,
+   *  on which a dub played at `speed` is stretched. */
+  startS: number;
+  endS: number;
+  /** One value per pixel is plenty. */
+  buckets: number;
+  speed?: number;
+  requestId?: string;
+}
+
+export interface WaveformPeaks {
+  path: string;
+  track?: number;
+  startS: number;
+  endS: number;
+  buckets: number;
+  /** The file's length on that clock. */
+  durationS: number;
+  /** Lanes: one for a mono track, two (a stereo downmix) otherwise. */
+  channels: number;
+  sampleRate: number;
+  /** Per channel, one value per bucket: the lowest and highest sample in
+   *  the bucket's span and the RMS across it, in -1..1 / 0..1. */
+  min: number[][];
+  max: number[][];
+  rms: number[][];
+  requestId?: string;
+}
+
+/** Waveform peaks of one track over a span, for the dub sync view. The
+ *  first call for a file reads it (seconds, with `waveform-progress`
+ *  events); later spans are immediate. Served by an engine process of its
+ *  own, so a running sync never holds the picture up. */
+export async function waveformPeaks(request: WaveformRequest): Promise<WaveformPeaks> {
+  requireDesktop("Reading a waveform");
+  return invoke<WaveformPeaks>("waveform_peaks", { request });
+}
+
+export interface WaveformBuildRequest {
+  path: string;
+  track: number;
+  requestId?: string;
+}
+
+export interface WaveformReady {
+  path: string;
+  track: number;
+  durationS: number;
+  channels: number;
+  sampleRate: number;
+  requestId?: string;
+}
+
+/** Read a track's waveform ahead of any view of it, so the first picture is
+ *  immediate. Progress arrives as `waveform-progress` events. */
+export async function waveformBuild(request: WaveformBuildRequest): Promise<WaveformReady> {
+  requireDesktop("Reading a waveform");
+  return invoke<WaveformReady>("waveform_build", { request });
+}
+
+export interface WaveformProgressEvent {
+  path: string;
+  track: number;
+  percent: number;
+  requestId?: string;
+}
+
+/** Which piece of a span to render: `both` is the picture with the synced
+ *  sound under it, for an outside player; the app's own player draws the
+ *  `picture` (no sound of its own) and plays the `audio` -- the synced
+ *  track as the cuts would write it -- or the `original`'s sound. */
+export type DubExcerptKind = "both" | "audio" | "picture" | "original";
+
+export interface DubPreviewRequest {
+  plan: DubSyncPlan;
+  startS: number;
+  endS: number;
+  what?: DubExcerptKind;
+  /** Older spelling of `what`: true is `both`, false is `audio`. */
+  video?: boolean;
+}
+
+export interface DubExcerpt {
+  path: string;
+  what: DubExcerptKind;
+  /** The span actually cut. A picture is cut starting on a frame, so its
+   *  start may sit up to a frame after the one asked for; the sound for
+   *  the same window must then be asked for from this start. */
+  startS: number;
+  endS: number;
+}
+
+/** Render a span of a dub sync plan -- as edited -- and return the
+ *  temporary file to play and the span it covers, or null when it could
+ *  not be rendered. */
+export async function renderDubPreview(request: DubPreviewRequest): Promise<DubExcerpt | null> {
+  requireDesktop("Rendering a preview");
+  return invoke<DubExcerpt | null>("render_dub_preview", { request });
+}
+
+/** Bytes of one of the engine's preview excerpts, for the in-app player.
+ *  The webview cannot reach the OS filesystem, so the excerpt crosses the
+ *  IPC; the host only serves files it knows the engine wrote. */
+export async function readPreviewBytes(path: string): Promise<ArrayBuffer> {
+  requireDesktop("Loading a preview");
+  return invoke<ArrayBuffer>("read_preview_bytes", { path });
+}
+
 /** Hand a file to the OS so the user's own player opens it. */
 export async function openPath(path: string): Promise<void> {
   requireDesktop("Opening a file");
@@ -237,6 +348,17 @@ export interface DubSyncPlanEvent {
   description: string;
 }
 
+/** The plan as it stands after a stage of the analysis: the stretches
+ *  found so far, the rest of the video as fills marked not placed yet. */
+export interface DubSyncDraftEvent {
+  plan: DubSyncPlan;
+}
+
+export interface DubQueueJobDraftEvent {
+  job: number;
+  plan: DubSyncPlan;
+}
+
 export interface DubQueueJobStartEvent {
   job: number;
   name: string;
@@ -275,11 +397,14 @@ export interface SyncListeners {
   onPairs?: (report: PairingReport) => void;
   onApplyProgress?: (event: ApplyProgressEvent) => void;
   onDubSyncProgress?: (event: DubSyncProgressEvent) => void;
+  onDubSyncDraft?: (event: DubSyncDraftEvent) => void;
   onDubSyncPlan?: (event: DubSyncPlanEvent) => void;
   onDubQueueJobStart?: (event: DubQueueJobStartEvent) => void;
   onDubQueueJobProgress?: (event: DubQueueJobProgressEvent) => void;
+  onDubQueueJobDraft?: (event: DubQueueJobDraftEvent) => void;
   onDubQueueJobPlan?: (event: DubQueueJobPlanEvent) => void;
   onDubQueueJobDone?: (event: DubQueueJobDoneEvent) => void;
+  onWaveformProgress?: (event: WaveformProgressEvent) => void;
 }
 
 /** Subscribe to engine events. Returns a disposer that removes every listener,
@@ -310,6 +435,7 @@ export async function subscribeToSync(listeners: SyncListeners): Promise<Unliste
     add<PairingReport>("sync-pairs", (payload) => listeners.onPairs?.(payload)),
     add<ApplyProgressEvent>("sync-apply-progress", (p) => listeners.onApplyProgress?.(p)),
     add<DubSyncProgressEvent>("dubsync-progress", (p) => listeners.onDubSyncProgress?.(p)),
+    add<DubSyncDraftEvent>("dubsync-draft", (p) => listeners.onDubSyncDraft?.(p)),
     add<DubSyncPlanEvent>("dubsync-plan", (p) => listeners.onDubSyncPlan?.(p)),
     add<DubQueueJobStartEvent>("dubsync-job-start", (p) =>
       listeners.onDubQueueJobStart?.(p),
@@ -317,8 +443,10 @@ export async function subscribeToSync(listeners: SyncListeners): Promise<Unliste
     add<DubQueueJobProgressEvent>("dubsync-job-progress", (p) =>
       listeners.onDubQueueJobProgress?.(p),
     ),
+    add<DubQueueJobDraftEvent>("dubsync-job-draft", (p) => listeners.onDubQueueJobDraft?.(p)),
     add<DubQueueJobPlanEvent>("dubsync-job-plan", (p) => listeners.onDubQueueJobPlan?.(p)),
     add<DubQueueJobDoneEvent>("dubsync-job-done", (p) => listeners.onDubQueueJobDone?.(p)),
+    add<WaveformProgressEvent>("waveform-progress", (p) => listeners.onWaveformProgress?.(p)),
   ]);
 
   return () => {

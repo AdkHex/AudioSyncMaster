@@ -457,11 +457,17 @@ WIDE_EPISODE_S = 300.0
 SPEED_MIN_Z = 6.0
 SPEED_GAIN = 1.5
 SPEED_TRIAL_WINDOWS = 5
-# Trial windows are long. A true match's peak grows with the square root
-# of the window while the largest coincidence does not, and at a wrong
-# speed a longer window only smears further; two minutes turns a peak of
-# 5.6 on the weakest synthetic pair into one of 11 against a floor of 4.4.
-SPEED_TRIAL_WINDOW_S = 120.0
+# Trial windows are thirty seconds at the envelope's full 2 ms resolution.
+# They used to be two minutes at 20 ms, which told a PAL conversion (4%)
+# apart at once but not a 24-against-23.976 one: a tenth of a percent
+# smears a two-minute window by 120 ms, six bins of 20 ms, and the peak
+# survives -- on a real pair the files' own speed and the right one both
+# scored 2.9, and the verdict was left to the drift estimate, which needs
+# minutes of matched dub. At 2 ms a thirty-second window is smeared by
+# fifteen frames at the wrong speed and the peak collapses, while at the
+# right speed the transients stay aligned across the whole window.
+SPEED_TRIAL_WINDOW_S = 30.0
+SPEED_TRIAL_POOL = 1
 # Every standard conversion inside this band is tried. The durations cannot
 # order the search here as they do for a whole pair -- a dub with scenes
 # cut is shorter for reasons that have nothing to do with speed, and on a
@@ -1266,6 +1272,12 @@ class DubSyncPlan:
     dub_rate: Optional[float] = None
     """The rate the dub was mastered at, as implied by ``speed`` against
     ``video_fps``. Equal to ``video_fps`` when the rates match."""
+    rate_confirmed: Optional[bool] = None
+    """Whether the audio itself bore the rate verdict out: at the speed
+    settled on, the trial windows correlated sharply. False when neither the
+    files' own speed nor any standard conversion did, in which case the
+    verdict is a guess and the plan says so; None when the video carried no
+    frame rate, or the speed was set by hand."""
     segments: List[Segment] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     """Things the reader should check: a fill, a drift, a stretch replaced."""
@@ -1299,6 +1311,7 @@ class DubSyncPlan:
             "dubDurationS": self.dub_duration_s,
             "videoFps": self.video_fps,
             "dubRate": self.dub_rate,
+            "rateConfirmed": self.rate_confirmed,
             "segments": [s.to_dict() for s in self.segments],
             "warnings": list(self.warnings),
             "notes": list(self.notes),
@@ -1319,6 +1332,7 @@ class DubSyncPlan:
             dub_duration_s=float(data.get("dubDurationS", 0.0) or 0.0),
             video_fps=data.get("videoFps"),
             dub_rate=data.get("dubRate"),
+            rate_confirmed=data.get("rateConfirmed"),
             segments=[Segment.from_dict(s) for s in data.get("segments", [])],
             warnings=list(data.get("warnings") or []),
             notes=list(data.get("notes") or []),
@@ -1345,6 +1359,8 @@ class DubSyncPlan:
                 )
             else:
                 head += f", video {_format_fps(self.video_fps)} fps, dub at the same rate"
+            if self.rate_confirmed is False:
+                head += " (not confirmed by the audio)"
         elif abs(self.speed - 1.0) > 1e-9:
             head += f", dub played at {self.speed:.6f}x"
         if fills:
@@ -2513,6 +2529,8 @@ def plan_dubsync(
     progress: Optional[ProgressFn] = None,
     log: Optional[LogFn] = None,
     envelopes: Optional[dict] = None,
+    dub_rate: Optional[float] = None,
+    draft: Optional[Callable[[DubSyncPlan], None]] = None,
 ) -> DubSyncPlan:
     """Work out which stretch of the dub belongs at every moment of the video.
 
@@ -2530,6 +2548,15 @@ def plan_dubsync(
         envelopes: a dict to leave the decoded envelopes in, keyed
             ``primary`` and ``secondary``, so a verification pass need not
             decode the original again.
+        dub_rate: the frame rate the dub was mastered at, when the user
+            knows it; with the video's own rate this fixes the speed, and
+            the audio is not asked. Ignored when ``speed`` is given.
+        draft: told the plan as it stands after each stage -- coarse
+            stretches, then measured, then with the cuts placed, then with
+            the gaps searched -- so a viewer can watch the dub being laid
+            onto the video. Each draft is a whole plan, with the parts of
+            the video not yet placed shown as fills marked ``not placed
+            yet``; nothing in it is final until the plan is returned.
     """
     plan = DubSyncPlan(video_path, dub_path, video_track, dub_track)
     say = log or (lambda _m: None)
@@ -2537,6 +2564,19 @@ def plan_dubsync(
     def report(percent: float, stage: str) -> None:
         if progress:
             progress(int(max(0, min(100, percent))), stage)
+
+    def show(blocks: List[Block], speed_now: float) -> None:
+        if draft is None or not blocks:
+            return
+        sketch = DubSyncPlan(
+            video_path, dub_path, video_track, dub_track, speed=speed_now,
+            video_duration_s=plan.video_duration_s, dub_duration_s=plan.dub_duration_s,
+            video_fps=plan.video_fps,
+            dub_rate=round(speed_now * plan.video_fps, 6) if plan.video_fps else None,
+            rate_confirmed=plan.rate_confirmed,
+            segments=_draft_segments(blocks, plan.video_duration_s, plan.dub_duration_s),
+        )
+        draft(sketch)
 
     try:
         report(0, "probing")
@@ -2575,10 +2615,22 @@ def plan_dubsync(
             f"{'shorter' if secondary_native.duration_s < primary.duration_s else 'longer'}"
         )
 
+        video_rate = exact_rate(float(video_info.fps)) if video_info.fps else None
+        if speed is None and dub_rate is not None:
+            mastering = exact_rate(float(dub_rate))
+            if video_rate is None:
+                say(f"the dub was said to be mastered at {_format_fps(float(dub_rate))} fps, but the video carries no frame rate; the audio decides")
+            elif mastering is None:
+                say(f"{dub_rate} is not a standard frame rate; the audio decides")
+            else:
+                speed = float(mastering / video_rate)
+                plan.video_fps = float(video_rate)
+                say(
+                    f"video is {_format_fps(plan.video_fps)} fps, dub said to be mastered at "
+                    f"{_format_fps(float(mastering))} fps: played at {speed:.6f}x"
+                )
         secondary = secondary_native.at_speed(speed) if speed else secondary_native
-        frame_s = None
-        if video_info.fps and exact_rate(float(video_info.fps)) is not None:
-            frame_s = 1.0 / float(exact_rate(float(video_info.fps)))
+        frame_s = 1.0 / float(video_rate) if video_rate is not None else None
         aligner = _Aligner(primary, secondary, token, say, frame_s)
 
         if speed is None and video_info.fps:
@@ -2588,21 +2640,35 @@ def plan_dubsync(
             # list: ask each on the audio itself, before the coarse pass could
             # misread a rate mismatch as a flood of cuts. A bare audio file
             # carries no rate; for that the symptom-driven passes below stand.
-            video_rate = exact_rate(float(video_info.fps))
             if video_rate is not None:
                 plan.video_fps = float(video_rate)
                 report(38, "checking the frame rate")
                 say(f"video is {_format_fps(plan.video_fps)} fps; checking the dub's rate")
+                trials: dict = {}
                 trial = _try_speeds(
                     aligner, primary, secondary_native, search_s, say,
-                    candidates=_fps_speed_candidates(video_rate),
+                    candidates=_fps_speed_candidates(video_rate), trials=trials,
                 )
                 if trial is not None:
                     secondary = trial
                     aligner = _Aligner(primary, secondary, token, say, frame_s)
+                    plan.rate_confirmed = True
+                elif trials.get(1.0, 0.0) >= SPEED_MIN_Z:
+                    # The files' own speed correlates sharply: the rates match.
+                    plan.rate_confirmed = True
+                else:
+                    # Neither the files' own speed nor any conversion the
+                    # video's rate allows correlated sharply. Everything below
+                    # may still find the drift and correct it; if not, the
+                    # plan is made at the files' own speed, and the reader
+                    # must know that was never confirmed.
+                    plan.rate_confirmed = False
+                    tried = ", ".join(f"{spd:.6f}x {peak:.1f}" for spd, peak in sorted(trials.items()))
+                    say(f"  the dub's rate could not be confirmed from the audio (peaks: {tried})")
 
         report(40, "finding the offsets")
         grid, blocks = _coarse_blocks(aligner, search_s, report, say)
+        show(blocks, secondary.speed)
 
         if speed is None and _coverage(blocks, primary.duration_s) <= SPEED_RETRY_FRACTION:
             # Too little to trust as they are. A rate conversion looks
@@ -2613,6 +2679,7 @@ def plan_dubsync(
                 secondary = trial
                 aligner = _Aligner(primary, secondary, token, say, frame_s)
                 grid, blocks = _coarse_blocks(aligner, search_s, report, say)
+                show(blocks, secondary.speed)
 
         if speed is None and blocks:
             # A small speed difference does not stop the coarse pass; it
@@ -2626,11 +2693,21 @@ def plan_dubsync(
                 if trial is None:
                     break
                 secondary, aligner, grid, blocks = trial
+                show(blocks, secondary.speed)
         plan.speed = secondary.speed
         if plan.video_fps is not None:
             # The rate the dub was mastered at, implied by the final speed:
             # the dub runs at ``speed`` times the video's clock.
             plan.dub_rate = round(plan.speed * plan.video_fps, 6)
+            if plan.rate_confirmed is False and abs(plan.speed - 1.0) > 1e-9:
+                # The drift found what the trial could not.
+                plan.rate_confirmed = True
+            if plan.rate_confirmed is False:
+                plan.warnings.append(
+                    f"the video is {_format_fps(plan.video_fps)} fps and the dub's frame rate could not be "
+                    f"confirmed from the audio, so it was taken to be the same; if the dub was mastered at "
+                    f"another rate (23.976 against 24 is the common case), set the dub's rate and sync again"
+                )
 
         if _coverage(blocks, primary.duration_s) < WIDE_PASS_COVERAGE:
             wide = _wide_blocks(aligner, lambda f: report(56 + 4 * f, "searching the whole dub"), say, blocks)
@@ -2640,13 +2717,17 @@ def plan_dubsync(
                     f"with the wide pass: {len(blocks)} credible stretch(es) covering "
                     f"{100 * _coverage(blocks, primary.duration_s):.0f}%"
                 )
+                show(blocks, secondary.speed)
 
         if not blocks:
             plan.error = "No part of the dub could be matched to the video"
             return plan
 
         report(60, "placing the cuts")
-        blocks = _refine(aligner, grid, blocks, primary.duration_s, secondary.duration_s, report, plan.warnings)
+        blocks = _refine(
+            aligner, grid, blocks, primary.duration_s, secondary.duration_s, report, plan.warnings,
+            draft=lambda current: show(current, secondary.speed),
+        )
         if not blocks:
             plan.error = "No part of the dub could be matched to the video"
             return plan
@@ -2985,6 +3066,7 @@ def _try_speeds(
     search_s: float,
     say: LogFn,
     candidates: Optional[List[Tuple[float, float]]] = None,
+    trials: Optional[dict] = None,
 ) -> Optional[TrackEnvelope]:
     """Find a standard playback speed at which the pair correlates.
 
@@ -3008,7 +3090,7 @@ def _try_speeds(
     ]
     if not candidates:
         return None
-    pool = COARSE_POOL
+    pool = SPEED_TRIAL_POOL
     rate = ENVELOPE_RATE / pool
     window_s = min(SPEED_TRIAL_WINDOW_S, primary.duration_s / (SPEED_TRIAL_WINDOWS + 1))
     window = int(round(window_s * rate))
@@ -3029,12 +3111,16 @@ def _try_speeds(
 
     baseline = trial_peak(aligner.secondary)
     say(f"  at the files' own speed the trial windows peak at {baseline:.1f} noise units")
+    if trials is not None:
+        trials[aligner.secondary.speed] = baseline
 
     best: Optional[Tuple[float, TrackEnvelope]] = None
     for candidate, _mastering_rate in candidates:
         trial = secondary_native.at_speed(candidate)
         peak = trial_peak(trial)
         say(f"  trying {candidate:.6f}x: peak {peak:.1f} noise units")
+        if trials is not None:
+            trials[candidate] = peak
         if peak >= max(SPEED_MIN_Z, SPEED_GAIN * baseline) and (best is None or peak > best[0]):
             best = (peak, trial)
     if best is not None:
@@ -3051,6 +3137,7 @@ def _refine(
     secondary_s: float,
     report: Callable[[float, str], None],
     warnings: List[str],
+    draft: Optional[Callable[[List[Block]], None]] = None,
 ) -> List[Block]:
     """From coarse stretches to exact ones.
 
@@ -3059,13 +3146,16 @@ def _refine(
     placed at 2 ms from the agreement curve, inside the bracket the coarse
     windows left it in. Finally every gap long enough to hold one is searched
     for a stretch of dub the coarse windows straddled, and any found is
-    placed the same way.
+    placed the same way. ``draft`` sees the stretches after each of those.
     """
+    show = draft or (lambda _blocks: None)
     report(60, "measuring the offsets")
     blocks = _credible(_measure_and_split(aligner, coarse), aligner)
+    show(blocks)
 
     report(70, "placing the cuts")
     _place_all_edges(aligner, blocks, primary_s, secondary_s)
+    show(blocks)
 
     for round_index in range(RECOVER_ROUNDS):
         report(74 + 3 * round_index, "looking for dub inside the gaps")
@@ -3076,6 +3166,7 @@ def _refine(
             _measure_and_split(aligner, sorted(blocks + recovered, key=lambda b: b.start_s)), aligner
         )
         _place_all_edges(aligner, blocks, primary_s, secondary_s)
+        show(blocks)
 
     blocks = [b for b in blocks if b.length_s >= MIN_BLOCK_S]
     # The edges moved: a stretch whose start was pulled back over material
@@ -3098,7 +3189,35 @@ def _refine(
                 f"{_clock(block.end_s)}; it may run at a different speed (see --speed)"
             )
     _follow_effects(aligner, blocks)
+    show(blocks)
     return blocks
+
+
+DRAFT_NOTE = "not placed yet"
+
+
+def _draft_segments(blocks: List[Block], video_s: float, dub_s: float) -> List[Segment]:
+    """The stretches as they stand, as a whole plan's worth of pieces: a
+    dub piece per stretch, and the rest of the video as fills marked not
+    placed yet. Overlaps -- a stretch whose edge has not been placed yet
+    reaching into the next -- are cut at the earlier stretch's end."""
+    pieces: List[Segment] = []
+    cursor = 0.0
+    for block in sorted(blocks, key=lambda b: b.start_s):
+        start = max(block.start_s, cursor)
+        end = min(block.end_s, video_s)
+        if end - start < 0.01:
+            continue
+        if start > cursor:
+            pieces.append(Segment("fill", cursor, start, cursor, note=DRAFT_NOTE))
+        pieces.append(Segment(
+            "dub", start, end, start + block.offset_s, offset_s=block.offset_s, match=block.match,
+            uncertainty_s=max(block.start_uncertainty_s, 0.0),
+        ))
+        cursor = end
+    if cursor < video_s:
+        pieces.append(Segment("fill", cursor, video_s, cursor, note=DRAFT_NOTE))
+    return pieces
 
 
 def _follow_effects(aligner: _Aligner, blocks: List[Block]) -> None:

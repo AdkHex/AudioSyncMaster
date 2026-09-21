@@ -7,6 +7,7 @@
 
 import {
   DEFAULT_SETTINGS,
+  DUB_RATES,
   type AppSettings,
   type HistoryEntry,
   type RunSummary,
@@ -119,6 +120,7 @@ export function loadSettings(): AppSettings {
     windowCount: Math.round(clamp(merged.windowCount, 1, 20, DEFAULT_SETTINGS.windowCount)),
     maxOffsetMs: clamp(merged.maxOffsetMs, 1000, 600000, DEFAULT_SETTINGS.maxOffsetMs),
     maxWorkers: Math.round(clamp(merged.maxWorkers, 1, 16, DEFAULT_SETTINGS.maxWorkers)),
+    dubRate: DUB_RATES.some((rate) => rate.value === merged.dubRate) ? merged.dubRate : null,
   };
 }
 

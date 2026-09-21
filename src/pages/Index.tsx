@@ -5,6 +5,8 @@ import { AppHeader } from "@/components/AppHeader";
 import { ApplyProgressDialog, type ApplyState } from "@/components/ApplyProgressDialog";
 import { ConsolePanel } from "@/components/ConsolePanel";
 import { DubQueuePanel } from "@/components/DubQueuePanel";
+import { DubWaveformEditor } from "@/components/DubWaveformEditor";
+import { DubWaveformStrip, type WaveformPair } from "@/components/DubWaveformStrip";
 import { HistoryPanel } from "@/components/HistoryPanel";
 import { LiveAnnouncer } from "@/components/LiveAnnouncer";
 import { PairingPreview } from "@/components/PairingPreview";
@@ -24,7 +26,8 @@ import {
   saveRecentFolders,
   saveSettings,
 } from "@/lib/storage";
-import { dubQueueReducer, initialDubQueueState } from "@/lib/dubQueueReducer";
+import { codecOfPath } from "@/lib/dubPlanEdit";
+import { describeStage, dubQueueReducer, initialDubQueueState } from "@/lib/dubQueueReducer";
 import {
   estimateRemainingMs,
   initialSyncState,
@@ -35,6 +38,7 @@ import type {
   AnalyzeRequest,
   AppSettings,
   CorrectionItem,
+  DubSyncPlan,
   FileItem,
   HistoryEntry,
   MediaProbe,
@@ -71,6 +75,13 @@ export default function Index() {
   // The dub sync run is a queue: a season of episodes, or several movies,
   // each pair moving through its own stages to a plan and a verification.
   const [dub, dubDispatch] = useReducer(dubQueueReducer, initialDubQueueState);
+  // The finished job whose cuts are open in the waveform editor.
+  const [editingJob, setEditingJob] = useState<number | null>(null);
+  // The pair (before a run) or job (during and after) whose waveforms are
+  // shown at the top of the Dub sync tab.
+  const [shownPair, setShownPair] = useState(0);
+  // Files the waveform engine is reading for the first time: path to percent.
+  const [reading, setReading] = useState<Record<string, number>>({});
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [recentFolders, setRecentFolders] = useState(() => loadRecentFolders());
@@ -111,6 +122,8 @@ export default function Index() {
   stateRef.current = state;
   const dubRef = useRef(dub);
   dubRef.current = dub;
+  const editingRef = useRef(editingJob);
+  editingRef.current = editingJob;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   // Read through refs: buildRequest must not be re-created on every track
@@ -183,10 +196,29 @@ export default function Index() {
           dispatch({ type: "fileProgress", file: event.file, percent: event.percent }),
         onResult: (result) => dispatch({ type: "result", result }),
         onPairs: (pairing) => dispatch({ type: "setPairing", pairing }),
+        // A single-job command is only ever a finished job being written
+        // again from edited cuts; its progress belongs to that row.
+        onDubSyncProgress: (event) => {
+          const job = dubRef.current.rerender?.job;
+          if (job !== undefined) {
+            dubDispatch({ type: "jobProgress", job, percent: event.percent, stage: event.stage });
+          }
+        },
         onDubQueueJobStart: (event) => dubDispatch({ type: "jobStart", job: event.job }),
         onDubQueueJobProgress: (event) =>
           dubDispatch({ type: "jobProgress", job: event.job, percent: event.percent, stage: event.stage }),
+        onDubQueueJobDraft: (event) => dubDispatch({ type: "jobDraft", job: event.job, plan: event.plan }),
         onDubQueueJobPlan: (event) => dubDispatch({ type: "jobPlan", job: event.job, plan: event.plan }),
+        onWaveformProgress: (event) =>
+          setReading((current) => {
+            if (event.percent >= 100) {
+              if (!(event.path in current)) return current;
+              const next = { ...current };
+              delete next[event.path];
+              return next;
+            }
+            return current[event.path] === event.percent ? current : { ...current, [event.path]: event.percent };
+          }),
         onDubQueueJobDone: (event) =>
           dubDispatch({
             type: "jobDone",
@@ -554,6 +586,10 @@ export default function Index() {
       jobs: jobs.map((job) => ({
         name: job.videoPath.replace(/^.*[\\/]/, ""),
         dubName: job.dubPath.replace(/^.*[\\/]/, ""),
+        videoPath: job.videoPath,
+        dubPath: job.dubPath,
+        videoTrack: job.videoTrack,
+        dubTrack: job.dubTrack,
       })),
     });
     dispatch({ type: "clearLogs" });
@@ -569,6 +605,7 @@ export default function Index() {
         mux: config.dubMux,
         language: config.dubMux && config.dubLanguage.trim() ? config.dubLanguage.trim() : null,
         fillUnmatched: config.dubFillUnmatched,
+        dubRate: config.dubRate,
         // The outputs are this app's own files, named after the dubs; a re-run
         // is meant to replace them.
         overwrite: true,
@@ -692,6 +729,101 @@ export default function Index() {
       toast.info("Stopping…");
     } catch {
       toast.error("Could not stop the run.");
+    }
+  }, []);
+
+  /** Hear a span of the plan as edited: a short excerpt of the picture with
+   *  the track the cuts would produce, rendered to a temporary file and
+   *  handed to the user's player. */
+  const handleEditPreview = useCallback(async (plan: DubSyncPlan, startS: number, endS: number) => {
+    try {
+      const excerpt = await api.renderDubPreview({ plan, startS, endS, what: "both" });
+      if (!excerpt) {
+        toast.error("The preview could not be rendered.");
+        return;
+      }
+      await api.openPath(excerpt.path);
+    } catch (error) {
+      toast.error("The preview could not be rendered.", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, []);
+
+  /** Write a finished job's track again from cuts placed by hand.
+   *
+   *  Same file, same format, same mux as the engine's own run, so the
+   *  edited track replaces the engine's; the write is staged, so stopping
+   *  it keeps the track that was there. The queue counts as running
+   *  meanwhile, since the engine takes one command at a time. */
+  const handleEditApply = useCallback(async (plan: DubSyncPlan) => {
+    const index = editingRef.current;
+    if (index === null) return;
+    const job = dubRef.current.jobs[index];
+    if (!job || job.status !== "done" || dubRef.current.status === "running") return;
+    const config = settingsRef.current;
+    const outputPath = job.output?.outputPath ?? null;
+    const mux = job.muxedPath !== null || config.dubMux;
+
+    dubDispatch({ type: "rerenderStart", job: index, plan });
+    dispatch({ type: "clearLogs" });
+    setAnnouncement({ message: `Writing ${job.name} again with the edited cuts.`, politeness: "polite" });
+    try {
+      const outcome = await api.startDubSync({
+        videoPath: plan.videoPath,
+        dubPath: plan.dubPath,
+        videoTrack: plan.videoTrack,
+        dubTrack: plan.dubTrack,
+        codec: (outputPath && codecOfPath(outputPath)) || config.dubCodec,
+        mux,
+        language: mux && config.dubLanguage.trim() ? config.dubLanguage.trim() : null,
+        fillUnmatched: config.dubFillUnmatched,
+        overwrite: true,
+        plan,
+        outputPath,
+        muxPath: job.muxedPath,
+      });
+      dubDispatch({
+        type: "rerenderDone",
+        outcome: {
+          job: index,
+          plan: outcome.plan ?? plan,
+          output: outcome.output ?? null,
+          verification: outcome.verification ?? null,
+          muxedPath: outcome.muxedPath ?? null,
+          cancelled: outcome.cancelled,
+          error: outcome.error ?? null,
+        },
+      });
+      if (outcome.cancelled) {
+        toast.info("Stopped; the track that was there is kept.");
+        setAnnouncement({ message: "Stopped; the track that was there is kept.", politeness: "polite" });
+      } else if (outcome.error || outcome.plan?.error) {
+        const message = outcome.error ?? outcome.plan?.error ?? "";
+        toast.error("The track could not be written", { description: message });
+        setAnnouncement({ message: `The track could not be written: ${message}`, politeness: "assertive" });
+        setShowConsole(true);
+      } else {
+        toast.success("The track was written with your cuts", {
+          action: outcome.output
+            ? {
+                label: "Show",
+                onClick: () => void api.revealPath(outcome.output!.outputPath).catch(() => undefined),
+              }
+            : undefined,
+        });
+        setAnnouncement({ message: "The track was written with your cuts.", politeness: "polite" });
+        setEditingJob(null);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      dubDispatch({
+        type: "rerenderDone",
+        outcome: { job: index, plan, output: null, verification: null, muxedPath: null, error: message },
+      });
+      toast.error("The track could not be written", { description: message });
+      setAnnouncement({ message: `The track could not be written: ${message}`, politeness: "assertive" });
+      setShowConsole(true);
     }
   }, []);
 
@@ -819,6 +951,8 @@ export default function Index() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // The waveform editor has its own keys; nothing here applies while it is open.
+      if (editingRef.current !== null) return;
       const target = event.target as HTMLElement | null;
       if (
         target &&
@@ -880,6 +1014,71 @@ export default function Index() {
   const dubsync = state.mode === "dubsync";
   const busy = state.status === "processing" || dub.status === "running";
   const hasResults = state.results.length > 0;
+
+  /** What the waveform strip at the top of the Dub sync tab shows: before a
+   *  run, the pairs as matched; from the moment the queue starts, its jobs,
+   *  each with the plan as it stands. */
+  const strip = useMemo((): {
+    pair: WaveformPair;
+    plan: DubSyncPlan | null;
+    status: { label: string; percent: number | null } | null;
+    choices: { name: string }[];
+    index: number;
+    job: number | null;
+  } | null => {
+    if (!dubsync || !desktop) return null;
+    if (dub.status !== "idle" && dub.jobs.length > 0) {
+      const index = Math.min(shownPair, dub.jobs.length - 1);
+      const job = dub.jobs[index];
+      if (!job.videoPath || !job.dubPath) return null;
+      const status =
+        job.status === "running"
+          ? { label: describeStage(job.stage), percent: job.percent }
+          : job.status === "queued"
+            ? { label: "Waiting for a worker", percent: null }
+            : job.status === "failed"
+              ? { label: "Could not be synced", percent: null }
+              : job.status === "cancelled"
+                ? { label: "Stopped", percent: null }
+                : null;
+      return {
+        pair: {
+          videoPath: job.videoPath,
+          dubPath: job.dubPath,
+          videoTrack: job.videoTrack,
+          dubTrack: job.dubTrack,
+          name: job.name,
+          dubName: job.dubName,
+        },
+        plan: job.plan ?? job.draft,
+        status,
+        choices: dub.jobs.map((j) => ({ name: j.name })),
+        index,
+        job: index,
+      };
+    }
+    const pairs = effectivePairing?.pairs ?? [];
+    if (pairs.length === 0) return null;
+    const index = Math.min(shownPair, pairs.length - 1);
+    const pair = pairs[index];
+    return {
+      pair: {
+        videoPath: pair.primaryPath,
+        dubPath: pair.secondaryPath,
+        videoTrack: trackChoices[pair.primaryPath] ?? pair.primaryTrack ?? 0,
+        dubTrack: trackChoices[pair.secondaryPath] ?? pair.secondaryTrack ?? 0,
+        name: pair.primaryName,
+        dubName: pair.secondaryName,
+      },
+      plan: null,
+      status: null,
+      choices: pairs.map((p) => ({ name: p.primaryName })),
+      index,
+      job: null,
+    };
+  }, [dubsync, desktop, dub, shownPair, effectivePairing, trackChoices]);
+
+  const buildWaveform = useCallback((path: string, track: number) => api.waveformBuild({ path, track }), []);
 
   /** Choose which audio stream of one file to compare. Index 0 is the file's
    *  first stream, which is the default, so it is stored as an absence. */
@@ -969,6 +1168,29 @@ export default function Index() {
         />
 
         <main className="flex min-w-0 flex-1 flex-col">
+          {strip && (
+            <DubWaveformStrip
+              pair={strip.pair}
+              plan={strip.plan}
+              status={strip.status}
+              choices={strip.choices}
+              index={strip.index}
+              onChoose={setShownPair}
+              onEdit={
+                strip.job !== null && dub.status !== "running" && dub.jobs[strip.job]?.status === "done" && strip.plan
+                  ? () => setEditingJob(strip.job)
+                  : undefined
+              }
+              playable={
+                strip.job !== null && dub.status !== "running" && dub.jobs[strip.job]?.status === "done" && !!strip.plan
+              }
+              fetchPeaks={api.waveformPeaks}
+              buildWaveform={buildWaveform}
+              renderDubPreview={api.renderDubPreview}
+              readPreviewBytes={api.readPreviewBytes}
+              reading={reading}
+            />
+          )}
           {dubsync ? (
             dub.status === "idle" ? (
               <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-[18px]">
@@ -986,7 +1208,7 @@ export default function Index() {
                     }
                     body={
                       state.dubScope === "movies"
-                        ? "Add the movies and their dubs. Each movie is matched to its own dub by filename, and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
+                        ? "Add the movies and their dubs. Each movie is matched to its own dub by filename — names that do not match pair by the order the files were listed — and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
                         : "Add the episodes and their dubs. Each one is matched to its own dub by season and episode number, and the queue is synced in parallel. Wherever a dub is missing a scene, that stretch of the original audio is put in at the same moment; wherever the dub exists, it is placed to the millisecond."
                     }
                   />
@@ -1016,6 +1238,9 @@ export default function Index() {
                 onReveal={(path) => void api.revealPath(path).catch(() => toast.error("That file no longer exists."))}
                 onOpen={(path) => void api.openPath(path).catch(() => toast.error("Could not open the file."))}
                 onOpenConsole={() => setShowConsole(true)}
+                onEdit={desktop ? setEditingJob : undefined}
+                shown={strip?.job ?? null}
+                onShow={setShownPair}
               />
             )
           ) : (
@@ -1177,6 +1402,27 @@ export default function Index() {
       />
 
       <UpdateDialog update={update} onDismiss={() => setUpdate(null)} />
+
+      {editingJob !== null && dub.jobs[editingJob]?.plan && (
+        <DubWaveformEditor
+          key={editingJob}
+          plan={dub.jobs[editingJob].plan!}
+          enginePlan={dub.jobs[editingJob].enginePlan}
+          fetchPeaks={api.waveformPeaks}
+          onPreview={handleEditPreview}
+          renderDubPreview={api.renderDubPreview}
+          readPreviewBytes={api.readPreviewBytes}
+          onApply={handleEditApply}
+          onStop={() => void handleCancel()}
+          onClose={() => setEditingJob(null)}
+          reading={reading}
+          busy={
+            dub.rerender?.job === editingJob
+              ? { percent: dub.jobs[editingJob].percent, stage: dub.jobs[editingJob].stage }
+              : null
+          }
+        />
+      )}
 
       <LiveAnnouncer announcement={announcement} />
     </div>

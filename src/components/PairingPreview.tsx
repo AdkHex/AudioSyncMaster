@@ -116,7 +116,15 @@ export const PairingPreview = memo(function PairingPreview({
                     )}
 
                     {manual && !isEditing && <Pill tone="success">by hand</Pill>}
-                    {pair.score < 1 && !manual && !isEditing && (
+                    {pair.method === "list order" && !manual && !isEditing && (
+                      <Pill
+                        tone="warning"
+                        title="The names did not match; paired by the order the files were listed"
+                      >
+                        by order
+                      </Pill>
+                    )}
+                    {pair.score < 1 && pair.score > 0 && !manual && !isEditing && (
                       <Pill
                         tone="warning"
                         title="Paired by filename similarity rather than an episode number"

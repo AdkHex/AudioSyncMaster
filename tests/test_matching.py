@@ -185,18 +185,56 @@ def test_match_movies_pairs_each_movie_with_its_own_dub():
             "Interstellar Hindi DD5.1 eac3"
         )
         assert all(p.method == "filename similarity" for p in report.pairs)
+        # Similarity is the only name-based method movies have, so a clean
+        # pairing does not nag.
+        assert report.warning is None, report.warning
 
 
-def test_match_movies_refuses_unrelated_names():
+def test_match_movies_pairs_unrelated_names_in_the_order_added():
+    """A dub named after its language, not its film ("Video" against
+    "Hindi"), is the normal case; the movies pair by list position rather
+    than refusing to pair."""
     with Folders(
-        ["Inception.mkv"],
-        ["Insidious Hindi.ac3"],
+        ["Inception.mkv", "Dune.mkv"],
+        ["Insidious Hindi.ac3", "Dune Hindi.ac3"],
     ) as f:
         videos = [os.path.join(f.primary, n) for n in os.listdir(f.primary)]
         dubs = [os.path.join(f.secondary, n) for n in os.listdir(f.secondary)]
         report = match_movies(videos, dubs)
-        assert report.pairs == [], f"paired unrelated movies: {report.pairs}"
-        assert report.warning, "no explanation for the empty pairing"
+        # Dune pairs by name; Inception, whose name no dub resembles, takes
+        # the dub its name could not place, in the order added.
+        by_video = {p.primary_name: p for p in report.pairs}
+        assert len(report.pairs) == 2, report
+        assert by_video["Dune.mkv"].secondary_name == "Dune Hindi.ac3"
+        assert by_video["Dune.mkv"].method == "filename similarity"
+        assert by_video["Inception.mkv"].secondary_name == "Insidious Hindi.ac3"
+        assert by_video["Inception.mkv"].method == "list order"
+        assert by_video["Inception.mkv"].score == 0.0
+        assert report.method == "filename similarity + list order"
+        # The pairs themselves say how they were made; no banner for
+        # movies, whose pairing is a guess in the normal run of things.
+        assert report.warning is None
+
+
+def test_match_movies_orders_entirely_unrelated_lists_and_reports_leftovers():
+    with Folders(
+        ["Alpha.mkv", "Bravo.mkv", "Charlie.mkv"],
+        ["One.ac3", "Two.ac3"],
+    ) as f:
+        # The app passes files in the order they were added; os.listdir's
+        # order is arbitrary, so build the lists explicitly.
+        videos = [os.path.join(f.primary, n) for n in ["Alpha.mkv", "Bravo.mkv", "Charlie.mkv"]]
+        dubs = [os.path.join(f.secondary, n) for n in ["One.ac3", "Two.ac3"]]
+        report = match_movies(videos, dubs)
+        by_video = {p.primary_name: p for p in report.pairs}
+        assert len(report.pairs) == 2, report
+        assert by_video["Alpha.mkv"].secondary_name == "One.ac3"
+        assert by_video["Bravo.mkv"].secondary_name == "Two.ac3"
+        assert all(p.method == "list order" for p in report.pairs)
+        assert report.method == "list order"
+        assert len(report.unmatched_primary) == 1
+        assert any(path.endswith("Charlie.mkv") for path in report.unmatched_primary)
+        assert report.warning is None
 
 
 def test_duplicate_keys_produce_warning():

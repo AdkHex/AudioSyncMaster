@@ -79,6 +79,7 @@ audio wherever it does not, crossfaded at every seam.
 ```sh
 python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3
 python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3 --codec eac3 --mux --lang hin
+python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3 --dub-rate 23.976
 python python/dubsync.py MOVIE.mkv MOVIE.hin.eac3 --plan-only
 python python/dubsync.py --from-plan MOVIE.hin.dubsynced.dubsync.json -o fixed.flac
 ```
@@ -114,8 +115,14 @@ trusted. When the video carries a frame rate, the dub's mastering rate is
 checked against it directly -- a 25fps-mastered dub on a 23.976fps video is
 played at 25/23.976 throughout, and the plan says so ("video 23.976 fps,
 dub mastered at 25 fps"); a dub at the video's own rate is confirmed, not
-assumed. Without metadata, the rate is still verified from the audio's
-symptoms. Then both tracks are reduced to onset envelopes, since the music
+assumed. The check is a 2 ms correlation over the first minutes at each
+candidate rate, which tells 24 from 23.976 (a millisecond a second) before
+the coarse pass, rather than after it has cut the drift into pieces. When
+the audio cannot confirm any rate -- too little shared bed in the opening
+minutes -- the plan says so ("not confirmed by the audio") and warns, and
+the rate can be declared: `--dub-rate 23.976` on the command line, or
+"The dub was mastered at" in the app's sidebar. Without metadata, the rate
+is still verified from the audio's symptoms. Then both tracks are reduced to onset envelopes, since the music
 and effects under a dub are the same stems as under the original even
 though the dialogue is not -- three envelopes each: the whole spectrum,
 the 30-250 Hz band (bass, footsteps, rumble) and the 4-8 kHz band
@@ -207,7 +214,9 @@ in with `--from-plan`.
 
 In the app, the **Dub sync** tab does the same thing, as a queue rather
 than a single pair. It opens on one of two scopes, chosen at the top of the
-sidebar: **Movies** pairs each video with its dub by filename; **Series**
+sidebar: **Movies** pairs each video with its dub by filename -- names
+that do not match pair by the order the files were listed, since a dub is
+often named after its language rather than its film -- and **Series**
 pairs a season by season and episode number. Drop a folder of movies (or
 episodes) on one side and the folder of dubs on the other -- any format
 ffmpeg reads, bare or inside an MP4/MKV -- and the pairing preview shows
@@ -224,6 +233,71 @@ reached through the bridge's `dubsyncBatch` command, which reports
 `dubsyncJobStart`, `dubsyncJobProgress`, `dubsyncJobPlan`, `dubsyncJobDone`
 and `dubsyncBatchDone` (the single-pair `dubsync` command, with
 `dubsyncProgress`, `dubsyncPlan` and `dubsyncDone`, remains for one-offs).
+
+### The waveforms
+
+As soon as a video and its dub are paired, both are drawn at the top of
+the tab the way an audio editor draws them: the video's own audio in
+green, the dub in orange, each lane split per channel (a stereo downmix
+for 5.1), each pixel column the lowest and highest sample in its span as
+a filled shape with the RMS inside it in a lighter tone. Each lane is
+scaled to the loudest thing in sight, with the factor in its corner, so a
+quiet scene reads as clearly as a loud one at any zoom (Ctrl/⌘-wheel
+zooms, Shift-drag pans). Before the sync the dub sits at the video's
+start, as loaded, so the mismatch is there to see. Press Sync and the dub
+lane is redrawn from each draft the engine sends -- the coarse stretches
+first, then the measured ones, then the cuts placed, then the gaps
+searched -- with the stage and its progress over the ruler, so the track
+can be watched being laid onto the picture; when it is done, the plan the
+track was written from stays up. The engine reads each file once into a
+cache of 256-sample peaks (about 15 s for a two-hour track, with
+progress), and serves any span from it; a view finer than that decodes
+exactly the span in sight. The waveforms come from an engine process of
+their own, so a running sync never holds the picture up.
+
+### Editing the cuts
+
+Once a track is written, **Edit the cuts** opens the same drawing at full
+size, with the cuts as handles: each stretch of dub drawn from where the
+plan reads it, each fill drawn as the original, hatched. When a stretch
+sits where it should its transients sit under the original's; where they
+do not, drag the cut (the grip on the dub lane) to where the scene really
+changes, or select the stretch and move it with ← → (a frame; Shift for
+10 ms; `,` and `.` for 1 ms) or type the offset; double-click (or S at
+the cursor) splits a stretch, a piece can be merged with its neighbour of
+the same kind, and any piece can be switched between the dub and the
+original. **Write the track with these cuts** writes the same file again, in
+the same format and with the same mux, from the edited plan, and checks it
+against the video like any other run; the write is staged and renamed
+onto the previous track, so stopping it or a failure keeps the track that
+was there. Pieces placed by hand are noted `set by hand`; the engine's
+plan stays a click away. The bridge serves the waveforms through
+`waveformBuild` and `waveformPeaks` (with `waveformProgress` while a file
+is first read), the drafts as `dubsyncDraft` / `dubsyncJobDraft`, the
+excerpts through `dubsyncPreview`; the edited plan goes back through
+`dubsync` with `plan` set, which renders it instead of analysing.
+
+### Playing it back
+
+Nothing plays until asked. **Play video** opens an in-app player beside
+the piece list (the strip has the same button): a muted 480p excerpt of
+the 30 s around the cursor, with the synced track as it will be written
+playing under it, locked to the picture's clock -- what you hear is
+bit-for-bit what the written file will contain, and the picture's excerpt
+starts on a frame, so the two are frame-accurate against each other.
+**Play sample** is the same without the picture. A red playhead runs
+along both lanes (the view scrolls to keep it in sight), and clicking the
+waveform seeks -- inside the loaded window directly, outside it by loading
+a new window around the click. Space plays and pauses; `[` and `]` step a
+frame; a loop toggle repeats the 4 s around where it was switched on. A
+Dub / Original / Both switch compares the two tracks -- Both puts the
+original in the left ear and the dub in the right. Any edit re-renders
+only the sound, after a moment, and swaps it in at the current position,
+so the picture never restarts while you nudge a cut and listen again.
+Escape closes the player; **Open in player** keeps the old behaviour of
+handing a rendered excerpt to the system player. The excerpts are served
+by the waveform engine process, so playing them never holds up a running
+sync.
 
 ## Reviewing results
 
@@ -280,7 +354,8 @@ audiosync/          Analysis engine (Python)
   mux.py            Applying corrections
   batch.py          Bounded-concurrency batch runner
   dubsync.py        Dub sync: which stretch of a cut dub belongs where
-  dubrender.py      Writing the synced track, and muxing it
+  dubrender.py      Writing the synced track, muxing it, previewing a span
+  waveform.py       Waveform peaks: per-channel min/max/RMS, cached per file
 python/bridge.py    Line-delimited JSON bridge to the desktop host
 python/dubsync.py   Dub sync command line
 src-tauri/          Tauri host (Rust)

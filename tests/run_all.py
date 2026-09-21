@@ -1,6 +1,8 @@
 """Run every Python test module and report a combined result.
 
-Usage:  python tests/run_all.py
+Usage:  python tests/run_all.py                    every module
+        python tests/run_all.py test_editor        one module
+        python tests/run_all.py test_editor peaks  one module, tests whose name contains "peaks"
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ MODULES = [
     "test_mux",
     "test_bridge",
     "test_dubsync",
+    "test_editor",
 ]
 
 
@@ -60,14 +63,18 @@ def main() -> int:
 
     total = failed = 0
     started = time.monotonic()
+    only_module = sys.argv[1] if len(sys.argv) > 1 else None
+    only_test = sys.argv[2] if len(sys.argv) > 2 else ""
 
     for name in MODULES:
+        if only_module and name != only_module:
+            continue
         print(f"{name}")
         module = load(name)
         tests = [
             value
             for key, value in sorted(vars(module).items())
-            if key.startswith("test_") and callable(value)
+            if key.startswith("test_") and callable(value) and only_test in key
         ]
         for test in tests:
             total += 1

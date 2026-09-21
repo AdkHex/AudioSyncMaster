@@ -91,6 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"seconds beyond the duration difference to search for the dub (default {DEFAULT_SEARCH_S:.0f})")
     parser.add_argument("--speed", type=_speed, default="auto",
                         help="playback speed of the dub relative to the video: auto, a number, or a ratio like 25/23.976")
+    parser.add_argument("--dub-rate", type=float, default=None, metavar="FPS",
+                        help="the frame rate the dub was mastered at (e.g. 23.976); with the video's own rate this fixes the speed")
     parser.add_argument("--fill-gain", type=_gain, default="auto",
                         help="dB applied to the original where it fills a gap: auto (match levels) or a number")
     parser.add_argument("--fill-unmatched", action="store_true",
@@ -145,7 +147,7 @@ def main(argv=None) -> int:
             plan = plan_dubsync(
                 args.video, args.dub,
                 video_track=args.video_track, dub_track=args.dub_track,
-                search_s=args.search, speed=args.speed, fill_gain_db=args.fill_gain,
+                search_s=args.search, speed=args.speed, dub_rate=args.dub_rate, fill_gain_db=args.fill_gain,
                 keep_unmatched_dub=not args.fill_unmatched,
                 progress=progress, log=say, envelopes=envelopes,
             )

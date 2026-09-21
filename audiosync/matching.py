@@ -223,13 +223,19 @@ def match_movies(
     secondaries: Sequence[str],
     fuzzy_threshold: float = 0.55,
 ) -> MatchReport:
-    """Pair movies against their dubs by filename similarity alone.
+    """Pair movies against their dubs.
 
-    Movies carry no episode numbers, and their names routinely differ beyond
-    the release-metadata noise ("Interstellar" against "Interstellar Hindi
-    DD5.1"), so the episode passes are skipped and the similarity bar sits
-    lower than the series fallback. The pairing preview is the place to
-    catch what that lets through.
+    Movies carry no episode numbers, and their names routinely differ
+    beyond release-metadata noise -- a dub is as often named after its
+    language as its film ("Video.mkv" against "Hindi.mp4") -- so
+    similarity is tried first, and whatever it could not pair is paired
+    in the order the files were listed. A movie list and a dub list are
+    usually built side by side, so position is the best guess a name can
+    no longer make. Either guess is shown in the pairing preview, which
+    is the place to correct it: similarity pairs carry their percentage,
+    and order pairs a "by order" mark. No banner, since for movies both
+    methods are guesses in the normal run of things rather than a
+    problem to flag.
     """
     primaries = list(primaries)
     secondaries = list(secondaries)
@@ -237,7 +243,46 @@ def match_movies(
         return MatchReport([], [], secondaries, "none", None, "No media files on the video side")
     if not secondaries:
         return MatchReport([], primaries, [], "none", None, "No media files on the dub side")
-    return _match_by_similarity(primaries, secondaries, fuzzy_threshold)
+
+    by_similarity = _match_by_similarity(primaries, secondaries, fuzzy_threshold)
+    pairs = list(by_similarity.pairs)
+    matched_primary = {pair.primary_path for pair in pairs}
+    used_secondary = {pair.secondary_path for pair in pairs}
+
+    # The leftovers, in the order the user added them: the movies the
+    # titles could not place against the dubs the titles could not place.
+    left_primary = [p for p in primaries if p not in matched_primary]
+    left_secondary = [s for s in secondaries if s not in used_secondary]
+    for primary_path, secondary_path in zip(left_primary, left_secondary):
+        pairs.append(
+            MatchPair(
+                primary_path,
+                secondary_path,
+                _normalize_title(primary_path),
+                "list order",
+                0.0,
+            )
+        )
+
+    pairs.sort(key=lambda pair: pair.primary_path)
+    matched_primary = {pair.primary_path for pair in pairs}
+    used_secondary = {pair.secondary_path for pair in pairs}
+
+    ordered = any(pair.method == "list order" for pair in pairs)
+    if ordered and by_similarity.pairs:
+        method = "filename similarity + list order"
+    elif ordered:
+        method = "list order"
+    else:
+        method = "filename similarity"
+    return MatchReport(
+        pairs=pairs,
+        unmatched_primary=[p for p in primaries if p not in matched_primary],
+        unmatched_secondary=[s for s in secondaries if s not in used_secondary],
+        method=method,
+        pattern_used=None,
+        warning=None,
+    )
 
 
 def _match_by_pattern(

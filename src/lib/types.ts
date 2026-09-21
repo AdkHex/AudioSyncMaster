@@ -234,7 +234,20 @@ export interface AppSettings {
    *  still the dub, and swapping it for the original puts the wrong language
    *  over a scene that had the right one. */
   dubFillUnmatched: boolean;
+  /** The frame rate the dub was mastered at, when the user knows it; with
+   *  the video's own rate this fixes the speed and the audio is not asked.
+   *  Null lets the engine find it from the audio. */
+  dubRate: number | null;
 }
+
+/** Mastering rates a dub can be declared to have, for the override. */
+export const DUB_RATES: { value: number; label: string }[] = [
+  { value: 23.976, label: "23.976 fps" },
+  { value: 24, label: "24 fps" },
+  { value: 25, label: "25 fps" },
+  { value: 29.97, label: "29.97 fps" },
+  { value: 30, label: "30 fps" },
+];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   windowSeconds: 45,
@@ -248,6 +261,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dubMux: false,
   dubLanguage: "",
   dubFillUnmatched: false,
+  dubRate: null,
 };
 
 // ------------------------------------------------------------------ dub sync
@@ -282,6 +296,11 @@ export interface DubSyncPlan {
   /** The rate the dub was mastered at, implied by speed against videoFps.
    *  Equals videoFps when the rates match. */
   dubRate: number | null;
+  /** Whether the audio bore the rate verdict out. False when neither the
+   *  files' own speed nor any standard conversion correlated sharply, so
+   *  the rate was assumed; null when the video carried no frame rate or the
+   *  speed was set by hand. Absent from plans made before it was added. */
+  rateConfirmed?: boolean | null;
   /** Gain applied to the original where it fills a gap. */
   fillGainDb: number;
   videoDurationS: number;
@@ -345,6 +364,13 @@ export interface DubSyncRequest {
   language: string | null;
   fillUnmatched: boolean;
   overwrite: boolean;
+  /** The dub's mastering frame rate, when declared; null asks the audio. */
+  dubRate?: number | null;
+  /** A plan to render as it is -- edited in the app -- instead of analysing. */
+  plan?: DubSyncPlan;
+  /** Where to write the track; the engine's default beside the video otherwise. */
+  outputPath?: string | null;
+  muxPath?: string | null;
 }
 
 /** One pair of the dub sync queue: an episode or a movie and its own dub. */
@@ -365,6 +391,8 @@ export interface DubSyncBatchRequest {
   fillUnmatched: boolean;
   overwrite: boolean;
   maxWorkers: number;
+  /** The dub's mastering frame rate, when declared; null asks the audio. */
+  dubRate?: number | null;
 }
 
 /** The engine's final word on one job of a batch. */
@@ -426,6 +454,11 @@ export const UNMATCHED_FILL_NOTE = "dub audible but did not correlate; replaced"
 export function isUnmatchedFill(segment: DubSegment): boolean {
   return segment.kind === "fill" && segment.note === UNMATCHED_FILL_NOTE;
 }
+
+/** The note on a fill in a draft plan: the engine has not placed dub there
+ *  yet -- a stage of the analysis, not a verdict. One string, shared with
+ *  the engine. */
+export const DRAFT_NOTE = "not placed yet";
 
 /** A frame rate as people write it, from the exact rational the engine reports.
  *

@@ -14,9 +14,9 @@ const single = outcomeFixture as unknown as DubSyncOutcome;
 
 const noop = () => undefined;
 
-function render(state: DubQueueState): string {
+function render(state: DubQueueState, onEdit?: (job: number) => void): string {
   return renderToStaticMarkup(
-    <DubQueuePanel state={state} onReveal={noop} onOpen={noop} onOpenConsole={noop} />,
+    <DubQueuePanel state={state} onReveal={noop} onOpen={noop} onOpenConsole={noop} onEdit={onEdit} />,
   );
 }
 
@@ -94,6 +94,19 @@ describe("DubQueuePanel", () => {
     expect(html).toContain("5.1 · 48 kHz");
     expect(html).toContain("Show in folder");
     expect(html).toContain("Done");
+  });
+
+  it("offers to edit the cuts of a finished job, but not while the queue is still running", () => {
+    let state = queued([["a.mkv", "a.ac3"], ["b.mkv", "b.ac3"]]);
+    state = dubQueueReducer(state, { type: "jobDone", outcome: outcome(0) });
+    // Job 1 is still queued: the engine is busy, the button is there but disabled.
+    expect(render(state, noop)).toMatch(/<button[^>]*disabled=""[^>]*>[^<]*<svg[^>]*>[\s\S]*?<\/svg>Edit the cuts/);
+    state = dubQueueReducer(state, { type: "batchDone", outcomes: [outcome(0), outcome(1)], cancelled: false });
+    const html = render(state, noop);
+    expect(html).toContain("Edit the cuts");
+    expect(html).not.toMatch(/disabled=""[^>]*title="Available once/);
+    // Without the desktop there is nothing to edit with.
+    expect(render(state)).toMatch(/disabled=""[^>]*title="Available once the queue has finished"/);
   });
 
   it("shows every job of a season, each with its own state", () => {

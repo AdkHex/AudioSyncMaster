@@ -1,9 +1,9 @@
-import { AlertTriangle, CheckCircle2, FolderOpen, Info, Play, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FolderOpen, Info, Play, Scissors, XCircle } from "lucide-react";
 import { memo } from "react";
 
 import { Spinner, Tag } from "@/components/ui";
 import { cx } from "@/lib/cx";
-import { describePlan, type DubQueueJob, type DubQueueState } from "@/lib/dubQueueReducer";
+import { describePlan, describeStage, type DubQueueJob, type DubQueueState } from "@/lib/dubQueueReducer";
 import {
   AUDIBLE_MS,
   formatClock,
@@ -19,6 +19,12 @@ interface DubQueuePanelProps {
   onReveal: (path: string) => void;
   onOpen: (path: string) => void;
   onOpenConsole: () => void;
+  /** Open the waveform editor on a finished job's cuts. Absent when editing
+   *  is not possible (the browser preview). */
+  onEdit?: (job: number) => void;
+  /** The job whose waveforms are shown above the queue, and how to change it. */
+  shown?: number | null;
+  onShow?: (job: number) => void;
 }
 
 /** Column template shared by the header and every row, so they cannot drift. */
@@ -37,6 +43,9 @@ export const DubQueuePanel = memo(function DubQueuePanel({
   onReveal,
   onOpen,
   onOpenConsole,
+  onEdit,
+  shown = null,
+  onShow,
 }: DubQueuePanelProps) {
   const { status, jobs, done } = state;
   const running = status === "running";
@@ -104,6 +113,11 @@ export const DubQueuePanel = memo(function DubQueuePanel({
               onReveal={onReveal}
               onOpen={onOpen}
               onOpenConsole={onOpenConsole}
+              // The engine takes one command at a time, so the cuts can be
+              // edited only once the queue has stopped.
+              onEdit={onEdit && !running ? onEdit : undefined}
+              shown={shown === job.id}
+              onShow={onShow}
             />
           ))}
         </ul>
@@ -119,18 +133,29 @@ function JobRow({
   onReveal,
   onOpen,
   onOpenConsole,
+  onEdit,
+  shown = false,
+  onShow,
 }: {
   job: DubQueueJob;
   expanded: boolean;
   onReveal: (path: string) => void;
   onOpen: (path: string) => void;
   onOpenConsole: () => void;
+  onEdit?: (job: number) => void;
+  shown?: boolean;
+  onShow?: (job: number) => void;
 }) {
   const { status, output, verification, plan } = job;
   const finished = status === "done" || status === "failed" || status === "cancelled";
   return (
-    <li className="border-b border-border">
-      <div className="flex items-center gap-3 px-[18px] py-3">
+    <li className={cx("border-b border-border", shown && "bg-primary/[0.04]")}>
+      {/* The row's head picks the job whose waveforms are shown above. */}
+      <div
+        className={cx("flex items-center gap-3 px-[18px] py-3", onShow && "cursor-pointer")}
+        onClick={onShow ? () => onShow(job.id) : undefined}
+        aria-current={shown ? "true" : undefined}
+      >
         <StatusIcon status={job.status} />
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-medium" title={job.name}>
@@ -217,6 +242,18 @@ function JobRow({
             <FolderOpen className="h-3 w-3" aria-hidden />
             Show in folder
           </button>
+          {plan && plan.segments.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onEdit?.(job.id)}
+              disabled={!onEdit}
+              title={onEdit ? "See both waveforms and move the cuts by hand" : "Available once the queue has finished"}
+              className="flex items-center gap-1.5 rounded-[7px] border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            >
+              <Scissors className="h-3 w-3" aria-hidden />
+              Edit the cuts
+            </button>
+          )}
         </div>
       )}
 
@@ -313,27 +350,6 @@ function statusLabel(status: DubQueueJob["status"]): string {
 }
 
 /** What the engine is doing, in the user's terms. */
-function describeStage(stage: string | null): string {
-  if (!stage) return "Starting…";
-  const known: Record<string, string> = {
-    starting: "Starting…",
-    probing: "Reading the files",
-    "reading the original": "Reading the original",
-    "reading the dub": "Reading the dub",
-    "checking the frame rate": "Checking the frame rate",
-    "finding the offsets": "Finding where the dub belongs",
-    "placing the cuts": "Placing the cuts",
-    "measuring the offsets": "Measuring each stretch",
-    "looking for dub inside the gaps": "Looking for dub inside the gaps",
-    "assembling the plan": "Assembling the plan",
-    "checking the finished track": "Checking the finished track against the video",
-    muxing: "Adding the track to a copy of the video",
-    done: "Done",
-  };
-  if (known[stage]) return known[stage];
-  if (stage.startsWith("writing ")) return `Writing ${stage.slice("writing ".length)}`;
-  return stage[0].toUpperCase() + stage.slice(1);
-}
 
 function basename(path: string): string {
   return path.replace(/^.*[\\/]/, "");

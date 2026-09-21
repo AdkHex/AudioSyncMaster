@@ -770,11 +770,13 @@ def test_the_report_names_every_piece():
 if __name__ == "__main__":
     # Write one synthetic pair to a directory, for a caller that is not Python:
     # the Rust end-to-end test builds its input this way. Usage:
-    #     python tests/test_dubsync.py DIR
-    # writes DIR/org.wav and DIR/dub.wav and prints the expected stretches.
+    #     python tests/test_dubsync.py DIR [MINUTES]
+    # writes DIR/org.wav and DIR/dub.wav and prints the expected stretches:
+    # the five-minute pair with four cuts, or, given MINUTES, one long
+    # uncut pair (for a run that must still be in flight when it is stopped).
     target = sys.argv[1] if len(sys.argv) > 1 else None
     if not target:
-        print("usage: test_dubsync.py DIR", file=sys.stderr)
+        print("usage: test_dubsync.py DIR [MINUTES]", file=sys.stderr)
         sys.exit(2)
     os.makedirs(target, exist_ok=True)
 
@@ -782,7 +784,14 @@ if __name__ == "__main__":
         def path(self, name):  # noqa: D401 - mirrors Workspace
             return os.path.join(target, name)
 
-    for stretch in build_pair(_Dir(), 300, [("extra", 0.8), ("org", 0, 60), ("org", 75, 180), ("org", 182.5, 240), ("extra", 5), ("org", 240, 297)]):
+    if len(sys.argv) > 2:
+        minutes = float(sys.argv[2])
+        pieces = [("extra", 1.5), ("org", 0, 60 * minutes)]
+        total = int(60 * minutes)
+    else:
+        pieces = [("extra", 0.8), ("org", 0, 60), ("org", 75, 180), ("org", 182.5, 240), ("extra", 5), ("org", 240, 297)]
+        total = 300
+    for stretch in build_pair(_Dir(), total, pieces):
         print("%.1f-%.1f %+.3f" % stretch)
 
 
@@ -951,3 +960,60 @@ def test_a_small_step_inside_an_uncorrelated_passage_is_bridged():
         cut = dubs[0].end_s
         assert 85.0 <= cut <= 145.0, plan.describe()
         assert abs(dubs[1].start_s - (cut + 1.0)) < 0.02, plan.describe()
+
+
+def test_a_23976_dub_on_a_24fps_video_is_confirmed_before_the_coarse_pass():
+    """The common case: a 24 fps video and a dub timed to a 23.976 master.
+    The rate check that runs first, on the video's own frame rate, must
+    settle it -- at 2 ms a thirty-second window at the wrong speed is
+    smeared by fifteen frames -- and say so, without leaving it to the
+    drift estimate, which needs minutes of matched dub that a heavily cut
+    dub may not have."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 400, [("org", 0, 120), ("org", 130, 250), ("org", 262, 400)])
+        dub, _ = sf.read(ws.path("dub.wav"), dtype="float32")
+        sf.write(ws.path("dub.wav"), _resample_linear(dub, 1001.0 / 1000.0), SR)
+        mkv = _mkv_with_fps(ws, "24")
+        logs = []
+        plan = plan_dubsync(mkv, ws.path("dub.wav"), progress=lambda p, s: None, log=logs.append)
+        assert plan.error is None, plan.error
+        assert abs(plan.speed - 1000.0 / 1001.0) < 1e-6, f"speed {plan.speed:.6f}\n" + "\n".join(logs)
+        assert plan.rate_confirmed is True, plan.describe()
+        assert plan.dub_rate is not None and abs(plan.dub_rate - 24000.0 / 1001.0) < 1e-3, plan.dub_rate
+        assert any("dub runs at 0.999001x" in line for line in logs), "\n".join(logs)
+        # Settled by the rate check, before the coarse pass ran.
+        settled = next(i for i, line in enumerate(logs) if "dub runs at" in line)
+        coarse = next(i for i, line in enumerate(logs) if line.startswith("coarse pass"))
+        assert settled < coarse, "\n".join(logs)
+        assert "dub mastered at 23.976 fps" in plan.describe(), plan.describe()
+        _check(plan, expected, edge_tolerance_s=0.5, offset_tolerance_s=0.01)
+
+
+def test_an_unconfirmed_rate_is_said_so():
+    """A dub that shares nothing measurable with the video at any standard
+    speed: the plan cannot know its rate, and must say that rather than
+    quietly assume the video's."""
+    with Workspace() as ws:
+        build_pair(ws, 300, [("extra", 300)])
+        mkv = _mkv_with_fps(ws, "24")
+        plan = plan_dubsync(mkv, ws.path("dub.wav"), progress=lambda p, s: None, log=lambda m: None)
+        assert plan.rate_confirmed is False, plan.describe()
+        assert any("frame rate could not be confirmed" in w for w in plan.warnings), plan.warnings
+
+
+def test_the_dub_rate_set_by_hand_fixes_the_speed():
+    """The user knows the dub was mastered at 23.976 fps: with the video's
+    24 fps that is the speed, and the audio is not asked."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 300, [("org", 0, 300)])
+        dub, _ = sf.read(ws.path("dub.wav"), dtype="float32")
+        sf.write(ws.path("dub.wav"), _resample_linear(dub, 1001.0 / 1000.0), SR)
+        mkv = _mkv_with_fps(ws, "24")
+        logs = []
+        plan = plan_dubsync(mkv, ws.path("dub.wav"), dub_rate=23.976, progress=lambda p, s: None, log=logs.append)
+        assert plan.error is None, plan.error
+        assert abs(plan.speed - 1000.0 / 1001.0) < 1e-9, plan.speed
+        assert plan.rate_confirmed is None, plan.rate_confirmed
+        assert any("said to be mastered at 23.976 fps" in line for line in logs), "\n".join(logs)
+        assert not any("checking the dub's rate" in line for line in logs), "\n".join(logs)
+        _check(plan, expected, edge_tolerance_s=0.5, offset_tolerance_s=0.01)

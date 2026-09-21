@@ -24,10 +24,14 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// The process's input, shared so a cancel can be written while a command
+/// holds the bridge for the length of a run.
+type Writer = Arc<Mutex<ChildStdin>>;
+
 /// A running bridge process plus the channel its stdout reader publishes to.
 pub struct Bridge {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Writer,
     events: Receiver<Value>,
 }
 
@@ -101,23 +105,18 @@ impl Bridge {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Arc::new(Mutex::new(stdin)),
             events: receiver,
         })
     }
 
     /// Send one command. Commands are newline-delimited JSON.
     pub fn send(&mut self, payload: &Value) -> Result<(), String> {
-        let line = format!(
-            "{}\n",
-            serde_json::to_string(payload).map_err(|e| e.to_string())?
-        );
-        self.stdin
-            .write_all(line.as_bytes())
-            .map_err(|err| format!("Lost connection to the analysis engine: {err}"))?;
-        self.stdin
-            .flush()
-            .map_err(|err| format!("Lost connection to the analysis engine: {err}"))
+        write_line(&self.stdin, payload)
+    }
+
+    fn writer(&self) -> Writer {
+        self.stdin.clone()
     }
 
     pub fn events(&self) -> &Receiver<Value> {
@@ -128,7 +127,9 @@ impl Bridge {
     pub fn shutdown(&mut self) {
         let _ = self.send(&serde_json::json!({ "command": "shutdown" }));
         // Closing stdin ends the read loop even if the command was not read.
-        let _ = self.stdin.flush();
+        if let Ok(mut stdin) = self.stdin.lock() {
+            let _ = stdin.flush();
+        }
         match self.child.try_wait() {
             Ok(Some(_)) => {}
             _ => {
@@ -145,9 +146,34 @@ impl Drop for Bridge {
     }
 }
 
+fn write_line(stdin: &Writer, payload: &Value) -> Result<(), String> {
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(payload).map_err(|e| e.to_string())?
+    );
+    let mut stdin = stdin
+        .lock()
+        .map_err(|_| "Engine input lock poisoned".to_string())?;
+    stdin
+        .write_all(line.as_bytes())
+        .map_err(|err| format!("Lost connection to the analysis engine: {err}"))?;
+    stdin
+        .flush()
+        .map_err(|err| format!("Lost connection to the analysis engine: {err}"))
+}
+
 /// Shared handle so commands from different invocations reach the same process.
+///
+/// Commands take the bridge one at a time, for as long as they run; the
+/// process's input is kept beside it so a cancel can still be written while
+/// a run holds the bridge. It used to go through the same lock, which meant
+/// Stop waited for the run it was meant to stop -- and, sent from the main
+/// thread, froze the window until then.
 #[derive(Clone, Default)]
-pub struct BridgeHandle(Arc<Mutex<Option<Bridge>>>);
+pub struct BridgeHandle {
+    bridge: Arc<Mutex<Option<Bridge>>>,
+    writer: Arc<Mutex<Option<Writer>>>,
+}
 
 impl BridgeHandle {
     /// Run `action` against a live bridge, starting one if necessary.
@@ -157,11 +183,13 @@ impl BridgeHandle {
         action: impl FnOnce(&mut Bridge) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut guard = self
-            .0
+            .bridge
             .lock()
             .map_err(|_| "Engine lock poisoned".to_string())?;
         if guard.is_none() {
-            *guard = Some(Bridge::spawn(app)?);
+            let bridge = Bridge::spawn(app)?;
+            self.set_writer(Some(bridge.writer()));
+            *guard = Some(bridge);
         }
         let bridge = guard.as_mut().expect("bridge present");
         match action(bridge) {
@@ -171,32 +199,48 @@ impl BridgeHandle {
                 // the next call starts a healthy one rather than reusing a
                 // half-broken pipe.
                 *guard = None;
+                self.set_writer(None);
                 Err(err)
             }
+        }
+    }
+
+    fn set_writer(&self, writer: Option<Writer>) {
+        if let Ok(mut guard) = self.writer.lock() {
+            *guard = writer;
         }
     }
 
     /// Send a command without waiting for a reply. Used for cancellation, which
     /// must not queue behind the run it is trying to stop.
     pub fn send_now(&self, payload: &Value) -> Result<(), String> {
-        let mut guard = self
-            .0
+        let writer = self
+            .writer
             .lock()
-            .map_err(|_| "Engine lock poisoned".to_string())?;
-        match guard.as_mut() {
-            Some(bridge) => bridge.send(payload),
+            .map_err(|_| "Engine lock poisoned".to_string())?
+            .clone();
+        match writer {
+            Some(writer) => write_line(&writer, payload),
             None => Err("The analysis engine is not running".to_string()),
         }
     }
 
     pub fn shutdown(&self) {
-        if let Ok(mut guard) = self.0.lock() {
+        self.set_writer(None);
+        if let Ok(mut guard) = self.bridge.lock() {
             if let Some(mut bridge) = guard.take() {
                 bridge.shutdown();
             }
         }
     }
 }
+
+/// A second engine process for the waveform views, so the picture keeps
+/// following the mouse while the first is busy syncing: the engine takes
+/// one command at a time, and a two-hour sync would otherwise hold every
+/// scroll and zoom until it was done.
+#[derive(Clone, Default)]
+pub struct WaveformBridge(pub BridgeHandle);
 
 /// Locate the sidecar, falling back to a development Python interpreter.
 fn build_command<R: Runtime>(app: &AppHandle<R>) -> Result<Command, String> {

@@ -5,24 +5,31 @@ that works and what you have to do.
 
 ## Shipping an update
 
-1. Bump the version in **all four** of:
-   - `package.json` — CI tags the release from this one
-   - `src-tauri/tauri.conf.json` — the app compares its own version from here
-   - `src-tauri/Cargo.toml` — the crate version
-   - `RELEASING.md` is not versioned, but the lockfiles are: run
-     `npm install --package-lock-only` and update the `audiosyncmaster` entry
-     in `src-tauri/Cargo.lock`, or `npm ci` and the Rust build will fail on a
-     lockfile mismatch.
+Push to `main`. That is the whole process.
 
-   The frontend reads its displayed version from `package.json` at build time
-   (see `define` in `vite.config.ts`), so Settings → About needs no edit.
-2. Push to `main`.
+CI decides the version number itself (`scripts/decide-version.cjs`):
 
-That is the whole process. CI then:
+- an ordinary push is released as the **next minor version** after the latest
+  release -- v2.10.0 released, push, v2.11.0 released -- with nothing in the
+  repo edited by hand;
+- a push that changes nothing that ships (only `*.md`, `tests/`, `.github/`,
+  `scripts/`, the dev helpers or the mockups) is tested and **not** released,
+  and the run says so in a notice; installed apps are not bothered for a
+  README change;
+- if you want a particular number -- a major bump, a patch -- set it yourself
+  with `node scripts/set-version.cjs 3.0.0` and push: a repo version newer
+  than the latest release is used as it is.
 
-- skips the build jobs, with a notice, if `v<version>` is already released --
-  the push is still tested, but nothing is published and installed apps do
-  not see it; refuses outright if the version sources disagree
+The build jobs write the decided version into every file that carries one
+(`package.json`, both lockfiles, `src-tauri/tauri.conf.json`,
+`src-tauri/Cargo.toml`) before they install or build, so the app's own
+version, the tag and `latest.json` agree. The files in the repo are not
+changed by CI: `package.json` may say 2.10.0 while the latest release is
+v2.13.0, and that is expected -- the releases page is the record of what
+shipped, and Settings → About in the app shows the built version.
+
+CI then:
+
 - runs the full test suite on Linux, Windows and macOS, plus Rust checks
 - builds installers for all three platforms
 - signs the updater artifacts with the private key held in GitHub Secrets
@@ -30,22 +37,19 @@ That is the whole process. CI then:
 - fails loudly if `latest.json` is missing, since that would silently strand
   every installed app
 
-Nothing is published unless the tests pass first.
+Nothing is published unless the tests pass first. Two pushes close together
+do not race for the same number: the second run waits for the first.
 
-### Pushing without a bump
+### Why the number is not in the commit
 
-Pushing without bumping used to be the quiet failure mode: the run went green,
-the commit looked shipped, and nothing reached users — `tauri-action` will not
-overwrite a tag that already exists, so it published nothing and said so only
-in the log. That is why the `Version is releasable` job exists. It runs first
-and takes seconds. When the version is already released it marks the run with
-a notice naming the files to edit and the **Build** jobs are skipped -- visibly,
-in the run graph -- while the tests still run. That is the normal outcome for
-a work-in-progress push, not an error: a release is made by bumping the
-version on purpose.
-
-To ship a commit you pushed without a bump, bump and push again; there is
-nothing to clean up, because the earlier run published nothing.
+The old process was to bump five files by hand before pushing, and the
+failure mode was forgetting: the run went green, the commit looked shipped,
+and nothing reached users (`tauri-action` will not overwrite a tag that
+exists). A later version skipped the build with a notice instead, which was
+honest but still shipped nothing. Deciding the number in CI removes the step
+that was being forgotten. Committing the bump back from CI would work too,
+but every release would then move `main` under you and the next push would
+be rejected until you pulled; leaving the repo's number alone avoids that.
 
 ## What users see
 

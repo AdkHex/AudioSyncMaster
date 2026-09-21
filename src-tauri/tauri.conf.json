@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:8081 tauri://localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: https://asset.localhost; font-src 'self' data:;"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:8081 tauri://localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: https://asset.localhost; font-src 'self' data:; media-src 'self' blob:;"
     }
   },
   "plugins": {

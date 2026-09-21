@@ -10,45 +10,56 @@ on:
 permissions:
   contents: write
 
+# Two pushes in quick succession must not race each other to the same
+# release number: the second waits for the first to finish (and is the only
+# one queued -- an older waiting run is dropped, since the newest commit is
+# the one to ship). Pull-request runs are simply superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # A push whose version already has a tag would build green and publish
-  # nothing, because tauri-action will not overwrite an existing release. The
-  # commit would then look shipped -- green check, successful run -- while
-  # every installed app stays on the old build. So a push is only published
-  # when its version is new; otherwise it is tested and the build jobs are
-  # skipped, visibly, with a notice saying why. Skipping is not a failure:
-  # most pushes are work in progress, and a release is made by bumping the
-  # version, deliberately. Failing every unbumped push, as this once did, only
-  # taught the eye to ignore red.
+  # Nobody bumps the version by hand any more; this job decides it. A push to
+  # main is released as the next minor version after the latest release --
+  # unless the repo's own version is newer, in which case that number was
+  # chosen on purpose and is used as it is -- and only when something that
+  # ships has changed since the last release: a push that touches docs, tests
+  # or this workflow alone is tested and not published. The number decided
+  # here is written into every version file by the build job before it
+  # builds, so the app, the tag and latest.json all agree.
+  #
+  # Before this, a push whose version was already released was skipped with a
+  # notice, and before that it built green and published nothing, because
+  # tauri-action will not overwrite an existing release -- so the commit
+  # looked shipped while every installed app stayed on the old build. Both
+  # depended on someone remembering to bump five files.
   version:
-    name: Version is releasable
+    name: Decide the version
     runs-on: ubuntu-24.04
     outputs:
-      value: ${{ steps.read.outputs.value }}
-      release: ${{ steps.released.outputs.release }}
+      value: ${{ steps.decide.outputs.value }}
+      release: ${{ steps.decide.outputs.release }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Read version
         id: read
         run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: Check whether the version is already released
-        id: released
+      - name: Decide which version this push is released as
+        id: decide
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="v${{ steps.read.outputs.value }}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::notice::$tag is already released, so this push is tested but not \
-          published and installed apps will not see it. To release it, bump the version \
-          in package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml and both \
-          lockfiles."
-            echo "release=false" >> "$GITHUB_OUTPUT"
+          node scripts/decide-version.cjs
+          reason="$(grep '^reason=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          if grep -q '^release=true' "$GITHUB_OUTPUT"; then
+            echo "::notice::Releasing: $reason"
           else
-            echo "$tag has not been released yet; this push will be published."
-            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Not releasing: $reason"
           fi
 
       - name: Check every version source agrees
@@ -155,7 +166,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
   build:
-    name: Build (${{ matrix.os }})
+    name: Build v${{ needs.version.outputs.value }} (${{ matrix.os }})
     needs: [version, test, rust]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
@@ -171,6 +182,13 @@ jobs:
             triple: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
+
+      # The version decided above, written into every file that carries one
+      # before anything is installed or built: npm ci and the app read it
+      # from here, and the tag is taken from it below.
+      - name: Set the release version
+        shell: bash
+        run: node scripts/set-version.cjs "${{ needs.version.outputs.value }}"
 
       - uses: actions/setup-node@v7
         with:

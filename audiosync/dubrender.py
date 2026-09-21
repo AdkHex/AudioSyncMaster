@@ -22,6 +22,7 @@ minute can accumulate.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -31,7 +32,7 @@ from typing import Callable, Iterator, List, Optional
 import numpy as np
 
 from .codecdelay import codec_delay_ms
-from .dubsync import DubSyncPlan
+from .dubsync import DubSyncPlan, Segment
 from .media import (
     SEEK_PREROLL_S,
     CancellationToken,
@@ -63,6 +64,10 @@ CODECS = {
     "eac3": {"args": ["-c:a", "eac3"], "ext": ".eac3", "bitrate": {1: "192k", 2: "256k", 6: "768k", 8: "1024k"}},
     "opus": {"args": ["-c:a", "libopus"], "ext": ".opus", "bitrate": {1: "96k", 2: "160k", 6: "384k", 8: "512k"}},
 }
+
+# 16-bit WAV for the app's playback excerpts, which every webview decodes;
+# not offered as an output codec, so it lives outside CODECS.
+_EXCERPT_WAV = {"args": ["-c:a", "pcm_s16le"], "ext": ".wav"}
 
 ProgressFn = Callable[[int, str], None]
 
@@ -271,7 +276,7 @@ class _Encoder:
 
     def __init__(self, output_path: str, rate: int, channels: int, codec: str,
                  bitrate: Optional[str], token: Optional[CancellationToken]) -> None:
-        spec = CODECS[codec]
+        spec = _EXCERPT_WAV if codec == "wav16" else CODECS[codec]
         command = [
             ffmpeg_path(), "-nostdin", "-v", "error", "-y",
             "-f", "f32le", "-ar", str(rate), "-ac", str(channels), "-i", "-",
@@ -324,6 +329,13 @@ class _Encoder:
         _terminate(self.process)
 
 
+def _discard(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def render(
     plan: DubSyncPlan,
     output_path: str,
@@ -335,7 +347,7 @@ def render(
     """Write the track the plan describes."""
     options = options or RenderOptions()
     say = log or (lambda _m: None)
-    if options.codec not in CODECS:
+    if options.codec not in CODECS and options.codec != "wav16":
         raise MediaError(f"Unknown codec {options.codec!r}; choose from {', '.join(CODECS)}")
     if not plan.segments:
         raise MediaError("The plan has no segments to render")
@@ -378,7 +390,13 @@ def render(
         f"{options.xfade_s * 1000:.0f}ms crossfades"
     )
 
-    encoder = _Encoder(output_path, rate, channels, options.codec, options.bitrate, token)
+    # Written beside the output and renamed onto it at the end, so a write
+    # that is stopped or fails leaves whatever was there -- the previous
+    # track, when the cuts are being written again by hand -- untouched.
+    # The extension stays put: ffmpeg picks the container by it.
+    stem, ext = os.path.splitext(output_path)
+    staging = f"{stem}.part{ext}"
+    encoder = _Encoder(staging, rate, channels, options.codec, options.bitrate, token)
     clipped = 0
     written = 0
     to_skip = skip
@@ -470,10 +488,13 @@ def render(
         encoder.close()
     except BaseException:
         encoder.abort()
+        _discard(staging)
         raise
 
-    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+    if not os.path.isfile(staging) or os.path.getsize(staging) == 0:
+        _discard(staging)
         raise MediaError(f"ffmpeg reported success but produced no output for {output_path}")
+    os.replace(staging, output_path)
     result = RenderResult(
         output_path, rate, channels, written / rate, clipped,
         " ".join(shlex.quote(part) for part in encoder.command),
@@ -514,9 +535,210 @@ def mux(
         command.extend([f"-metadata:s:a:{new_index}", f"language={language}"])
     if title:
         command.extend([f"-metadata:s:a:{new_index}", f"title={title}"])
-    command.append(output_path)
+    # Staged and renamed like the track, so a stopped mux never leaves a
+    # truncated copy of the video where a good one was.
+    stem, ext = os.path.splitext(output_path)
+    staging = f"{stem}.part{ext}"
+    command.append(staging)
     from .media import _run  # noqa: WPS433 - shared subprocess handling
-    _run(command, ENCODE_TIMEOUT_S, token, what=f"mux {os.path.basename(output_path)}")
-    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+    try:
+        _run(command, ENCODE_TIMEOUT_S, token, what=f"mux {os.path.basename(output_path)}")
+    except BaseException:
+        _discard(staging)
+        raise
+    if not os.path.isfile(staging) or os.path.getsize(staging) == 0:
+        _discard(staging)
         raise MediaError(f"ffmpeg produced no output for {output_path}")
+    os.replace(staging, output_path)
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# A preview of a span: for the editor, to hear a cut before applying it
+# ---------------------------------------------------------------------------
+
+# How far a preview may reach: enough to hear a scene, short enough to be
+# ready in seconds.
+PREVIEW_MAX_S = 120.0
+
+
+def clip_plan(plan: DubSyncPlan, lo_s: float, hi_s: float) -> DubSyncPlan:
+    """The plan restricted to [lo_s, hi_s), on a timeline starting at 0.
+
+    Each piece keeps reading from where it read before -- its source moves
+    by exactly what was cut off its front -- so the clipped plan plays the
+    same audio the whole one plays across that span."""
+    lo_s = max(0.0, lo_s)
+    hi_s = min(plan.video_duration_s, hi_s)
+    pieces: List[Segment] = []
+    for segment in plan.segments:
+        start = max(segment.start_s, lo_s)
+        end = min(segment.end_s, hi_s)
+        if end - start <= 0.0:
+            continue
+        pieces.append(Segment(
+            segment.kind, start - lo_s, end - lo_s,
+            segment.source_start_s + (start - segment.start_s),
+            segment.offset_s, segment.match, segment.note, segment.uncertainty_s,
+        ))
+    clipped = DubSyncPlan(
+        plan.video_path, plan.dub_path, plan.video_track, plan.dub_track,
+        speed=plan.speed, fill_gain_db=plan.fill_gain_db,
+        video_duration_s=hi_s - lo_s, dub_duration_s=plan.dub_duration_s,
+        video_fps=plan.video_fps, dub_rate=plan.dub_rate, segments=pieces,
+    )
+    return clipped
+
+
+EXCERPT_KINDS = ("both", "audio", "picture", "original")
+# A cut is started this much before the frame it is meant to start on,
+# so the frame is unambiguously on the kept side of the seek point; the
+# picture is then this much late against the sound, which is nothing.
+FRAME_SEEK_SLACK_S = 0.0005
+
+
+def first_frame_offset(video_path: str, lo_s: float, token: Optional[CancellationToken] = None) -> float:
+    """How far past ``lo_s`` the first picture frame ffmpeg keeps after
+    seeking there sits, in seconds: between zero and one frame.
+
+    ffmpeg cuts accurately -- frames before the seek point are decoded
+    and dropped -- but it then starts the output's clock at the first
+    frame it kept, not at the seek point, so a cut that starts between
+    two frames comes out up to a frame early against sound cut at the
+    same instant. Knowing the offset, the cut can be started on the frame
+    itself instead.
+    """
+    from .media import _run  # noqa: WPS433 - shared subprocess handling
+
+    # The metadata filter prints only frames that carry metadata, so one
+    # entry is added to every frame first; the print goes to stdout.
+    command = [
+        ffmpeg_path(), "-nostdin", "-v", "error", "-ss", f"{lo_s:.6f}", "-i", video_path,
+        "-map", "0:v:0", "-frames:v", "1",
+        "-vf", "metadata=mode=add:key=first:value=1,metadata=print:file=-", "-f", "null", "-",
+    ]
+    out = _run(command, 600, token, what=f"find the first frame of {os.path.basename(video_path)}")
+    match = re.search(rb"pts_time:\s*(-?[0-9.]+)", out)
+    if not match:
+        raise MediaError(f"Could not find a picture frame at {lo_s:.3f}s in {os.path.basename(video_path)}")
+    return max(0.0, float(match.group(1)))
+
+
+def frame_aligned_start(video_path: str, lo_s: float, token: Optional[CancellationToken] = None) -> float:
+    """``lo_s`` moved forward onto the first picture frame at or after it
+    (less the seek slack), so a cut started there has that frame at its
+    time 0 and sound cut at the same instant lines up with it."""
+    offset = first_frame_offset(video_path, lo_s, token)
+    if offset <= FRAME_SEEK_SLACK_S:
+        return lo_s
+    return lo_s + offset - FRAME_SEEK_SLACK_S
+
+
+def excerpt(
+    plan: DubSyncPlan,
+    lo_s: float,
+    hi_s: float,
+    output_path: str,
+    what: str = "both",
+    token: Optional[CancellationToken] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> Tuple[str, float, float]:
+    """Render [lo_s, hi_s) of the plan as a small file to play. Returns the
+    path and the span actually cut, which for a picture starts on a frame.
+
+    ``what`` chooses the piece: ``audio`` is the synced track alone as a
+    16-bit WAV (what the written file will contain there, to the sample);
+    ``original`` is the video's own audio across the span, the same way,
+    for A/B against it; ``picture`` is a low-resolution copy of the
+    picture with no sound, for a player that carries its own; ``both`` is
+    the picture with the synced track under it, for an outside player.
+
+    Every piece is on one clock: its time 0 is the start returned. A cut
+    with a picture is moved onto the first frame at or after ``lo_s``
+    (see ``first_frame_offset``), so the frame at its time 0 is the frame
+    that was there; a player asking for the sound of the same span must
+    use the start returned here. No B-frames and a keyframe every half
+    second, so a player can step frame by frame without waiting.
+    """
+    if what not in EXCERPT_KINDS:
+        raise MediaError(f"Unknown excerpt {what!r}; choose from {', '.join(EXCERPT_KINDS)}")
+    if what in ("picture", "both"):
+        if not os.path.isfile(plan.video_path):
+            raise MediaError(f"Video not found: {plan.video_path}")
+        lo_s = frame_aligned_start(plan.video_path, lo_s, token)
+    hi_s = min(hi_s, lo_s + PREVIEW_MAX_S)
+    if hi_s - lo_s < 0.25:
+        raise MediaError("The preview span is too short")
+    root, _ext = os.path.splitext(output_path)
+    from .media import _run  # noqa: WPS433 - shared subprocess handling
+
+    if what == "picture":
+        if not os.path.isfile(plan.video_path):
+            raise MediaError(f"Video not found: {plan.video_path}")
+        command = [
+            ffmpeg_path(), "-nostdin", "-v", "error", "-y",
+            "-ss", f"{lo_s:.6f}", "-t", f"{hi_s - lo_s:.6f}", "-i", plan.video_path,
+            "-map", "0:v:0", "-an", "-dn", "-sn", "-map_chapters", "-1",
+            "-vf", "scale=-2:'min(480,ih)'",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
+            "-bf", "0", "-g", "12", "-keyint_min", "12", "-sc_threshold", "0",
+            "-movflags", "+faststart", output_path,
+        ]
+        _run(command, ENCODE_TIMEOUT_S, token, what=f"preview {os.path.basename(output_path)}")
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+            raise MediaError("ffmpeg produced no preview")
+        return output_path, lo_s, hi_s
+
+    if what == "original":
+        # The original across the span, at the dub's rate and channel count
+        # so it mixes with the synced excerpt as it is: one fill, no gain.
+        source = DubSyncPlan(
+            plan.video_path, plan.dub_path, plan.video_track, plan.dub_track,
+            speed=1.0, fill_gain_db=0.0, video_duration_s=hi_s - lo_s, dub_duration_s=plan.dub_duration_s,
+            segments=[Segment("fill", 0.0, hi_s - lo_s, lo_s)],
+        )
+        wav_path = root + ".wav"
+        render(source, wav_path, RenderOptions(codec="wav16"), token=token, log=log)
+        return wav_path, lo_s, hi_s
+
+    clipped = clip_plan(plan, lo_s, hi_s)
+    if not clipped.segments:
+        raise MediaError("Nothing to preview in that span")
+    wav_path = root + ".wav"
+    render(clipped, wav_path, RenderOptions(codec="wav16"), token=token, log=log)
+    if what == "audio":
+        return wav_path, lo_s, hi_s
+    command = [
+        ffmpeg_path(), "-nostdin", "-v", "error", "-y",
+        "-ss", f"{lo_s:.6f}", "-t", f"{hi_s - lo_s:.6f}", "-i", plan.video_path,
+        "-i", wav_path,
+        "-map", "0:v:0", "-map", "1:a:0", "-dn", "-sn", "-map_chapters", "-1",
+        "-vf", "scale=-2:'min(480,ih)'",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", "-shortest", output_path,
+    ]
+    _run(command, ENCODE_TIMEOUT_S, token, what=f"preview {os.path.basename(output_path)}")
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+        raise MediaError("ffmpeg produced no preview")
+    try:
+        os.remove(wav_path)
+    except OSError:
+        pass
+    return output_path, lo_s, hi_s
+
+
+def preview_span(
+    plan: DubSyncPlan,
+    lo_s: float,
+    hi_s: float,
+    output_path: str,
+    with_video: bool = True,
+    token: Optional[CancellationToken] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Render [lo_s, hi_s) of the plan as a small file to play: the synced
+    audio alone as a WAV, or laid under a low-resolution copy of the
+    picture as an MP4. See ``excerpt``."""
+    path, _lo, _hi = excerpt(plan, lo_s, hi_s, output_path, "both" if with_video else "audio", token, log)
+    return path
