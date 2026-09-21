@@ -359,3 +359,21 @@ jobs:
           done
           echo "::error::latest.json missing from $tag - installed apps will not see this update"
           exit 1
+
+  # The three builds above publish to one release, each merging its own
+  # entry into latest.json. A build that fails leaves a release the other
+  # platforms got and that one never will, and nothing in the build jobs
+  # can see it -- so this runs after all of them, failed ones included, and
+  # says which platform is missing and how the next push completes it.
+  complete:
+    name: Confirm the release is complete
+    needs: [version, build]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Every platform is offered the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/check-release.cjs "v${{ needs.version.outputs.value }}"

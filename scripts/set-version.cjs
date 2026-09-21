@@ -13,6 +13,12 @@
 // app compares against latest.json when it looks for updates; Cargo.toml is
 // the crate; and both lockfiles record the root package's version, so `npm
 // ci` and a locked cargo build refuse a mismatch.
+//
+// Line endings are whatever the checkout has: Git for Windows checks out
+// with CRLF, and the Windows build runs this on that. Every match here
+// accepts either ending and every write keeps the file's own, so the only
+// thing that changes is the number. (The first release under this script
+// failed on Windows alone because the Cargo.lock match wanted a bare LF.)
 const fs = require("fs");
 const path = require("path");
 
@@ -28,9 +34,14 @@ function json(name, edit) {
   const text = fs.readFileSync(file(name), "utf8");
   const data = JSON.parse(text);
   edit(data);
-  // Keep the file's own indentation and trailing newline.
-  const indent = (text.match(/^(\s+)"/m) || [, "  "])[1];
-  fs.writeFileSync(file(name), JSON.stringify(data, null, indent) + (text.endsWith("\n") ? "\n" : ""));
+  // Keep the file's own indentation, line endings and trailing newline. The
+  // indent is the run of blanks that starts a quoted line; matching it with
+  // \s would take the newline itself on a CRLF file and double-space the
+  // whole lockfile.
+  const eol = text.includes("\r\n") ? "\r\n" : "\n";
+  const indent = (text.match(/^([ \t]+)"/m) || [, "  "])[1];
+  const body = JSON.stringify(data, null, indent).replace(/\n/g, eol);
+  fs.writeFileSync(file(name), body + (text.endsWith("\n") ? eol : ""));
 }
 
 json("package.json", (p) => { p.version = version; });
@@ -48,7 +59,8 @@ fs.writeFileSync(
   cargo.replace(/^(\[package\][^[]*?^version\s*=\s*")[^"]+(")/ms, `$1${version}$2`),
 );
 const lock = fs.readFileSync(file("src-tauri/Cargo.lock"), "utf8");
-const entry = new RegExp(`(\\[\\[package\\]\\]\\nname = "${crate}"\\nversion = ")[^"]+(")`);
+const literal = crate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const entry = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${literal}"\\r?\\nversion = ")[^"]+(")`);
 if (!entry.test(lock)) throw new Error(`src-tauri/Cargo.lock: no entry for ${crate}`);
 fs.writeFileSync(file("src-tauri/Cargo.lock"), lock.replace(entry, `$1${version}$2`));
 

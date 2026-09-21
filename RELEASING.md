@@ -36,9 +36,29 @@ CI then:
 - publishes a release tagged `v<version>` with a `latest.json` manifest
 - fails loudly if `latest.json` is missing, since that would silently strand
   every installed app
+- confirms, once every build has finished, that the release offers an
+  update to all three platforms (`scripts/check-release.cjs`)
 
 Nothing is published unless the tests pass first. Two pushes close together
 do not race for the same number: the second run waits for the first.
+
+### When one platform's build fails
+
+The three builds publish to the same release, so a build that fails leaves
+a release the other two platforms got and that one never will -- its apps
+are simply never offered it (the updater reads `latest.json`, which then
+has no entry for them). The run is red and the last job names the missing
+platform. To recover, fix whatever failed and push: while **nothing that
+ships** has changed since the incomplete release, the push is released as
+the **same version again** and the missing build joins it (`tauri-action`
+adds to an existing release and merges the platform into `latest.json`).
+Once something shipped has changed, the next minor is released instead and
+supersedes it, which reaches the stranded platform just the same.
+
+This happened on v2.11.0: the Windows build failed in `set-version.cjs`,
+which matched `Cargo.lock` with a bare LF while Git for Windows checks out
+with CRLF. The script now accepts either and writes each file back with
+its own line endings.
 
 ### Why the number is not in the commit
 
