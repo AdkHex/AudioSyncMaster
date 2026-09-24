@@ -16,6 +16,15 @@
  *  the cut editor, which owns the plan and the keys and tells this
  *  component what to draw and what the pointer did. Peaks come from the
  *  engine per visible span and are kept.
+ *
+ *  Getting around is the same everywhere: drag to scroll, the wheel or two
+ *  fingers to scroll, Ctrl/⌘-wheel or a pinch to zoom about the pointer,
+ *  and a bar under the lanes with the whole film on it and the view as a
+ *  box to click or drag. A press that does not travel is a click, and
+ *  places the cursor. In the editor a cut is grabbed before anything else,
+ *  and Alt/Option-dragging a stretch of dub slides it under the original.
+ *  Where the editor knows the picture's own cuts (shot changes), they are
+ *  ticks on the ruler, and a cut dragged near one lands on it.
  */
 
 import {
@@ -32,7 +41,28 @@ import { cx } from "@/lib/cx";
 import type { WaveformPeaks, WaveformRequest } from "@/lib/api";
 import { segmentAt } from "@/lib/dubPlanEdit";
 import { DRAFT_NOTE, formatClock, type DubSyncPlan } from "@/lib/types";
-import { clampView, followCursor, MIN_VIEW_S, peaksKey, tickStep, visibleRequests, type View } from "@/lib/waveformView";
+import {
+  centreViewAt,
+  clampView,
+  followCursor,
+  isDrag,
+  MIN_VIEW_S,
+  overviewBox,
+  overviewDragView,
+  overviewHit,
+  overviewT,
+  overviewX,
+  panView,
+  peaksKey,
+  slipOffsetDelta,
+  snapToCuts,
+  tickStep,
+  visibleRequests,
+  wheelDeltaPx,
+  wheelZoomFactor,
+  zoomAround,
+  type View,
+} from "@/lib/waveformView";
 
 export interface WaveformStatus {
   /** What the engine is doing to this pair, shown over the ruler. */
@@ -67,7 +97,18 @@ export interface DubWaveformViewProps {
   onBoundaryDrag?: (boundary: number, timeS: number) => void;
   onBoundaryDragEnd?: () => void;
   onSplitAt?: (timeS: number) => void;
+  /** Alt/Option-drag on a stretch of dub slips it: `onSlipStart` once the
+   *  press becomes a drag, then `onSlip` with the change to the stretch's
+   *  offset since the press (in seconds, to the millisecond; dragging the
+   *  sound right lowers the offset), then `onSlipEnd` on release. Editable
+   *  views only; without `onSlip` an Alt-drag pans like any other. */
+  onSlipStart?: (index: number) => void;
+  onSlip?: (index: number, offsetDeltaS: number) => void;
+  onSlipEnd?: () => void;
   onViewChange?: (view: View) => void;
+  /** The picture's cuts (shot changes) in the view, in order: ticks on the
+   *  ruler, and where a dragged cut snaps to unless Alt/Option is held. */
+  shotCuts?: readonly number[] | null;
   laneHeight?: number;
   status?: WaveformStatus | null;
   /** Files the engine is reading for the first time: path to percent. */
@@ -77,8 +118,12 @@ export interface DubWaveformViewProps {
 
 /** Pixels around a cut within which the pointer grabs it. */
 const HANDLE_PX = 6;
+/** Pixels around a picture cut on the ruler within which it is named. */
+const SHOT_HOVER_PX = 4;
 const RULER_H = 20;
 const LANE_GAP = 4;
+/** The overview bar under the lanes: the whole film, the view as a box. */
+const OVERVIEW_H = 14;
 /** The quietest a lane is ever scaled up from: a floor of -34 dBFS, so
  *  silence stays flat rather than blowing up into noise. */
 const GAIN_FLOOR = 0.02;
@@ -92,12 +137,21 @@ const DUB = { bg: "#3a2a15", peak: "#e8a33a", rms: "#f7dfb3", zero: "#7d5c2a", t
 const FILL = { peak: "#8f9088", rms: "#cfd0c8", hatch: "rgba(232, 163, 58, 0.28)", text: "#e0b06a" };
 const DRAFT = { peak: "#5d5f5a", rms: "#8c8e88", hatch: "rgba(255, 255, 255, 0.10)", text: "#a0a29c" };
 
-interface Drag {
-  kind: "boundary" | "pan";
-  boundary?: number;
-  startX?: number;
-  startView?: View;
-}
+/** What the pointer is doing. A press is undecided until it travels past
+ *  the drag threshold (then it pans, or slips a stretch when it began with
+ *  Alt on one) or is released (then it was a click). A cut is grabbed at
+ *  once, as is a Shift- or middle-button press, which always pans. */
+type Drag =
+  | { kind: "press"; startX: number; startY: number; startView: View; slip: number | null }
+  | { kind: "pan"; startX: number; startView: View }
+  | { kind: "boundary"; boundary: number }
+  | { kind: "slip"; index: number; startX: number; startView: View; startOffsetS: number }
+  | { kind: "overview"; startX: number; startView: View };
+
+/** WebKit's pinch, which is how WKWebView (the Tauri window on macOS)
+ *  reports a trackpad pinch instead of Chromium's Ctrl-wheel. Not in the
+ *  DOM typings, since no other engine has it. */
+type GestureEventLike = Event & { scale?: number; clientX?: number };
 
 export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformViewProps>(function DubWaveformView(
   {
@@ -113,7 +167,11 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
     onBoundaryDrag,
     onBoundaryDragEnd,
     onSplitAt,
+    onSlipStart,
+    onSlip,
+    onSlipEnd,
     onViewChange,
+    shotCuts = null,
     laneHeight = 96,
     status = null,
     reading,
@@ -127,23 +185,50 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
   const [peaks, setPeaks] = useState<Map<string, WaveformPeaks | null>>(new Map());
   const [loading, setLoading] = useState(0);
   const [hoverBoundary, setHoverBoundary] = useState<number | null>(null);
-  const [drag, setDrag] = useState<Drag | null>(null);
+  const [hoverSlip, setHoverSlip] = useState(false);
+  const [hoverBox, setHoverBox] = useState(false);
+  // The picture cut named by the canvas's tooltip, and the one a dragged
+  // cut has snapped to.
+  const [hoverShot, setHoverShot] = useState<number | null>(null);
+  const [snappedShot, setSnappedShot] = useState<number | null>(null);
+  const [drag, setDragState] = useState<Drag | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overviewRef = useRef<HTMLCanvasElement>(null);
   const pendingRef = useRef<Set<string>>(new Set());
   const mountedRef = useRef(true);
   const viewRef = useRef(view);
   viewRef.current = view;
+  // The pointer handlers read the gesture from a ref, not from state:
+  // several pointer moves can arrive before React renders the first one's
+  // update, and each must see what the one before it decided, or a press
+  // would become a drag (and start a slip) more than once.
+  const dragRef = useRef<Drag | null>(null);
+  const setDrag = useCallback((next: Drag | null) => {
+    dragRef.current = next;
+    setDragState(next);
+  }, []);
 
   const setView = useCallback(
     (next: View) => {
       const clamped = clampView(next, duration);
+      // Straight into the ref too: wheel events come faster than renders,
+      // and each must build on the last, not on the view last drawn.
+      viewRef.current = clamped;
       setViewState(clamped);
       onViewChange?.(clamped);
     },
     [duration, onViewChange],
   );
+
+  // The native wheel and pinch listeners are attached once; they read
+  // what they need from here.
+  const widthRef = useRef(800);
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+  const setViewRef = useRef(setView);
+  setViewRef.current = setView;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -193,6 +278,8 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
   );
 
   // -------------------------------------------------------------------- size
+
+  widthRef.current = width;
 
   useEffect(() => {
     const element = containerRef.current;
@@ -470,13 +557,21 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
       }
       const a = Math.max(s.startS, view.startS);
       const b = Math.min(s.endS, view.endS);
-      if (b - a > 0) {
+      const offsetLabel = (offset: number) => `${offset >= 0 ? "+" : ""}${offset.toFixed(3)}s`;
+      if (drag?.kind === "slip" && drag.index === index && b - a > 0) {
+        // The stretch being slipped: its offset as it moves and how far it
+        // has moved, always shown, bright, so the hand can stop on a number.
+        const offset = s.offsetS ?? 0;
+        const moved = offset - drag.startOffsetS;
+        const text = `${offsetLabel(offset)}  (${moved >= 0 ? "+" : "−"}${Math.abs(moved).toFixed(3)})`;
+        badge(text, Math.min(Math.max(xOf(a) + 4, 4), Math.max(4, width - ctx.measureText(text).width - 12)), dubTop + laneHeight - 15, "#ffffff");
+      } else if (b - a > 0) {
         const label =
           s.kind === "fill"
             ? s.note === DRAFT_NOTE
               ? "not placed yet"
               : "original"
-            : `${(s.offsetS ?? 0) >= 0 ? "+" : ""}${(s.offsetS ?? 0).toFixed(3)}s`;
+            : offsetLabel(s.offsetS ?? 0);
         // Only where it fits inside its own piece.
         if (ctx.measureText(label).width + 16 < xOf(b) - xOf(a)) {
           badge(label, xOf(a) + 4, dubTop + laneHeight - 15, s.kind === "fill" ? (s.note === DRAFT_NOTE ? DRAFT.text : FILL.text) : DUB.text);
@@ -551,6 +646,53 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
     }
   }, [plan, view, width, height, laneHeight, originalTop, dubTop, peaks, requests, selected, cursorS, hoverBoundary, drag, editable, status, reading, xOf]);
 
+  // ---------------------------------------------------------------- overview
+
+  useEffect(() => {
+    const canvas = overviewRef.current;
+    if (!canvas) return;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(OVERVIEW_H * ratio);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${OVERVIEW_H}px`;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, OVERVIEW_H);
+    ctx.fillStyle = "#1c1d1b";
+    ctx.fillRect(0, 0, width, OVERVIEW_H);
+
+    // Every piece of the plan at the bar's scale: dub orange, the original
+    // grey, what the engine has not placed yet dimmer still. A piece is
+    // never drawn thinner than a pixel, so short ones do not vanish.
+    for (const s of plan.segments) {
+      const x0 = overviewX(s.startS, duration, width);
+      const x1 = Math.max(x0 + 1, overviewX(s.endS, duration, width));
+      ctx.fillStyle =
+        s.kind === "dub" ? "rgba(232, 163, 58, 0.65)" : s.note === DRAFT_NOTE ? "rgba(143, 144, 136, 0.22)" : "rgba(143, 144, 136, 0.55)";
+      ctx.fillRect(x0, 3, x1 - x0, OVERVIEW_H - 6);
+    }
+
+    if (cursorS !== null) {
+      const x = Math.round(overviewX(cursorS, duration, width)) + 0.5;
+      ctx.strokeStyle = "rgba(255, 80, 80, 0.95)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, OVERVIEW_H);
+      ctx.stroke();
+    }
+
+    const box = overviewBox(view, duration, width);
+    const active = hoverBox || drag?.kind === "overview";
+    ctx.fillStyle = active ? "rgba(255, 255, 255, 0.16)" : "rgba(255, 255, 255, 0.10)";
+    ctx.fillRect(box.x0, 0, box.x1 - box.x0, OVERVIEW_H);
+    ctx.strokeStyle = active ? "#ffffff" : "rgba(255, 255, 255, 0.8)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(Math.round(box.x0) + 0.5, 0.5, Math.max(1, Math.round(box.x1 - box.x0) - 1), OVERVIEW_H - 1);
+  }, [plan, view, width, duration, cursorS, hoverBox, drag]);
+
   // ---------------------------------------------------------------- pointer
 
   const boundaryNear = useCallback(
@@ -570,12 +712,41 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
     [editable, plan, xOf],
   );
 
-  const localX = (event: React.PointerEvent | React.MouseEvent | React.WheelEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
+  /** The stretch of dub an Alt-press at `x` would slip, if any. */
+  const slipTarget = useCallback(
+    (x: number): number | null => {
+      if (!editable || !onSlip) return null;
+      const index = segmentAt(plan, tOf(x));
+      return index !== null && plan.segments[index].kind === "dub" ? index : null;
+    },
+    [editable, onSlip, plan, tOf],
+  );
+
+  const localX = (event: { clientX: number }, canvas: HTMLCanvasElement | null = canvasRef.current) => {
+    const rect = canvas?.getBoundingClientRect();
     return rect ? event.clientX - rect.left : 0;
+  };
+  const localY = (event: { clientY: number }) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return rect ? event.clientY - rect.top : 0;
+  };
+
+  /** The picture cut under a point of the ruler, if any. */
+  const shotNear = (x: number, y: number): number | null => {
+    if (!shotCuts || y < 0 || y > RULER_H) return null;
+    const at = tOf(x);
+    const t = snapToCuts(at, shotCuts, width / (view.endS - view.startS), SHOT_HOVER_PX);
+    return t !== at || shotCuts.includes(t) ? t : null;
+  };
+
+  const release = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    // The primary button and the middle one; the right one is left to the
+    // context menu.
+    if (event.button !== 0 && event.button !== 1) return;
     const x = localX(event);
     event.currentTarget.setPointerCapture(event.pointerId);
     if (event.button === 1 || event.shiftKey) {
@@ -589,29 +760,69 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
       onSelect?.(boundary + 1);
       return;
     }
-    const t = Math.min(Math.max(tOf(x), 0), duration);
-    onCursor?.(t);
-    onSelect?.(segmentAt(plan, t));
+    // Undecided until it moves or is released: nothing happens yet, so a
+    // drag that scrolls does not first move the cursor to where it began.
+    setDrag({ kind: "press", startX: x, startY: event.clientY, startView: view, slip: event.altKey ? slipTarget(x) : null });
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const x = localX(event);
-    if (drag?.kind === "boundary" && drag.boundary !== undefined) {
-      onBoundaryDrag?.(drag.boundary, tOf(x));
+    const current = dragRef.current;
+    if (current === null) {
+      setHoverBoundary(boundaryNear(x));
+      setHoverSlip(event.altKey && slipTarget(x) !== null);
+      setHoverShot(shotNear(x, localY(event)));
       return;
     }
-    if (drag?.kind === "pan" && drag.startX !== undefined && drag.startView) {
-      const dt = ((drag.startX - x) / width) * (drag.startView.endS - drag.startView.startS);
-      setView({ startS: drag.startView.startS + dt, endS: drag.startView.endS + dt });
-      return;
+    switch (current.kind) {
+      case "boundary": {
+        // Onto the picture's cut when it is near, unless Alt/Option is held.
+        const t = tOf(x);
+        const snapped = shotCuts && !event.altKey ? snapToCuts(t, shotCuts, width / (view.endS - view.startS)) : t;
+        setSnappedShot(snapped !== t ? snapped : null);
+        onBoundaryDrag?.(current.boundary, snapped);
+        return;
+      }
+      case "press": {
+        if (!isDrag(x - current.startX, event.clientY - current.startY)) return;
+        const delta = x - current.startX;
+        if (current.slip !== null) {
+          const index = current.slip;
+          onSlipStart?.(index);
+          onSelect?.(index);
+          setDrag({ kind: "slip", index, startX: current.startX, startView: current.startView, startOffsetS: plan.segments[index].offsetS ?? 0 });
+          onSlip?.(index, slipOffsetDelta(delta, current.startView, width));
+        } else {
+          setDrag({ kind: "pan", startX: current.startX, startView: current.startView });
+          setView(panView(current.startView, delta, width));
+        }
+        return;
+      }
+      case "pan":
+        setView(panView(current.startView, x - current.startX, width));
+        return;
+      case "slip":
+        onSlip?.(current.index, slipOffsetDelta(x - current.startX, current.startView, width));
+        return;
+      default:
+        return;
     }
-    setHoverBoundary(boundaryNear(x));
   };
 
-  const onPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    event.currentTarget.releasePointerCapture(event.pointerId);
-    if (drag?.kind === "boundary") onBoundaryDragEnd?.();
+  const endGesture = (event: React.PointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
+    release(event);
+    const current = dragRef.current;
     setDrag(null);
+    setSnappedShot(null);
+    if (current === null) return;
+    if (current.kind === "boundary") onBoundaryDragEnd?.();
+    else if (current.kind === "slip") onSlipEnd?.();
+    else if (current.kind === "press" && !cancelled) {
+      // A press that never became a drag is a click, where it was pressed.
+      const t = Math.min(Math.max(tOf(current.startX), 0), duration);
+      onCursor?.(t);
+      onSelect?.(segmentAt(plan, t));
+    }
   };
 
   const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -619,36 +830,171 @@ export const DubWaveformView = forwardRef<DubWaveformViewHandle, DubWaveformView
     onSplitAt?.(tOf(localX(event)));
   };
 
-  const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
-    const x = localX(event);
-    if (event.ctrlKey || event.metaKey) {
-      const factor = event.deltaY > 0 ? 1.25 : 0.8;
-      const at = tOf(x);
-      const length = Math.min(duration, Math.max(MIN_VIEW_S, (view.endS - view.startS) * factor));
-      const share = (at - view.startS) / (view.endS - view.startS);
-      setView({ startS: at - share * length, endS: at - share * length + length });
-    } else {
-      const delta = (event.deltaX || event.deltaY) / width;
-      const length = view.endS - view.startS;
-      setView({ startS: view.startS + delta * length * 0.6, endS: view.endS + delta * length * 0.6 });
+  // The overview: a press on the box grabs it; a press anywhere else
+  // centres the view there first and then grabs it, so a click jumps and
+  // a click-and-drag jumps and keeps going.
+  const onOverviewDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.button !== 0) return;
+    const x = localX(event, overviewRef.current);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    let start = view;
+    if (!overviewHit(x, overviewBox(view, duration, width))) {
+      start = centreViewAt(view, overviewT(x, duration, width), duration);
+      setView(start);
     }
+    setDrag({ kind: "overview", startX: x, startView: start });
   };
+
+  const onOverviewMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const x = localX(event, overviewRef.current);
+    const current = dragRef.current;
+    if (current?.kind === "overview") {
+      setView(overviewDragView(current.startView, x - current.startX, duration, width));
+      return;
+    }
+    if (current === null) setHoverBox(overviewHit(x, overviewBox(view, duration, width)));
+  };
+
+  const onOverviewUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    release(event);
+    if (dragRef.current?.kind === "overview") setDrag(null);
+  };
+
+  // ------------------------------------------------------------ wheel, pinch
+
+  // Native listeners, not React's: React attaches wheel listeners as
+  // passive, so its handler cannot stop the page scrolling under the
+  // waveform while the waveform scrolls too. These are attached once and
+  // read the view, width and length from refs.
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    // A WebKit pinch in progress: the view and the instant it started on.
+    let pinch: { view: View; atS: number } | null = null;
+
+    /** The instant a zoom holds still: the one under the pointer on the
+     *  lanes, the middle of the view anywhere else (the overview bar). */
+    const anchorAt = (clientX: number | undefined, target: EventTarget | null) => {
+      const current = viewRef.current;
+      const canvas = canvasRef.current;
+      if (canvas && target === canvas && clientX !== undefined && Number.isFinite(clientX)) {
+        const x = clientX - canvas.getBoundingClientRect().left;
+        return current.startS + (x / Math.max(1, widthRef.current)) * (current.endS - current.startS);
+      }
+      return (current.startS + current.endS) / 2;
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const current = viewRef.current;
+      if (event.ctrlKey || event.metaKey) {
+        // WebKit may send a Ctrl-wheel alongside its own pinch events; the
+        // pinch already zooms.
+        if (pinch) return;
+        const factor = wheelZoomFactor(event.deltaY, event.deltaMode);
+        setViewRef.current(zoomAround(current, anchorAt(event.clientX, event.target), factor, durationRef.current));
+        return;
+      }
+      // Whichever way the wheel or the fingers mostly went: a two-finger
+      // swipe sideways, a plain wheel, or a Shift-wheel (sideways already).
+      const delta = Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      setViewRef.current(panView(current, -wheelDeltaPx(delta, event.deltaMode) * 0.6, widthRef.current));
+    };
+
+    // WebKit's pinch: `scale` is relative to the gesture's start, so each
+    // change zooms the view the gesture started on. Only WebKit sends
+    // these; elsewhere the listeners sit idle.
+    const onGestureStart = (event: Event) => {
+      event.preventDefault();
+      const gesture = event as GestureEventLike;
+      pinch = { view: viewRef.current, atS: anchorAt(gesture.clientX, event.target) };
+    };
+    const onGestureChange = (event: Event) => {
+      event.preventDefault();
+      const scale = (event as GestureEventLike).scale;
+      if (!pinch || !scale || !Number.isFinite(scale) || scale <= 0) return;
+      setViewRef.current(zoomAround(pinch.view, pinch.atS, 1 / scale, durationRef.current));
+    };
+    const onGestureEnd = (event: Event) => {
+      event.preventDefault();
+      pinch = null;
+    };
+
+    element.addEventListener("wheel", onWheel, { passive: false });
+    element.addEventListener("gesturestart", onGestureStart);
+    element.addEventListener("gesturechange", onGestureChange);
+    element.addEventListener("gestureend", onGestureEnd);
+    return () => {
+      element.removeEventListener("wheel", onWheel);
+      element.removeEventListener("gesturestart", onGestureStart);
+      element.removeEventListener("gesturechange", onGestureChange);
+      element.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, []);
+
+  const cursorClass =
+    drag?.kind === "pan"
+      ? "cursor-grabbing"
+      : drag?.kind === "slip" || (drag === null && hoverSlip)
+        ? "cursor-ew-resize"
+        : drag?.kind === "boundary" || (drag === null && hoverBoundary !== null)
+          ? "cursor-col-resize"
+          : editable
+            ? "cursor-crosshair"
+            : "cursor-grab";
 
   return (
     <div ref={containerRef} className={cx("relative select-none", className)}>
       <canvas
         ref={canvasRef}
-        className={cx(
-          "block w-full touch-none rounded-md",
-          drag?.kind === "pan" ? "cursor-grabbing" : hoverBoundary !== null ? "cursor-col-resize" : editable ? "cursor-crosshair" : "cursor-default",
-        )}
+        className={cx("block w-full touch-none rounded-md", cursorClass)}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerUp={(event) => endGesture(event, false)}
+        onPointerCancel={(event) => endGesture(event, true)}
+        onPointerLeave={() => {
+          if (dragRef.current === null) {
+            setHoverBoundary(null);
+            setHoverSlip(false);
+            setHoverShot(null);
+          }
+        }}
         onDoubleClick={onDoubleClick}
-        onWheel={onWheel}
+        title={hoverShot !== null ? `Picture cut ${formatClock(hoverShot)}` : undefined}
         aria-label="Waveforms of the original and the synced dub"
+      />
+      {shotCuts && shotCuts.length > 0 && (
+        // The picture's cuts, over the ruler. Only marks: the pointer goes
+        // through them to the canvas, which names the one it is over.
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 overflow-hidden" style={{ height: RULER_H }}>
+          {shotCuts.map((t) => {
+            const x = Math.round(xOf(t));
+            if (x < 0 || x > width) return null;
+            return (
+              <span
+                key={t}
+                data-shot-cut={t}
+                title={`Picture cut ${formatClock(t)}`}
+                className={cx("absolute bottom-0 w-px", t === snappedShot ? "h-full bg-primary" : "h-[7px] bg-primary/60")}
+                style={{ left: x }}
+              />
+            );
+          })}
+        </div>
+      )}
+      <canvas
+        ref={overviewRef}
+        className={cx(
+          "mt-1 block w-full touch-none rounded-sm",
+          drag?.kind === "overview" ? "cursor-grabbing" : hoverBox ? "cursor-grab" : "cursor-pointer",
+        )}
+        style={{ height: OVERVIEW_H }}
+        onPointerDown={onOverviewDown}
+        onPointerMove={onOverviewMove}
+        onPointerUp={onOverviewUp}
+        onPointerCancel={onOverviewUp}
+        onPointerLeave={() => setHoverBox(false)}
+        aria-label="The whole film: click or drag to move the view"
       />
       {loading > 0 && (
         <div className="pointer-events-none absolute right-2 top-[26px] text-[10px] text-white/60">reading…</div>

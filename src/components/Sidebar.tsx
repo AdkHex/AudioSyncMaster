@@ -44,6 +44,10 @@ interface SidebarProps {
   onTrackChange: (path: string, index: number) => void;
 
   onBrowse: (kind: "video" | "audio") => void;
+  /** Adds a file by its full path, typed into the panel. */
+  onAddPath?: (kind: "video" | "audio", path: string) => void;
+  /** Media files in each side's last folder, for one-click adding. */
+  suggestions?: { video: FileItem[]; audio: FileItem[] };
   onRemove: (kind: "video" | "audio", id: string) => void;
   onClear: (kind: "video" | "audio") => void;
   onDragEnter: (kind: "video" | "audio") => void;
@@ -79,6 +83,8 @@ export const Sidebar = memo(function Sidebar({
   trackChoices,
   onTrackChange,
   onBrowse,
+  onAddPath,
+  suggestions,
   onRemove,
   onClear,
   onDragEnter,
@@ -140,6 +146,8 @@ export const Sidebar = memo(function Sidebar({
             dragActive={dragTarget === "video"}
             disabled={busy}
             onBrowse={() => onBrowse("video")}
+            onAddPath={onAddPath ? (path) => onAddPath("video", path) : undefined}
+            suggestions={suggestions?.video}
             onRemove={(id) => onRemove("video", id)}
             onClear={() => onClear("video")}
           />
@@ -178,6 +186,8 @@ export const Sidebar = memo(function Sidebar({
             dragActive={dragTarget === "audio"}
             disabled={busy}
             onBrowse={() => onBrowse("audio")}
+            onAddPath={onAddPath ? (path) => onAddPath("audio", path) : undefined}
+            suggestions={suggestions?.audio}
             onRemove={(id) => onRemove("audio", id)}
             onClear={() => onClear("audio")}
           />
@@ -348,7 +358,10 @@ function DubOutput({
             value={options.dubLanguage}
             disabled={disabled}
             maxLength={3}
-            placeholder="hin"
+            // Empty means no tag is written; a placeholder that looked like
+            // a value ("hin") left real outputs untagged.
+            placeholder="none"
+            title="Three-letter language code for the added track, e.g. hin"
             spellCheck={false}
             onChange={(event) =>
               onChange({ dubLanguage: event.target.value.toLowerCase().replace(/[^a-z]/g, "") })

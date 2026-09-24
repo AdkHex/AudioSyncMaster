@@ -47,6 +47,15 @@ describe("DubWaveformEditor", () => {
     expect(html).toContain("0:00:00.000 – 0:05:00.010");
   });
 
+  it("says how to scroll, zoom, slip a stretch and split", () => {
+    const html = render();
+    expect(html).toContain("Drag to scroll, Ctrl/⌘-wheel or pinch to zoom.");
+    expect(html).toContain("Alt/⌥-drag a stretch");
+    expect(html).toContain("Double-click or S splits.");
+    expect(html).toContain("it snaps to the picture&#x27;s cuts");
+    expect(html).not.toContain("Shift-drag pans");
+  });
+
   it("shows the write in progress and offers to stop it", () => {
     const html = render({ busy: { percent: 42, stage: "writing 6ch" }, onStop: () => undefined });
     expect(html).toContain("writing 6ch");
@@ -73,5 +82,18 @@ describe("DubWaveformEditor", () => {
     // The player itself stays closed until Play video or Play sample.
     expect(html).not.toContain('aria-label="Preview player"');
     expect(html).not.toContain("<video");
+  });
+
+  it("asks for no picture cuts while the view is wider than five minutes", () => {
+    // The fixture is 5:00.010 long, and the editor opens on all of it.
+    const asked: number[][] = [];
+    const html = render({
+      fetchShotCuts: (_path, startS, endS) => {
+        asked.push([startS, endS]);
+        return never();
+      },
+    });
+    expect(html).not.toContain("data-shot-cut");
+    expect(asked).toEqual([]);
   });
 });

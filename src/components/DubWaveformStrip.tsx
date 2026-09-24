@@ -7,6 +7,8 @@
  *  ones, then the cuts, then the gaps searched -- so the track can be
  *  watched being laid onto the picture; when it is done, the plan the
  *  track was written from stays up, and the cut editor opens on it.
+ *  Whenever waveforms are drawn, a short hint says how to get around
+ *  them, since nothing about a canvas says it can be dragged.
  */
 
 import { Play, Scissors } from "lucide-react";
@@ -21,6 +23,9 @@ import { windowAround } from "@/lib/previewClock";
 import type { MixMode } from "@/lib/previewMix";
 import { useExcerpt } from "@/lib/useExcerpt";
 import type { DubSyncPlan } from "@/lib/types";
+
+/** How to get around the waveforms, shown beside the caption. */
+const NAVIGATION_HINT = "Drag to scroll · Ctrl/⌘-wheel or pinch to zoom · click to place the cursor";
 
 export interface WaveformPair {
   videoPath: string;
@@ -182,7 +187,7 @@ export function DubWaveformStrip({
           {plan
             ? status
               ? "The dub is being laid onto the video: every stretch moves into place as it is found."
-              : "The synced track as it was written. Ctrl/⌘-wheel zooms, Shift-drag pans."
+              : "The synced track as it was written."
             : shown
               ? "As loaded: the dub at the video's start. Run the sync to lay it onto the picture."
               : failed
@@ -191,6 +196,11 @@ export function DubWaveformStrip({
                   ? `Reading the waveforms — ${readingLine}`
                   : "Reading the waveforms…"}
         </span>
+        {shown && (
+          <span className="max-w-[45%] shrink-0 truncate text-[11px] text-muted-foreground/70" title={NAVIGATION_HINT}>
+            {NAVIGATION_HINT}
+          </span>
+        )}
         {playable && shown && (
           <Button size="sm" variant="default" onClick={openPlayer} aria-pressed={playerOpen}>
             <Play className="h-3.5 w-3.5 fill-current" aria-hidden />
@@ -216,7 +226,7 @@ export function DubWaveformStrip({
           keepCursorInView={playerOpen}
         />
       ) : (
-        <div className="flex h-[192px] items-center justify-center rounded-md bg-sunken text-[11.5px] text-muted-foreground">
+        <div className="flex h-[210px] items-center justify-center rounded-md bg-sunken text-[11.5px] text-muted-foreground">
           {failed ? "No waveforms." : readingLine ? `Reading — ${readingLine}` : "Reading the files…"}
         </div>
       )}

@@ -11,7 +11,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 
-use bridge::{BridgeHandle, WaveformBridge};
+use bridge::{BridgeHandle, ShotBridge, WaveformBridge};
 
 /// How long to wait for a single engine event before assuming it has stalled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -749,6 +749,51 @@ async fn waveform_exchange<R: tauri::Runtime>(
     .map_err(|err| err.to_string())?
 }
 
+/// The video's shot changes across a span, for the ruler of the cut
+/// editor: `{ cuts, frameS, startS, endS }`, `cuts` null when the picture
+/// cannot be read. Served by an engine of its own, so decoding the picture
+/// never holds up the waveforms.
+#[tauri::command]
+async fn shot_cuts<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, ShotBridge>,
+    request: Value,
+) -> Result<Value, String> {
+    let handle = handle.inner().0.clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            let mut payload = request.clone();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("command".into(), Value::String("shotCuts".into()));
+            }
+            bridge.send(&payload)?;
+            loop {
+                match bridge.events().recv_timeout(Duration::from_secs(600)) {
+                    Ok(event) => match event.get("type").and_then(Value::as_str) {
+                        Some("shotCuts") => {
+                            if let Some(message) = event.get("error").and_then(Value::as_str) {
+                                return Err(message.to_string());
+                            }
+                            return Ok(event);
+                        }
+                        Some("log") | Some("error") => {
+                            if let Some(m) = event.get("message").and_then(Value::as_str) {
+                                let _ = app_for_task.emit("sync-log", m);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Err(_) => return Err("Timed out reading the picture.".into()),
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 /// A short excerpt of a dub sync plan as edited in the app, rendered to
 /// play: the picture, the synced sound, the original's sound, or the
 /// picture with the sound under it (`what`). Returns the engine's reply --
@@ -1190,6 +1235,7 @@ pub fn run() {
     builder
         .manage(BridgeHandle::default())
         .manage(WaveformBridge::default())
+        .manage(ShotBridge::default())
         .invoke_handler(tauri::generate_handler![
             pick_video_folder,
             pick_audio_folder,
@@ -1208,6 +1254,7 @@ pub fn run() {
             render_preview,
             waveform_peaks,
             waveform_build,
+            shot_cuts,
             render_dub_preview,
             read_preview_bytes,
             export_csv,
@@ -1221,6 +1268,9 @@ pub fn run() {
                     handle.shutdown();
                 }
                 if let Some(handle) = window.app_handle().try_state::<WaveformBridge>() {
+                    handle.0.shutdown();
+                }
+                if let Some(handle) = window.app_handle().try_state::<ShotBridge>() {
                     handle.0.shutdown();
                 }
             }

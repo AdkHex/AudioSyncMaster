@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 
 import { cx } from "@/lib/cx";
 import {
@@ -31,6 +31,12 @@ interface FilePanelProps {
   dragActive: boolean;
   disabled: boolean;
   onBrowse: () => void;
+  /** Adds a file by its full path, typed or pasted: for a keyboard, for a
+   *  path copied from elsewhere, and where no file dialog can be used. */
+  onAddPath?: (path: string) => void;
+  /** Media files in the folder last used, offered one click each while the
+   *  panel is empty: the next episode's files are usually beside the last. */
+  suggestions?: FileItem[];
   onRemove: (id: string) => void;
   onClear: () => void;
 }
@@ -55,13 +61,22 @@ export const FilePanel = memo(function FilePanel({
   dragActive,
   disabled,
   onBrowse,
+  onAddPath,
+  suggestions,
   onRemove,
   onClear,
 }: FilePanelProps) {
+  const [typedPath, setTypedPath] = useState("");
   const totalSize = useMemo(
     () => files.reduce((sum, file) => sum + (file.size ?? 0), 0),
     [files],
   );
+  // The folder the offered files are in: a side whose own last folder is
+  // gone is offered the other side's, and must not name the one it lost.
+  const shownFolder =
+    onAddPath && suggestions && suggestions.length > 0
+      ? suggestions[0].path.replace(/[\\/][^\\/]*$/, "")
+      : recentFolder;
 
   return (
     <section aria-label={title}>
@@ -200,13 +215,50 @@ export const FilePanel = memo(function FilePanel({
         </>
       )}
 
-      {files.length === 0 && recentFolder && (
+      {files.length === 0 && shownFolder && (
         <p
           className="mt-2 truncate font-mono text-[10.5px] text-muted-foreground"
-          title={recentFolder}
+          title={shownFolder}
         >
-          {recentFolder}
+          {shownFolder}
         </p>
+      )}
+      {onAddPath && files.length === 0 && suggestions && suggestions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5" aria-label={`${title}: files in the last folder`}>
+          {suggestions.slice(0, 8).map((file) => (
+            <button
+              key={file.path}
+              type="button"
+              disabled={disabled}
+              onClick={() => onAddPath(file.path)}
+              title={file.path}
+              aria-label={`Add ${file.name}`}
+              className="max-w-full truncate rounded-md border border-border px-2 py-1 font-mono text-[11px] text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground disabled:opacity-40"
+            >
+              + {file.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {onAddPath && (
+        <input
+          type="text"
+          value={typedPath}
+          disabled={disabled}
+          onChange={(event) => setTypedPath(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            // A path copied from a terminal or Finder often comes quoted.
+            const path = typedPath.trim().replace(/^["']|["']$/g, "");
+            if (!path) return;
+            onAddPath(path);
+            setTypedPath("");
+          }}
+          placeholder="…or type a file's full path and press Enter"
+          aria-label={`${title}: add a file by its path`}
+          spellCheck={false}
+          className="mt-2 h-7 w-full rounded-md border border-border bg-input px-2 font-mono text-[11px] text-foreground placeholder:font-sans placeholder:text-muted-foreground/70 focus:outline-none focus:ring-2 focus:ring-ring/40 disabled:opacity-40"
+        />
       )}
     </section>
   );

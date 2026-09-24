@@ -78,8 +78,9 @@ describe("DubQueuePanel", () => {
     });
     const html = render(state);
     expect(html).toContain("Checked against the video");
-    expect(html).toContain("0 ms typical");
-    expect(html).toContain("0 ms at worst");
+    // Under ten milliseconds the tenth is shown: 0.2 is not 0.
+    expect(html).toContain("0.2 ms typical");
+    expect(html).toContain("0.4 ms at worst");
     expect(html).toContain("Measured at 10 spots");
     expect(html).not.toContain("would be audible");
   });
@@ -205,7 +206,7 @@ describe("DubQueuePanel", () => {
       outcome: outcome(0, { verification: halfOut.verification }),
     });
     const html = render(state);
-    expect(html).toContain("51% of the runtime within 100 ms");
+    expect(html).toContain("51% of the runtime within 45 ms");
     // The verification badge must not read green (the job row's Done tag is
     // green for its own reasons).
     expect(html).not.toContain('text-success">0 ms typical');

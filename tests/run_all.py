@@ -32,6 +32,7 @@ MODULES = [
     "test_bridge",
     "test_dubsync",
     "test_editor",
+    "test_lipsync",
 ]
 
 

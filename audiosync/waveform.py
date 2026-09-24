@@ -29,7 +29,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from .dubrender import read_span
-from .media import CancellationToken, probe, stream_audio
+from .media import CancellationToken, audio_lead_s, probe, stream_audio
 
 # Samples per block of the cache.
 BLOCK = 256
@@ -106,7 +106,12 @@ def build(
         maxs.append(shaped.max(axis=1))
         meansq.append(np.mean(np.square(shaped, dtype=np.float32), axis=1))
 
-    for piece in stream_audio(path, rate, track=track, channels=channels, token=token, block_s=DECODE_BLOCK_S):
+    # On the file's clock, like the analysis and every seek (see
+    # ``audio_lead_s``): the fine zoom reads spans by seeking, and the
+    # cache has to put a transient where the seek finds it.
+    lead = audio_lead_s(info, track)
+    for piece in stream_audio(path, rate, track=track, channels=channels, token=token,
+                              block_s=DECODE_BLOCK_S, lead_s=lead):
         if piece.ndim == 1:
             piece = piece.reshape(-1, 1)
         frames += len(piece)

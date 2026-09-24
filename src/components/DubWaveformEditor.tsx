@@ -4,7 +4,7 @@
  *  that changes it. When the plan is right, the transients in the two
  *  lanes sit under each other; where they do not, the user drags the cut
  *  to where the scene really changes, or nudges a stretch by a frame
- *  until they do, and applies. Everything the user can do here is a pure
+ *  until they do -- or slides it with Alt/Option-drag -- and applies. Everything the user can do here is a pure
  *  function on the plan (see dubPlanEdit.ts); this file only turns
  *  pointer and key events into those functions.
  */
@@ -34,6 +34,7 @@ import {
 import { windowAround } from "@/lib/previewClock";
 import type { MixMode } from "@/lib/previewMix";
 import { useExcerpt } from "@/lib/useExcerpt";
+import { useShotCuts, type FetchShotCuts } from "@/lib/useShotCuts";
 import { formatClock, formatSpan, type DubSegment, type DubSyncPlan } from "@/lib/types";
 import type { View } from "@/lib/waveformView";
 
@@ -45,6 +46,9 @@ export interface DubWaveformEditorProps {
   enginePlan?: DubSyncPlan | null;
   /** Fetches peaks; injected so the editor can be rendered without the engine. */
   fetchPeaks: (request: WaveformRequest) => Promise<WaveformPeaks>;
+  /** Finds the video's picture cuts in a span, to mark on the ruler and
+   *  snap dragged cuts to; without it there are neither. */
+  fetchShotCuts?: FetchShotCuts;
   /** Renders a span of the edited plan and plays it; resolves when playback was handed off. */
   onPreview: (plan: DubSyncPlan, startS: number, endS: number) => Promise<void>;
   /** Renders a span of the edited plan for the in-app player. */
@@ -66,6 +70,7 @@ export function DubWaveformEditor({
   plan: initialPlan,
   enginePlan = null,
   fetchPeaks,
+  fetchShotCuts,
   onPreview,
   renderDubPreview,
   readPreviewBytes,
@@ -97,13 +102,23 @@ export function DubWaveformEditor({
   planRef.current = plan;
   const playerRef = useRef(player);
   playerRef.current = player;
+  // A slip in progress: the plan it started from, and the plan as slipped
+  // so far. The slipped plan is only drawn -- and shown in the offset box
+  // -- until the pointer lets go; then it is committed once, as one step
+  // to undo, and the player re-cuts its sound once rather than on every
+  // pixel of the drag.
+  const [slipPlan, setSlipPlan] = useState<DubSyncPlan | null>(null);
+  const slipRef = useRef<{ index: number; base: DubSyncPlan; next: DubSyncPlan } | null>(null);
+  const shownPlan = slipPlan ?? plan;
+
+  const shotCuts = useShotCuts(initialPlan.videoPath, duration, view, fetchShotCuts);
 
   const frame = frameSeconds(plan);
   const problems = useMemo(() => validatePlan(plan), [plan]);
   const changed = !samePlan(plan, initialPlan);
   const original = enginePlan ?? initialPlan;
   const isEngines = samePlan(plan, original);
-  const segment = selected !== null ? plan.segments[selected] : undefined;
+  const segment = selected !== null ? shownPlan.segments[selected] : undefined;
 
   // ----------------------------------------------------------------- history
 
@@ -152,6 +167,23 @@ export function DubWaveformEditor({
   const onBoundaryDragEnd = useCallback(() => {
     setPast((p) => (p.length && samePlan(p[p.length - 1], planRef.current) ? p.slice(0, -1) : p));
   }, []);
+  // A slip is measured from where it started, so the offset follows the
+  // pointer exactly and never accumulates rounding.
+  const onSlipStart = useCallback((index: number) => {
+    slipRef.current = { index, base: planRef.current, next: planRef.current };
+  }, []);
+  const onSlip = useCallback((index: number, offsetDeltaS: number) => {
+    const slip = slipRef.current;
+    if (!slip || slip.index !== index) return;
+    slip.next = nudgeOffset(slip.base, index, offsetDeltaS);
+    setSlipPlan(slip.next);
+  }, []);
+  const onSlipEnd = useCallback(() => {
+    const slip = slipRef.current;
+    slipRef.current = null;
+    setSlipPlan(null);
+    if (slip && !samePlan(slip.next, slip.base)) commit(slip.next);
+  }, [commit]);
   const onSplitAt = useCallback(
     (t: number) => {
       commit(splitAt(planRef.current, t));
@@ -195,7 +227,9 @@ export function DubWaveformEditor({
         if (!busy) onClose();
         return;
       }
-      if (meta) return;
+      // Nothing else while a stretch is being slipped: the slip commits
+      // from the plan it started on, and would undo an edit made meanwhile.
+      if (meta || slipRef.current) return;
       if (selected !== null && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
         event.preventDefault();
         const unit = event.shiftKey ? 0.01 : frame;
@@ -294,8 +328,9 @@ export function DubWaveformEditor({
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
         <h2 className="text-[13px] font-semibold">Edit the cuts</h2>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground">
-          Drag a cut to where the scene really changes; select a stretch and use ← → to move it a frame
-          (Shift: 10 ms; , and . : 1 ms). Double-click to split, S splits at the cursor. Ctrl/⌘-wheel zooms, Shift-drag pans.
+          Drag to scroll, Ctrl/⌘-wheel or pinch to zoom. Drag a cut to where the scene really changes (it snaps to the picture's cuts, ticked on the ruler; hold Alt/⌥ not to); Alt/⌥-drag a stretch
+          to slide it under the original, or select it and use ← → to move it a frame (Shift: 10 ms; , and . : 1 ms).
+          Double-click or S splits.
         </span>
         <Button size="sm" variant="ghost" onClick={onClose} disabled={!!busy}>
           Close
@@ -346,7 +381,7 @@ export function DubWaveformEditor({
       <div className="shrink-0 px-4 pt-3">
         <DubWaveformView
           ref={viewRef}
-          plan={plan}
+          plan={shownPlan}
           fetchPeaks={fetchPeaks}
           editable
           selected={selected}
@@ -358,7 +393,11 @@ export function DubWaveformEditor({
           onBoundaryDrag={onBoundaryDrag}
           onBoundaryDragEnd={onBoundaryDragEnd}
           onSplitAt={onSplitAt}
+          onSlipStart={onSlipStart}
+          onSlip={onSlip}
+          onSlipEnd={onSlipEnd}
           onViewChange={setView}
+          shotCuts={shotCuts}
           laneHeight={110}
           reading={reading}
         />

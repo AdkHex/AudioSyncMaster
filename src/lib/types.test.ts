@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatElapsed,
   formatSize,
+  formatSpan,
   formatPlayerDelay,
   playerDelayMs,
   streamSummary,
@@ -79,6 +80,13 @@ describe("confidence banding", () => {
 });
 
 describe("formatting", () => {
+  it("rounds a span to the tenth before splitting off the minutes", () => {
+    expect(formatSpan(359.96)).toBe("6m 00.0s");
+    expect(formatSpan(316.84)).toBe("5m 16.8s");
+    expect(formatSpan(59.96)).toBe("1m 00.0s");
+    expect(formatSpan(45.7)).toBe("45.7s");
+  });
+
   it("signs delays explicitly so direction is never ambiguous", () => {
     expect(formatDelay(250)).toBe("+250.0 ms");
     expect(formatDelay(-250)).toBe("-250.0 ms");
