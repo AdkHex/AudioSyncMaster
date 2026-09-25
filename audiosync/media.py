@@ -685,6 +685,14 @@ def stream_audio(
             token.unregister(process)
         if process.poll() is None:
             _terminate(process)
+            # On Windows a killed ffmpeg keeps the file open until it has
+            # actually exited, so a read stopped early (a voice move reads
+            # a span from the middle) would leave the file locked against
+            # deleting or overwriting it a moment later.
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def _run(

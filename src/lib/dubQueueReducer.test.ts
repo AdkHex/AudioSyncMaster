@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { describePlan, dubQueueReducer, initialDubQueueState, type DubQueueState } from "./dubQueueReducer";
+import {
+  describePlan,
+  dubQueueReducer,
+  initialDubQueueState,
+  reportText,
+  type DubQueueJob,
+  type DubQueueState,
+} from "./dubQueueReducer";
 import type { DubJobOutcome, DubSyncPlan } from "./types";
 
 /** Two jobs queued: the shape the engine sees after a pairing. */
@@ -273,5 +280,46 @@ describe("describePlan", () => {
     const text = describePlan({ ...base, videoFps: null, dubRate: null, speed: 0.999001 });
     expect(text).toContain("dub played at 0.999001×");
     expect(text).not.toContain("mastered");
+  });
+});
+
+describe("reportText", () => {
+  it("lists voice moves alongside notes", () => {
+    const job: DubQueueJob = {
+      id: 0,
+      name: "Show.S01E01.mkv",
+      dubName: "Show.S01E01.dub.eac3",
+      videoPath: plan.videoPath,
+      dubPath: plan.dubPath,
+      videoTrack: 0,
+      dubTrack: 0,
+      status: "done",
+      percent: 100,
+      stage: null,
+      plan: {
+        ...plan,
+        voicePieces: [
+          {
+            dubStartS: 12.5,
+            dubEndS: 18.2,
+            levelS: 15.0,
+            shiftS: 0.24,
+            joinEnd: false,
+            note: "Voices moved 240 ms later from 0:00:12.5 to 0:00:18.2 to match the lips.",
+            videoStartS: 12.5,
+            videoEndS: 18.2,
+          },
+        ],
+      },
+      enginePlan: null,
+      draft: null,
+      output: null,
+      verification: null,
+      muxedPath: null,
+      error: null,
+    };
+    const text = reportText(job);
+    expect(text).toContain("voices moved:");
+    expect(text).toContain("  - Voices moved 240 ms later from 0:00:12.5 to 0:00:18.2 to match the lips.");
   });
 });

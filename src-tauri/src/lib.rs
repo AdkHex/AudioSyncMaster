@@ -1069,6 +1069,61 @@ async fn start_dubsync_batch<R: tauri::Runtime>(
     .map_err(|err| err.to_string())?
 }
 
+/// Status, install or removal of the voice tools (the optional speech
+/// detector and voice separator the dub sync's voice check uses). `action`
+/// is `status`, `install` or `remove`; an install streams
+/// `voice-tools-progress` and stops through `cancel_sync`. Resolves with
+/// the engine's `voiceTools` event: `{ status, error }`.
+#[tauri::command]
+async fn voice_tools<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    handle: State<'_, BridgeHandle>,
+    action: String,
+) -> Result<Value, String> {
+    let handle = handle.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        handle.with(&app_for_task, |bridge| {
+            bridge.send(&serde_json::json!({ "command": "voiceTools", "action": action }))?;
+            loop {
+                match bridge.events().recv_timeout(EVENT_TIMEOUT) {
+                    Ok(event) => {
+                        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+                        match kind {
+                            "voiceTools" => return Ok(event),
+                            "voiceToolsProgress" => {
+                                let _ = app_for_task.emit("voice-tools-progress", &event);
+                            }
+                            "log" => {
+                                if let Some(m) = event.get("message").and_then(Value::as_str) {
+                                    let _ = app_for_task.emit("sync-log", m);
+                                }
+                            }
+                            "error" => {
+                                let message = event
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Unknown engine error");
+                                let _ = app_for_task.emit("sync-log", format!("Error: {message}"));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        return Err("The analysis engine stopped responding.".into());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("The analysis engine exited unexpectedly.".into());
+                    }
+                }
+            }
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 /// Cancel the running batch. Sent immediately rather than queued, so it reaches
 /// the engine while the run it targets is still in flight.
 #[tauri::command]
@@ -1247,6 +1302,7 @@ pub fn run() {
             start_sync,
             start_dubsync,
             start_dubsync_batch,
+            voice_tools,
             cancel_sync,
             apply_corrections,
             probe_media,

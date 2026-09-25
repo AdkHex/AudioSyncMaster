@@ -41,7 +41,9 @@ from audiosync.dubsync import (  # noqa: E402
     plan_dubsync,
     verify_output,
 )
+from audiosync import voicetools  # noqa: E402
 from audiosync.linecheck import line_check  # noqa: E402
+from audiosync.voicefix import check_voices  # noqa: E402
 from audiosync.media import Cancelled, MediaError, has_ffmpeg  # noqa: E402
 
 
@@ -111,17 +113,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-verify", action="store_true", help="skip measuring the finished track against the video")
     parser.add_argument("--overwrite", action="store_true", help="replace an existing output")
     parser.add_argument("--quiet", action="store_true", help="only print the plan and the verification")
+    parser.add_argument("--fix-voices", dest="fix_voices", action="store_true", default=True,
+                        help="check the dub's voices against the lips and move them where they were cut apart "
+                             "from the music (default, when the voice tools are installed)")
+    parser.add_argument("--no-fix-voices", dest="fix_voices", action="store_false",
+                        help="skip the voice check, and write a plan's voice moves as if there were none")
+    parser.add_argument("--voice-tools", choices=("status", "install", "remove"),
+                        help="show, install (about 1 GB) or remove the voice tools, then exit")
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if not has_ffmpeg():
+    if not has_ffmpeg() and not args.voice_tools:
         print("ffmpeg was not found. Install it and put it on PATH.", file=sys.stderr)
         return 2
 
     started = time.monotonic()
     say = (lambda _m: None) if args.quiet else (lambda m: print(f"  {m}", flush=True))
+
+    if args.voice_tools:
+        if args.voice_tools == "install":
+            print(f"--- installing the voice tools into {voicetools.tools_dir()} ---")
+            state = voicetools.install(
+                progress=lambda p, s: print(f"  [{p:3d}%] {s}", flush=True), log=say)
+        elif args.voice_tools == "remove":
+            state = voicetools.remove()
+        else:
+            state = voicetools.status()
+        print(json.dumps(state, indent=2))
+        return 0
 
     def progress(percent: int, stage: str) -> None:
         if not args.quiet and sys.stdout.isatty():
@@ -157,6 +178,11 @@ def main(argv=None) -> int:
             if plan.error:
                 print(f"could not plan: {plan.error}", file=sys.stderr)
                 return 1
+            if args.fix_voices:
+                print("--- checking the dub's voices against the lips ---")
+                plan.voice_pieces = check_voices(plan, progress=progress, log=say)
+                if not args.quiet and sys.stdout.isatty():
+                    print("\r" + " " * 60 + "\r", end="")
             print(f"--- plan ({time.monotonic() - started:.0f}s) ---")
 
         print(plan.describe())
@@ -181,6 +207,7 @@ def main(argv=None) -> int:
         options = RenderOptions(
             codec=codec, bitrate=args.bitrate, sample_rate=args.sample_rate,
             channels=args.channels, xfade_s=args.xfade / 1000.0, stretch=args.stretch,
+            fix_voices=args.fix_voices,
         )
         result = render(plan, output, options, progress=progress, log=say)
         if not args.quiet and sys.stdout.isatty():

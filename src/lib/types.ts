@@ -238,6 +238,10 @@ export interface AppSettings {
    *  the video's own rate this fixes the speed and the audio is not asked.
    *  Null lets the engine find it from the audio. */
   dubRate: number | null;
+  /** Check the dub's voices against the lips and move any that sit away
+   *  from them (a dub whose voices were cut separately from its music).
+   *  Needs the voice tools installed; on by default. */
+  fixVoices: boolean;
 }
 
 /** Mastering rates a dub can be declared to have, for the override. */
@@ -262,6 +266,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dubLanguage: "",
   dubFillUnmatched: false,
   dubRate: null,
+  fixVoices: true,
 };
 
 // ------------------------------------------------------------------ dub sync
@@ -298,6 +303,22 @@ export interface DubPlanSummary {
   /** Of the fills, seconds that are doubt about where a cut lies rather
    *  than material the dub lacks. */
   doubtS: number;
+}
+
+/** One scene where the dub's voices sit away from the lips -- cut apart
+ *  from their own music and effects -- with the move that puts them back.
+ *  `shiftS` is positive when the voices were moved later (they were early),
+ *  negative when moved earlier. */
+export interface VoicePiece {
+  dubStartS: number;
+  dubEndS: number;
+  levelS: number;
+  shiftS: number;
+  joinEnd: boolean;
+  /** A ready-to-show English sentence describing the move. */
+  note: string;
+  videoStartS: number;
+  videoEndS: number;
 }
 
 export interface DubSyncPlan {
@@ -339,6 +360,10 @@ export interface DubSyncPlan {
    *  that, each audio stream's first sample ("stream", or absent). The
    *  engine moves the latter onto the files' clocks before writing. */
   timeline?: "container" | "stream";
+  /** Scenes where the dub's voices sat away from the lips and were moved
+   *  back on their own. Absent from plans made before the voice check, or
+   *  when the check was skipped (fixVoices: false) or found nothing to move. */
+  voicePieces?: VoicePiece[];
 }
 
 export interface DubSpotCheck {
@@ -397,6 +422,33 @@ export interface DubLineCheck {
   toleranceMs: number;
 }
 
+/** State of the optional voice tools (PyTorch, Demucs, Silero VAD, ~1 GB),
+ *  installed on demand into the user's data folder so the voice check can
+ *  run. */
+export interface VoiceToolsStatus {
+  installed: boolean;
+  dir: string;
+  toolsVersion: number;
+  uv?: string;
+  python?: string;
+  packages?: string[];
+  /** Where the check runs once installed. */
+  device?: "cpu" | "cuda" | "mps";
+  installedAt?: string;
+  /** The installed tools predate the version the app now expects. */
+  outdated?: boolean;
+  sizeBytes?: number;
+}
+
+/** The reply to the `voice_tools` command, for any of its actions. */
+export interface VoiceToolsResult {
+  type: "voiceTools";
+  action: "status" | "install" | "remove";
+  status: VoiceToolsStatus;
+  /** "cancelled" when an install was stopped; null otherwise. */
+  error: string | null;
+}
+
 export interface DubOutput {
   outputPath: string;
   sampleRate: number;
@@ -418,6 +470,10 @@ export interface DubSyncRequest {
   overwrite: boolean;
   /** The dub's mastering frame rate, when declared; null asks the audio. */
   dubRate?: number | null;
+  /** Whether to check the dub's voices against the lips and move any that
+   *  sit away from them. Engine default is true; false skips the check and
+   *  an edited plan's voice moves are not applied. */
+  fixVoices?: boolean;
   /** A plan to render as it is -- edited in the app -- instead of analysing. */
   plan?: DubSyncPlan;
   /** Where to write the track; the engine's default beside the video otherwise. */
@@ -445,6 +501,9 @@ export interface DubSyncBatchRequest {
   maxWorkers: number;
   /** The dub's mastering frame rate, when declared; null asks the audio. */
   dubRate?: number | null;
+  /** Whether to check each dub's voices against the lips and move any that
+   *  sit away from them. Engine default is true. */
+  fixVoices?: boolean;
 }
 
 /** The engine's final word on one job of a batch. */

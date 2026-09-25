@@ -176,6 +176,49 @@ describe("DubQueuePanel", () => {
     expect(html).not.toContain("lucide-triangle-alert");
   });
 
+  it("lists scenes where the voice check moved the dub's voices", () => {
+    const plan = single.plan!;
+    const voicePieces = [
+      {
+        dubStartS: 12.5,
+        dubEndS: 18.2,
+        levelS: 15.0,
+        shiftS: 0.24,
+        joinEnd: false,
+        note: "Voices moved 240 ms later from 0:00:12.5 to 0:00:18.2 to match the lips.",
+        videoStartS: 12.5,
+        videoEndS: 18.2,
+      },
+      {
+        dubStartS: 120.0,
+        dubEndS: 126.4,
+        levelS: 123.0,
+        shiftS: -0.1,
+        joinEnd: true,
+        note: "Voices moved 100 ms earlier from 0:02:00.0 to 0:02:06.4 to match the lips.",
+        videoStartS: 120.0,
+        videoEndS: 126.4,
+      },
+    ];
+    const state = dubQueueReducer(queued([["film.mkv", "film.dub.ac3"]]), {
+      type: "jobDone",
+      outcome: outcome(0, { plan: { ...plan, voicePieces } }),
+    });
+    const html = render(state);
+    expect(html).toContain("Voices moved (2)");
+    expect(html).toContain("Voices moved 240 ms later from 0:00:12.5 to 0:00:18.2 to match the lips.");
+    expect(html).toContain("Voices moved 100 ms earlier from 0:02:00.0 to 0:02:06.4 to match the lips.");
+  });
+
+  it("shows no voice moves section when the plan has none", () => {
+    const state = dubQueueReducer(queued([["film.mkv", "film.dub.ac3"]]), {
+      type: "jobDone",
+      outcome: outcome(0),
+    });
+    const html = render(state);
+    expect(html).not.toContain("Voices moved");
+  });
+
   it("flags a stretch the check found audibly out", () => {
     const worse = {
       ...single,

@@ -26,6 +26,7 @@ import type {
   SyncResult,
   SyncRun,
   TrackListing,
+  VoiceToolsResult,
 } from "./types";
 
 export function isDesktop(): boolean {
@@ -312,6 +313,15 @@ export async function cancelSync(): Promise<void> {
   await invoke("cancel_sync");
 }
 
+/** Check, install or remove the optional voice tools (PyTorch, Demucs,
+ *  Silero VAD, ~1 GB) the voice check needs. An install streams progress as
+ *  `voice-tools-progress` events and log lines as the existing `sync-log`
+ *  event; stop it with `cancelSync()`. */
+export async function voiceTools(action: "status" | "install" | "remove"): Promise<VoiceToolsResult> {
+  requireDesktop("Voice tools");
+  return invoke<VoiceToolsResult>("voice_tools", { action });
+}
+
 export async function applyCorrections(
   items: CorrectionItem[],
   options: { outputDir?: string | null; suffix?: string; overwrite?: boolean } = {},
@@ -364,6 +374,11 @@ export interface ApplyProgressEvent {
 }
 
 export interface DubSyncProgressEvent {
+  percent: number;
+  stage: string;
+}
+
+export interface VoiceToolsProgressEvent {
   percent: number;
   stage: string;
 }
@@ -479,6 +494,15 @@ export async function subscribeToSync(listeners: SyncListeners): Promise<Unliste
     unlisteners.forEach((unlisten) => unlisten());
     unlisteners.length = 0;
   };
+}
+
+/** Progress of an in-flight voice tools install, streamed while `voiceTools`'s
+ *  install promise is pending. */
+export async function subscribeToVoiceToolsProgress(
+  listener: (event: VoiceToolsProgressEvent) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) return () => undefined;
+  return listen<VoiceToolsProgressEvent>("voice-tools-progress", (e) => listener(e.payload));
 }
 
 /** Native OS drag-and-drop. The webview's File objects carry no filesystem
