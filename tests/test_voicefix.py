@@ -229,7 +229,7 @@ def test_voices_moved_into_a_fill_take_the_originals_voices_out():
 def test_a_render_moves_the_voices_where_the_plan_says():
     rate = 16000
     music, voice = _voice_and_music(rate, 10.0, [(2.0, 3.0)])
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         video_path = os.path.join(root, "video.wav")
         dub_path = os.path.join(root, "dub.wav")
         out_path = os.path.join(root, "out.wav")
@@ -259,7 +259,7 @@ def test_a_render_moves_the_voices_where_the_plan_says():
 def test_without_the_tools_a_plans_voice_moves_are_skipped_and_said():
     rate = 16000
     music, voice = _voice_and_music(rate, 4.0, [(1.0, 2.0)])
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
         os.environ["AUDIOSYNC_VOICE_TOOLS"] = os.path.join(root, "tools")
         try:
             video_path = os.path.join(root, "video.wav")
@@ -291,7 +291,7 @@ def test_the_voice_tools_install_into_the_users_data_folder():
     old = os.environ.pop("AUDIOSYNC_VOICE_TOOLS", None)
     try:
         assert voicetools.tools_dir().endswith(os.path.join("AudioSyncMaster", "voice-tools"))
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
             os.environ["AUDIOSYNC_VOICE_TOOLS"] = root
             assert voicetools.tools_dir() == root
             assert voicetools.status()["installed"] is False
