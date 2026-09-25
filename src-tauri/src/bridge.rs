@@ -242,6 +242,12 @@ impl BridgeHandle {
 #[derive(Clone, Default)]
 pub struct WaveformBridge(pub BridgeHandle);
 
+/// A third engine process for the picture cuts on the cut editor's ruler.
+/// Finding them decodes the video, seconds per minute of it, and on the
+/// waveform engine that would hold every scroll and zoom behind it.
+#[derive(Clone, Default)]
+pub struct ShotBridge(pub BridgeHandle);
+
 /// Locate the sidecar, falling back to a development Python interpreter.
 fn build_command<R: Runtime>(app: &AppHandle<R>) -> Result<Command, String> {
     if let Some(sidecar) = find_sidecar(app) {

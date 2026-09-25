@@ -18,6 +18,7 @@ Two behaviours differ deliberately from the original code:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -221,6 +222,9 @@ class AudioTrack:
     """Bits per second, when the container declares it. Absent for lossless
     and for streams whose bitrate is only knowable by decoding them."""
     is_default: bool = False
+    start_time: Optional[float] = None
+    """Where the stream's first sample sits on the file's clock, in seconds,
+    as ffprobe reads it. See ``audio_lead_s``."""
 
     @property
     def label(self) -> str:
@@ -276,6 +280,39 @@ class MediaInfo:
     stream, which is what decides whether AC3 decoder priming survives into a
     measurement."""
 
+    start_time: Optional[float] = None
+    """The file's own time zero, as ffprobe reads it: the earliest stream."""
+
+
+def audio_lead_s(info: MediaInfo, track: int = 0) -> float:
+    """How far into the file's clock an audio stream's first sample sits.
+
+    ffmpeg seeks, and a muxer places a track, on the file's clock, whose
+    zero is its earliest stream; a decode from the top starts at the
+    stream's own first sample. The two differ wherever the audio starts
+    after the picture -- 23 ms on a real BluRay MKV -- and a timeline
+    counted from the first sample is out by that much against every seek,
+    every picture frame and every mux. Decodes that are to share the
+    file's clock are padded at the front by this much.
+    """
+    if not info.audio_tracks or info.start_time is None:
+        return 0.0
+    stream = info.audio_tracks[min(max(0, track), len(info.audio_tracks) - 1)]
+    if stream.start_time is None:
+        return 0.0
+    lead = stream.start_time - info.start_time
+    return lead if math.isfinite(lead) and lead > 0.0 else 0.0
+
+
+def _parse_float(raw) -> Optional[float]:
+    if raw in (None, "N/A", ""):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
 
 def _parse_frame_rate(raw: Optional[str]) -> Optional[float]:
     """Parse ffprobe's ``num/den`` frame rate.
@@ -308,7 +345,7 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
         ffprobe_path(), "-v", "error",
         # format_name distinguishes a real container from a raw elementary
         # stream, which decides whether codec priming reaches a measurement.
-        "-show_entries", "format=duration,format_name",
+        "-show_entries", "format=duration,format_name,start_time",
         "-show_streams", "-of", "json", path,
     ]
     stdout = _run(command, PROBE_TIMEOUT_S, token, what=f"probe {os.path.basename(path)}")
@@ -361,6 +398,7 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
                     sample_rate=stream_rate,
                     bit_rate=stream_bitrate,
                     is_default=bool(disposition.get("default")),
+                    start_time=_parse_float(stream.get("start_time")),
                 )
             )
 
@@ -412,6 +450,7 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
         audio_tracks=tracks,
         fps=fps,
         container_format=container_format,
+        start_time=_parse_float((payload.get("format") or {}).get("start_time")),
     )
 
 
@@ -544,6 +583,7 @@ def stream_audio(
     token: Optional[CancellationToken] = None,
     block_s: float = 4.0,
     audio_filter: Optional[str] = None,
+    lead_s: float = 0.0,
 ) -> Iterator[np.ndarray]:
     """Decode a whole stream from t=0 in fixed blocks, without ever seeking.
 
@@ -564,6 +604,11 @@ def stream_audio(
     Args:
         audio_filter: an ffmpeg ``-af`` chain applied before the format
             conversion, for the callers that need a time-stretch.
+        lead_s: silence yielded before the first decoded sample, so the
+            stream's own first sample lands where it sits on the file's
+            clock (see ``audio_lead_s``) and position ``i`` of what is
+            yielded is the file's time ``i / sr`` -- the time a seek, a
+            picture frame and a muxer all use.
     """
     if not os.path.isfile(path):
         raise MediaError(f"File not found: {path}")
@@ -607,6 +652,9 @@ def stream_audio(
     produced = 0
     try:
         assert process.stdout is not None
+        pad = int(round(max(0.0, lead_s) * sr))
+        if pad:
+            yield np.zeros((pad, channels), dtype=np.float32) if channels > 1 else np.zeros(pad, dtype=np.float32)
         pending = b""
         while True:
             if token:

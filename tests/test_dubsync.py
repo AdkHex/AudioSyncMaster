@@ -29,6 +29,7 @@ from audiosync.dubsync import (  # noqa: E402
     _Aligner,
     DubSyncPlan,
     _continuing_candidate,
+    _follow_effects,
     _level_runs,
     _measure,
     _nearest_peak,
@@ -759,12 +760,21 @@ def test_the_rate_verdict_survives_the_plan_json():
         assert copy.dub_rate == plan.dub_rate
 
 
+def test_a_duration_is_rounded_before_its_minutes_are_taken():
+    from audiosync.dubsync import _duration
+    assert _duration(359.96) == "6m 00.0s"
+    assert _duration(59.96) == "1m 00.0s"
+    assert _duration(316.84) == "5m 16.8s"
+    assert _duration(45.7) == "45.7s"
+
+
 def test_the_report_names_every_piece():
     with Workspace() as ws:
         build_pair(ws, 200, [("org", 0, 80), ("org", 100, 200)])
         text = _plan(ws).describe()
         assert "dub is cut here" in text
-        assert text.count("\n  dub ") == 2 and text.count("\n  fill") >= 1
+        # Piece lines, not the summary's "dub used" line: a kind, then a time.
+        assert len(re.findall(r"\n  dub +\d", text)) == 2 and len(re.findall(r"\n  fill +\d", text)) >= 1
 
 
 if __name__ == "__main__":
@@ -829,6 +839,17 @@ def test_band_envelopes_are_built_on_the_full_bands_frames():
         assert len(faster.band_onset["low"]) == len(faster.onset)
 
 
+def _longest_kept_s(plan) -> float:
+    """The longest span the plan kept the dub across without a match."""
+    longest = 0.0
+    for note in plan.notes:
+        found = re.match(r"kept the dub across (\d+):(\d+):([\d.]+) - (\d+):(\d+):([\d.]+)", note)
+        if found:
+            h1, m1, s1, h2, m2, s2 = found.groups()
+            longest = max(longest, (int(h2) * 3600 + int(m2) * 60 + float(s2)) - (int(h1) * 3600 + int(m1) * 60 + float(s1)))
+    return longest
+
+
 def test_a_scene_only_the_low_band_can_see_is_found():
     """A scene with no music: the two languages' consonants agree on
     nothing in the full band, but the bass and rumble the mixes share do
@@ -867,7 +888,11 @@ def test_a_scene_only_the_low_band_can_see_is_found():
         finally:
             for name, original in originals.items():
                 setattr(_Aligner, name, original)
-        assert plan_blind.filled_s > 30.0, plan_blind.describe()
+        # Without it the scene is not found: the dub can only be kept
+        # across it on the strength of the stretches either side, with the
+        # step placed where the agreement changes.
+        assert _longest_kept_s(plan) < 20.0, plan.describe()
+        assert _longest_kept_s(plan_blind) > 30.0, plan_blind.describe()
 
 
 def test_a_repeated_cue_is_placed_where_the_scene_continues():
@@ -953,7 +978,12 @@ def test_a_small_step_inside_an_uncorrelated_passage_is_bridged():
         long_fills = [f for f in plan.fill_segments if f.length_s > 1.5]
         assert not long_fills, plan.describe()
         assert abs(plan.filled_s - 1.0) < 0.3, plan.describe()
-        assert any("the offset steps by only +1000 ms inside it; the step was guessed" in n for n in plan.notes), plan.notes
+        # Guessed with seconds of dub either side of it: said as a warning,
+        # where it is seen, not among the notes.
+        assert any(
+            "the offset steps by +1.000 s inside it; the step was guessed" in w and w.endswith("check the lips there")
+            for w in plan.warnings
+        ), plan.warnings
         # The step lies inside the bedless passage, and the dub is
         # continuous across it: what precedes the fill on the video is the
         # last dub before the cut, what follows is the first after.
@@ -1017,3 +1047,61 @@ def test_the_dub_rate_set_by_hand_fixes_the_speed():
         assert any("said to be mastered at 23.976 fps" in line for line in logs), "\n".join(logs)
         assert not any("checking the dub's rate" in line for line in logs), "\n".join(logs)
         _check(plan, expected, edge_tolerance_s=0.5, offset_tolerance_s=0.01)
+
+
+class _StubAligner:
+    """Just enough of the aligner for _follow_effects: the speech arbiter
+    returns a scripted level, and nothing else is asked."""
+
+    def __init__(self, speech=None, effects_prefer=False):
+        self.logs = []
+        self.asked = []
+        self._speech = speech
+        self._effects_prefer_answer = effects_prefer
+
+    def log(self, message):
+        self.logs.append(message)
+
+    def speech_choice(self, lo_s, hi_s, first_s, second_s):
+        self.asked.append((lo_s, hi_s, first_s, second_s))
+        return self._speech
+
+    def _effects_prefer(self, positions, other_ms, own_ms):
+        return self._effects_prefer_answer
+
+
+def test_an_effects_stretch_sits_where_its_own_lines_do():
+    """A stretch the effects band placed, next to one the music and
+    dialogue placed a few frames away: where the effects had stepped away
+    from the picture (see BANDS), the stretch's lines follow the
+    neighbour's level, and the dialogue says so -- the stretch moves to
+    it, and the effects' flag goes with it. Where the dialogue cannot
+    tell, or prefers the stretch's own level, the stretch stays."""
+    for answer in (None, -130.166):
+        aligner = _StubAligner(speech=answer)
+        blocks = [
+            Block(100.0, 130.0, -130.0566, effects=False),
+            Block(130.109, 150.0, -130.166, effects=True),
+        ]
+        _follow_effects(aligner, blocks)
+        assert blocks[1].offset_s == -130.166 and blocks[1].effects is True
+        assert aligner.asked, "the dialogue was not asked"
+    aligner = _StubAligner(speech=-130.0566)
+    blocks = [
+        Block(100.0, 130.0, -130.0566, effects=False),
+        Block(130.109, 150.0, -130.166, effects=True),
+    ]
+    _follow_effects(aligner, blocks)
+    assert blocks[1].offset_s == -130.0566 and blocks[1].effects is False
+    assert aligner.asked == [(130.109, 150.0, -130.166, -130.0566)]
+    assert any("the dialogue prefers the neighbour's" in line for line in aligner.logs)
+    # A music-placed stretch beside an effects-placed one still follows
+    # the effects when the effects on its own span prefer the neighbour's
+    # level and the dialogue does not object.
+    aligner = _StubAligner(speech=None, effects_prefer=True)
+    blocks = [
+        Block(100.0, 130.0, -130.0566, effects=False),
+        Block(130.109, 150.0, -130.166, effects=True),
+    ]
+    _follow_effects(aligner, blocks)
+    assert blocks[0].offset_s == -130.166 and blocks[0].effects is True

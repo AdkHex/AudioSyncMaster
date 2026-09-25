@@ -52,10 +52,12 @@ try:
     from audiosync.dubrender import mux as mux_dub
     from audiosync.dubrender import render as render_dub
     from audiosync.dubsync import DubSyncPlan, build_envelope, plan_dubsync, verify_output
+    from audiosync.linecheck import line_check
     from audiosync.waveform import is_loaded as waveform_loaded
     from audiosync.waveform import load as waveform_load
     from audiosync.waveform import peaks as waveform_peaks
     from audiosync.media import Cancelled, CancellationToken, MediaError, has_ffmpeg, probe
+    from audiosync.shots import PictureCuts
     from audiosync.mux import (
         apply_correction,
         choose_preview_position,
@@ -539,6 +541,20 @@ def handle_apply(request: dict) -> None:
           "cancelled": token.cancelled})
 
 
+def _check_lines(verification, plan, output: str, token, progress, log) -> None:
+    """The line check on the written track (see ``audiosync.linecheck``),
+    added to the verification; a failure is said, never fatal."""
+    stage = "checking the dub's lines against the original's"
+    progress(0, stage)
+    try:
+        lines = line_check(plan, output, token=token, progress=lambda f: progress(int(100 * f), stage))
+    except MediaError as exc:
+        log(f"the line check could not run: {exc}")
+        return
+    verification.lines, verification.lines_text = lines.to_dict(), lines.describe()
+    progress(100, stage)
+
+
 def handle_dubsync(request: dict) -> None:
     """Lay a cut dub onto its video and write the result.
 
@@ -621,6 +637,7 @@ def handle_dubsync(request: dict) -> None:
             )
             verification = verify_output(primary, finished, plan, token)
             progress(100, stage)
+            _check_lines(verification, plan, output, token, progress, emit_log)
             emit_log(verification.describe())
 
         muxed = None
@@ -738,6 +755,7 @@ def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken)
             )
             verification = verify_output(primary, finished, plan, token)
             progress(100, stage)
+            _check_lines(verification, plan, output, token, progress, log)
             log(verification.describe())
 
         muxed = None
@@ -879,6 +897,53 @@ def handle_waveform_peaks(request: dict) -> None:
         _set_token(None)
 
 
+# The picture cuts of the videos the editor has shown, newest last: each
+# keeps the spans it has decoded, so panning back is free. Keyed by path
+# and mtime, so a file written over is read again.
+_SHOT_CUTS: "dict[tuple[str, float], PictureCuts]" = {}
+_SHOT_CUTS_KEEP = 4
+# The most picture one request decodes: about 30 s to a minute of work.
+SHOT_CUTS_MAX_SPAN_S = 600.0
+
+
+def _picture_cuts(path: str) -> PictureCuts:
+    key = (path, os.path.getmtime(path))
+    cuts = _SHOT_CUTS.pop(key, None)
+    if cuts is None:
+        # No budget of its own: the editor asks for bounded spans, one at
+        # a time, and only for what is on screen.
+        cuts = PictureCuts(path, log=emit_log, budget_s=float("inf"))
+    _SHOT_CUTS[key] = cuts
+    while len(_SHOT_CUTS) > _SHOT_CUTS_KEEP:
+        _SHOT_CUTS.pop(next(iter(_SHOT_CUTS)))
+    return cuts
+
+
+def handle_shot_cuts(request: dict) -> None:
+    """The video's shot changes across a span, for the cut editor's ruler.
+
+    ``startS``/``endS`` are on the video file's clock, the plan's. The
+    span is clamped to SHOT_CUTS_MAX_SPAN_S from its start and the reply
+    carries the span actually read; ``cuts`` is null when the picture
+    cannot be read (no video stream, a decode that failed).
+    """
+    path = request.get("path")
+    request_id = request.get("requestId")
+    if not path or not os.path.isfile(path):
+        emit({"type": "shotCuts", "path": path, "requestId": request_id, "error": "file not found"})
+        return
+    reply = {"type": "shotCuts", "path": path, "requestId": request_id}
+    try:
+        lo = max(0.0, float(request.get("startS", 0.0) or 0.0))
+        hi = min(float(request.get("endS", 0.0) or 0.0), lo + SHOT_CUTS_MAX_SPAN_S)
+        reply.update({"startS": lo, "endS": max(lo, hi)})
+        cuts = _picture_cuts(path)
+        found = cuts.within(lo, hi) if hi > lo else []
+        emit({**reply, "cuts": found, "frameS": cuts.frame_s})
+    except Exception as exc:  # noqa: BLE001 - the host waits for this reply
+        emit({**reply, "error": f"{type(exc).__name__}: {exc}"})
+
+
 def handle_dubsync_preview(request: dict) -> None:
     """Render a span of a plan -- as edited in the app -- to play back.
 
@@ -939,6 +1004,7 @@ HANDLERS = {
     "waveformPeaks": handle_waveform_peaks,
     "waveformBuild": handle_waveform_build,
     "dubsyncPreview": handle_dubsync_preview,
+    "shotCuts": handle_shot_cuts,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }

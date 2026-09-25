@@ -66,6 +66,22 @@ describe("DubWaveformStrip", () => {
     expect(render({ plan })).not.toContain("Play video");
   });
 
+  it("says how to get around the waveforms whenever they are drawn, during a run as after it", () => {
+    const hint = "Drag to scroll · Ctrl/⌘-wheel or pinch to zoom · click to place the cursor";
+    const draft: DubSyncPlan = { ...plan, segments: plan.segments.map((s) => (s.kind === "fill" ? { ...s, note: DRAFT_NOTE } : s)) };
+    expect(render({ plan: draft, status: { label: "Placing the cuts", percent: 72 } })).toContain(hint);
+    expect(render({ plan })).toContain(hint);
+    // Shift-drag is no longer the way to scroll, so it is no longer offered.
+    expect(render({ plan })).not.toContain("Shift-drag pans");
+    // Nothing to get around while the files are still being read.
+    expect(render()).not.toContain(hint);
+  });
+
+  it("draws the whole film under the lanes, to click or drag the view along", () => {
+    const html = render({ plan });
+    expect(html).toContain('aria-label="The whole film: click or drag to move the view"');
+  });
+
   it("lets one of several pairs be chosen", () => {
     const html = render({ choices: [{ name: "E01.mkv" }, { name: "E02.mkv" }], index: 1 });
     expect(html).toContain('aria-label="Pair shown"');

@@ -385,6 +385,57 @@ def test_preview_pairs_dub_scope_chooses_the_matcher():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_shot_cuts_reports_the_picture_cuts_of_a_span():
+    """The cut editor's ruler: the shot changes of a span on the video's
+    clock, to the frame, with the frame's length; a span too long is
+    clamped and says so; a file with no picture has no cuts to give."""
+    import shutil
+    import tempfile
+
+    from audiosync.media import ffmpeg_path
+
+    root = tempfile.mkdtemp(prefix="audiosync-shots-")
+    try:
+        # Four solid shots of 5 s at 24 fps: cuts at exactly 5, 10 and 15 s.
+        video = os.path.join(root, "cuts.mkv")
+        shots = ["red", "blue", "green", "white"]
+        inputs = []
+        for colour in shots:
+            inputs += ["-f", "lavfi", "-i", f"color=c={colour}:s=160x90:r=24:d=5"]
+        graph = "".join(f"[{i}:v]" for i in range(len(shots))) + f"concat=n={len(shots)}:v=1:a=0[v]"
+        subprocess.run(
+            [ffmpeg_path(), "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "[v]",
+             "-c:v", "libx264", "-preset", "ultrafast", video],
+            check=True, capture_output=True,
+        )
+        sound = _case("offset_0ms")["primary"]
+        events, process = run_bridge([
+            {"command": "shotCuts", "path": video, "startS": 0, "endS": 20, "requestId": "a"},
+            {"command": "shotCuts", "path": video, "startS": 6, "endS": 12, "requestId": "b"},
+            {"command": "shotCuts", "path": video, "startS": 0, "endS": 5000, "requestId": "c"},
+            {"command": "shotCuts", "path": sound, "startS": 0, "endS": 10, "requestId": "d"},
+            {"command": "shotCuts", "path": os.path.join(root, "missing.mkv"), "startS": 0, "endS": 10, "requestId": "e"},
+        ])
+        assert process.returncode == 0, process.stderr.decode()[:600]
+        replies = {e["requestId"]: e for e in events if e["type"] == "shotCuts"}
+        assert sorted(replies) == ["a", "b", "c", "d", "e"], replies
+
+        whole = replies["a"]
+        assert [round(c, 2) for c in whole["cuts"]] == [5.0, 10.0, 15.0], whole
+        assert abs(whole["frameS"] - 1 / 24) < 1e-6, whole
+        assert (whole["startS"], whole["endS"]) == (0.0, 20.0), whole
+        # A span inside one already read comes from what was decoded.
+        assert [round(c, 2) for c in replies["b"]["cuts"]] == [10.0], replies["b"]
+        # Clamped to ten minutes from its start.
+        assert replies["c"]["endS"] == 600.0, replies["c"]
+        assert [round(c, 2) for c in replies["c"]["cuts"]] == [5.0, 10.0, 15.0], replies["c"]
+        # A sound file has no picture: no cuts, and no error either.
+        assert replies["d"]["cuts"] is None and "error" not in replies["d"], replies["d"]
+        assert replies["e"]["error"] == "file not found", replies["e"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

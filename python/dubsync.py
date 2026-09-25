@@ -41,6 +41,7 @@ from audiosync.dubsync import (  # noqa: E402
     plan_dubsync,
     verify_output,
 )
+from audiosync.linecheck import line_check  # noqa: E402
 from audiosync.media import Cancelled, MediaError, has_ffmpeg  # noqa: E402
 
 
@@ -202,7 +203,11 @@ def main(argv=None) -> int:
             )
             if not args.quiet and sys.stdout.isatty():
                 print("\r" + " " * 60 + "\r", end="")
-            print(verify_output(primary, finished, plan).describe())
+            verification = verify_output(primary, finished, plan)
+            print("--- checking the dub's lines against the original's ---")
+            lines = line_check(plan, output)
+            verification.lines, verification.lines_text = lines.to_dict(), lines.describe()
+            print(verification.describe())
 
         if args.mux:
             target = args.mux if isinstance(args.mux, str) else None

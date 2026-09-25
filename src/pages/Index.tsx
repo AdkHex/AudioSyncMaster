@@ -139,6 +139,29 @@ export default function Index() {
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveRecentFolders(recentFolders), [recentFolders]);
 
+  // The media files in each side's last folder, offered one click each
+  // while the side is empty. A side whose last folder is gone borrows the
+  // other's: a dub is as often beside its video as in a folder of its own.
+  const [folderFiles, setFolderFiles] = useState<{ video: FileItem[]; audio: FileItem[] }>({ video: [], audio: [] });
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    const list = async (folder: string | null, kind: "video" | "audio") =>
+      folder ? api.resolveDroppedPaths([folder], kind, "media").catch(() => [] as FileItem[]) : [];
+    const videoLike = (name: string) => /\.(mkv|mp4|m4v|mov|avi|ts|webm|wmv|flv)$/i.test(name);
+    (async () => {
+      const video = await list(recentFolders.video, "video");
+      let audio = await list(recentFolders.audio, "audio");
+      if (audio.length === 0) audio = await list(recentFolders.video, "audio");
+      const prefer = (files: FileItem[], wantVideo: boolean) =>
+        [...files].sort((a, b) => Number(videoLike(b.name) === wantVideo) - Number(videoLike(a.name) === wantVideo));
+      if (!cancelled) setFolderFiles({ video: prefer(video, true), audio: prefer(audio, false) });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [desktop, recentFolders.video, recentFolders.audio]);
+
   const persistHistory = useCallback((entries: HistoryEntry[]) => {
     // saveHistory returns what actually fit within the storage quota.
     setHistory(saveHistory(entries));
@@ -424,6 +447,30 @@ export default function Index() {
       }
     },
     [desktop, probeFiles],
+  );
+
+  /** A file added by its path, typed into a panel: resolved the way a drop
+   *  is, so a folder path adds what the folder holds. */
+  const handleAddPath = useCallback(
+    async (kind: "video" | "audio", path: string) => {
+      if (!desktop) {
+        toast.error("Adding files needs the desktop app.");
+        return;
+      }
+      try {
+        const accept = stateRef.current.mode === "dubsync" ? "media" : kind;
+        const files = await api.resolveDroppedPaths([path], kind, accept);
+        if (files.length === 0) {
+          toast.error("No supported media file at that path.");
+          return;
+        }
+        addFiles(kind, files, null);
+        toast.success(`Added ${files.length} file${files.length === 1 ? "" : "s"}`);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not read that path.");
+      }
+    },
+    [addFiles, desktop],
   );
 
   // Native OS drag-and-drop. Webview File objects carry no path in Tauri v2,
@@ -1151,6 +1198,8 @@ export default function Index() {
           trackChoices={trackChoices}
           onTrackChange={handleTrackChange}
           onBrowse={(kind) => void handleBrowse(kind)}
+          onAddPath={(kind, path) => void handleAddPath(kind, path)}
+          suggestions={folderFiles}
           onRemove={(kind, id) => dispatch({ type: "removeFiles", kind, ids: [id] })}
           onClear={(kind) => dispatch({ type: "clearFiles", kind })}
           onDragEnter={setDragTarget}
@@ -1409,6 +1458,7 @@ export default function Index() {
           plan={dub.jobs[editingJob].plan!}
           enginePlan={dub.jobs[editingJob].enginePlan}
           fetchPeaks={api.waveformPeaks}
+          fetchShotCuts={api.shotCuts}
           onPreview={handleEditPreview}
           renderDubPreview={api.renderDubPreview}
           readPreviewBytes={api.readPreviewBytes}

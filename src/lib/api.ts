@@ -201,6 +201,31 @@ export async function waveformBuild(request: WaveformBuildRequest): Promise<Wave
   return invoke<WaveformReady>("waveform_build", { request });
 }
 
+export interface ShotCuts {
+  /** The video's shot changes in the span, in seconds on its own clock
+   *  (the plan's); null when the picture cannot be read. */
+  cuts: number[] | null;
+  /** One frame of the video, when its rate is known. */
+  frameS: number | null;
+  /** The span actually read: a long one is cut to ten minutes. */
+  startS: number;
+  endS: number;
+}
+
+/** The video's picture cuts across a span, for the cut editor's ruler.
+ *  Decodes the picture (a second or so per 10-20 s of it) the first time
+ *  a span is asked for; served by an engine process of its own. */
+export async function shotCuts(videoPath: string, startS: number, endS: number): Promise<ShotCuts> {
+  requireDesktop("Reading the picture cuts");
+  const reply = await invoke<Partial<ShotCuts>>("shot_cuts", { request: { path: videoPath, startS, endS } });
+  return {
+    cuts: reply.cuts ?? null,
+    frameS: reply.frameS ?? null,
+    startS: reply.startS ?? startS,
+    endS: reply.endS ?? endS,
+  };
+}
+
 export interface WaveformProgressEvent {
   path: string;
   track: number;

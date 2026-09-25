@@ -1,11 +1,12 @@
-import { AlertTriangle, CheckCircle2, FolderOpen, Info, Play, Scissors, XCircle } from "lucide-react";
-import { memo } from "react";
+import { AlertTriangle, CheckCircle2, ClipboardCopy, FolderOpen, Info, Play, Scissors, XCircle } from "lucide-react";
+import { memo, useState } from "react";
 
 import { Spinner, Tag } from "@/components/ui";
 import { cx } from "@/lib/cx";
-import { describePlan, describeStage, type DubQueueJob, type DubQueueState } from "@/lib/dubQueueReducer";
+import { describePlan, describeStage, reportText, type DubQueueJob, type DubQueueState } from "@/lib/dubQueueReducer";
 import {
   AUDIBLE_MS,
+  formatMs,
   formatClock,
   formatSpan,
   isUnmatchedFill,
@@ -148,6 +149,17 @@ function JobRow({
 }) {
   const { status, output, verification, plan } = job;
   const finished = status === "done" || status === "failed" || status === "cancelled";
+  const [copied, setCopied] = useState(false);
+  /** Everything about the job as text on the clipboard, for a message. */
+  const copyReport = () => {
+    void navigator.clipboard?.writeText(reportText(job)).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      },
+      () => undefined,
+    );
+  };
   return (
     <li className={cx("border-b border-border", shown && "bg-primary/[0.04]")}>
       {/* The row's head picks the job whose waveforms are shown above. */}
@@ -241,6 +253,15 @@ function JobRow({
           >
             <FolderOpen className="h-3 w-3" aria-hidden />
             Show in folder
+          </button>
+          <button
+            type="button"
+            onClick={copyReport}
+            title="The plan, what to check and how the track measured, as text"
+            className="flex items-center gap-1.5 rounded-[7px] border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+          >
+            <ClipboardCopy className="h-3 w-3" aria-hidden />
+            {copied ? "Copied" : "Copy report"}
           </button>
           {plan && plan.segments.length > 0 && (
             <button
@@ -492,9 +513,9 @@ function Verification({ verification }: { verification: DubVerification }) {
           </Tag>
         ) : measured.length > 0 && worst !== null ? (
           <Tag tone={tone}>
-            {verification.typicalMs !== null && `${verification.typicalMs.toFixed(0)} ms typical`}
+            {verification.typicalMs !== null && `${formatMs(verification.typicalMs)} ms typical`}
             {" · "}
-            {worst.toFixed(0)} ms at worst
+            {formatMs(worst)} ms at worst
             {share !== null && share < 95 && ` · ${share}% of the runtime within ${AUDIBLE_MS} ms`}
           </Tag>
         ) : (
@@ -504,18 +525,52 @@ function Verification({ verification }: { verification: DubVerification }) {
 
       <p className="mt-1.5 max-w-[72ch] text-[11.5px] leading-relaxed text-muted-foreground">
         {measured.length > 0
-          ? `Measured at ${measured.length} spot${measured.length === 1 ? "" : "s"} along the runtime. Lip-sync starts to show around ${AUDIBLE_MS} ms; the measurement resolves 2 ms.`
+          ? `Measured at ${measured.length} spot${measured.length === 1 ? "" : "s"} along the runtime. Lip-sync starts to show around ${AUDIBLE_MS} ms; the measurement resolves a fraction of a millisecond.`
           : "None of the spots could be measured: the shared music and effects were too quiet, or every spot fell on a fill."}
         {verification.sweepWindows > 0 && share !== null && (
           <>
             {" "}
             A sweep of {verification.sweepWindows} short windows measured{" "}
             {verification.sweepMeasured}, and {share}% of those sit within {AUDIBLE_MS} ms
-            {verification.sweepWorstMs !== null && ` (worst ${verification.sweepWorstMs.toFixed(0)} ms)`}
+            {verification.sweepWithin1Ms !== undefined && verification.sweepMeasured > 0 &&
+              ` (${Math.round((100 * verification.sweepWithin1Ms) / verification.sweepMeasured)}% within 1 ms)`}
+            {verification.sweepWorstMs !== null && `; worst ${formatMs(verification.sweepWorstMs)} ms`}
             .
           </>
         )}
       </p>
+
+      {verification.lines && verification.lines.judged > 0 && (
+        <p className="mt-1.5 max-w-[72ch] text-[11.5px] leading-relaxed text-muted-foreground">
+          Lines: across {verification.lines.judged} of {verification.lines.windows.length} minute-long dialogue
+          windows the dub&apos;s speech sits{" "}
+          <span className="tabular font-mono">
+            {(verification.lines.overallMs ?? 0) >= 0 ? "+" : ""}
+            {(verification.lines.overallMs ?? 0).toFixed(0)} ms
+          </span>{" "}
+          from the original&apos;s, which is in sync with the lips; {verification.lines.withinTolerance} of{" "}
+          {verification.lines.judged} windows within {verification.lines.toleranceMs} ms (one window reads to about a
+          tenth of a second).
+        </p>
+      )}
+      {verification.lines?.windows.some((w) => w.lagMs !== null && Math.abs(w.lagMs) > verification.lines!.toleranceMs) && (
+        <ul className="mt-1.5 space-y-1">
+          {verification.lines.windows
+            .filter((w) => w.lagMs !== null && Math.abs(w.lagMs) > verification.lines!.toleranceMs)
+            .map((w, index) => (
+              <li key={index} className="flex items-baseline gap-2 text-[11.5px] text-warning">
+                <AlertTriangle className="h-3 w-3 shrink-0 self-center" aria-hidden />
+                <span className="tabular font-mono">
+                  {formatClock(w.startS)} &ndash; {formatClock(w.endS)}
+                </span>
+                <span>
+                  the lines sit {w.lagMs! >= 0 ? "+" : ""}
+                  {w.lagMs!.toFixed(0)} ms from the original&apos;s &mdash; check the lips
+                </span>
+              </li>
+            ))}
+        </ul>
+      )}
 
       {verification.stretches.length > 0 && (
         <ul className="mt-2.5 space-y-1">
@@ -532,7 +587,7 @@ function Verification({ verification }: { verification: DubVerification }) {
                 out by{" "}
                 <span className="tabular font-mono">
                   {stretch.residualMs >= 0 ? "+" : ""}
-                  {stretch.residualMs.toFixed(0)} ms
+                  {formatMs(stretch.residualMs)} ms
                 </span>{" "}
                 over {stretch.windows} windows &mdash; would be audible
               </span>
@@ -555,7 +610,7 @@ function Verification({ verification }: { verification: DubVerification }) {
               ) : (
                 <span className={cx(Math.abs(spot.residualMs) > AUDIBLE_MS && "text-destructive")}>
                   {spot.residualMs >= 0 ? "+" : ""}
-                  {spot.residualMs.toFixed(0)}
+                  {formatMs(spot.residualMs)}
                 </span>
               )}
             </span>

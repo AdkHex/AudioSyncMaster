@@ -21,13 +21,14 @@ minute can accumulate.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shlex
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -40,8 +41,10 @@ from .media import (
     MediaError,
     _popen_kwargs,
     _terminate,
+    audio_lead_s,
     ffmpeg_path,
     probe,
+    stream_audio,
 )
 
 # Crossfade at every seam. Ten milliseconds is below what the ear resolves
@@ -86,6 +89,11 @@ class RenderOptions:
     """How a dub at another speed is brought onto the video's clock:
     ``resample`` changes rate and pitch together, exactly as undoing a
     frame-rate conversion should; ``atempo`` keeps the pitch."""
+    exact: bool = True
+    """Read each file once from the top rather than seeking to every piece
+    (see ``_TrackReader``): exact to the sample, at the cost of decoding
+    what lies before the first piece. Off for previews, which read a few
+    seconds from anywhere in the film and must be ready at once."""
 
 
 @dataclass
@@ -336,6 +344,159 @@ def _discard(path: str) -> None:
         pass
 
 
+# Decoded audio kept behind the reading position, so a piece that starts a
+# little before the last one ended -- a crossfade, a step back of a few
+# frames at a trim -- is served without decoding the file again.
+READER_HISTORY_S = 20.0
+
+
+def _decode_plan(rate: int, speed: float, stretch: str, native_rate: Optional[int]) -> Tuple[int, Optional[str], bool]:
+    """How to decode a file so its samples land on an output clock of
+    ``rate`` at ``speed``: (decode rate, ffmpeg filter, exact).
+
+    Exact when the conversion is a ratio of whole numbers: asking the
+    decoder for ``rate * speed`` when that is an integer (48048 Hz for
+    1.001, 50050 Hz for 25/23.976), or relabelling the file's own rate as
+    ``native / speed`` and resampling that to ``rate`` when that one is
+    (48048 Hz again, for 1000/1001). Otherwise the rounded rate drifts a
+    few microseconds a second and the caller reads in chunks instead.
+    """
+    if abs(speed - 1.0) < 1e-12:
+        return rate, None, True
+    if stretch == "atempo":
+        return rate, f"atempo={1.0 / speed:.9f}", False
+    target = rate * speed
+    if abs(target - round(target)) < 1e-6:
+        return int(round(target)), None, True
+    if native_rate:
+        relabel = native_rate / speed
+        if abs(relabel - round(relabel)) < 1e-6:
+            return rate, f"asetrate={int(round(relabel))},aresample={rate}", True
+    return max(1, int(round(target))), None, False
+
+
+class _TrackReader:
+    """One track, decoded once from the top and handed out by position on
+    the output clock.
+
+    A seek is only as exact as the container's timestamps: Matroska keeps
+    them to the millisecond, so a read that seeks lands up to half a
+    millisecond either side of where it was asked for, and a different
+    amount at every piece. Read from the top, sample ``i`` is sample ``i``
+    -- and on the file's clock, padded at the front exactly as the
+    analysis is (see ``audio_lead_s``), so a piece is read from exactly
+    where the analysis measured it. Pieces come in plan order and almost
+    always move forward through the file; a piece that reaches back further
+    than READER_HISTORY_S starts the decode over.
+    """
+
+    def __init__(
+        self, path: str, track: int, rate: int, channels: int, speed: float, stretch: str,
+        token: Optional[CancellationToken], native_rate: Optional[int] = None,
+    ) -> None:
+        self.path, self.track, self.rate, self.channels = path, track, rate, channels
+        self.token = token
+        self.decode_rate, self.audio_filter, self.exact = _decode_plan(rate, speed, stretch, native_rate)
+        # The padding is asked for in seconds at the rate stream_audio
+        # decodes at; on the output clock it is the file's lead times speed.
+        lead = audio_lead_s(probe(path, token), track)
+        self.pad_s = lead * speed * rate / self.decode_rate if self.audio_filter is None else lead * speed
+        self.keep = int(READER_HISTORY_S * rate)
+        self.restarts = 0
+        self._open()
+
+    def _open(self) -> None:
+        self._blocks = stream_audio(
+            self.path, self.decode_rate, track=self.track, channels=self.channels, token=self.token,
+            block_s=BLOCK_S, audio_filter=self.audio_filter, lead_s=self.pad_s,
+        )
+        self._buffer = np.zeros((0, self.channels), dtype=np.float32)
+        self._at = 0  # output sample of _buffer[0]
+        self._ended = False
+
+    def close(self) -> None:
+        blocks = getattr(self, "_blocks", None)
+        if blocks is not None:
+            blocks.close()
+
+    def _pull(self) -> bool:
+        """Append the next decoded block, keeping READER_HISTORY_S behind."""
+        if self._ended:
+            return False
+        try:
+            block = next(self._blocks)
+        except StopIteration:
+            self._ended = True
+            return False
+        block = block.reshape(-1, self.channels) if block.ndim == 1 else block
+        drop = max(0, len(self._buffer) - self.keep)
+        self._buffer = np.concatenate([self._buffer[drop:], block.astype(np.float32, copy=False)])
+        self._at += drop
+        return True
+
+    def read(self, start: int, count: int, on_block: Optional[Callable[[int], None]] = None) -> np.ndarray:
+        """``count`` samples from output sample ``start``; silence before the
+        file and past its end."""
+        out = np.zeros((count, self.channels), dtype=np.float32)
+        if count <= 0:
+            return out
+        begin = max(0, start)
+        if begin < self._at:
+            self.close()
+            self.restarts += 1
+            self._open()
+        filled = begin - start
+        while filled < count:
+            offset = start + filled - self._at
+            if offset < len(self._buffer):
+                take = min(count - filled, len(self._buffer) - offset)
+                out[filled:filled + take] = self._buffer[offset:offset + take]
+                filled += take
+                if on_block:
+                    on_block(filled)
+                continue
+            if not self._pull():
+                break
+        return out
+
+
+def on_file_clock(plan: DubSyncPlan, token: Optional[CancellationToken] = None) -> DubSyncPlan:
+    """The plan with every time on the files' own clocks.
+
+    Plans made before the analysis moved onto the file's clock (see
+    ``audio_lead_s``) counted each file from its audio's first sample. On
+    a file whose audio starts after its picture that is out by the
+    difference against every seek and every mux -- 23 ms on a real BluRay
+    MKV -- so such a plan is moved onto the file's clock before it is
+    written: the video's times by its lead, the dub's by its own.
+    """
+    if plan.timeline == "container":
+        return plan
+    video_lead = audio_lead_s(probe(plan.video_path, token), plan.video_track)
+    dub_lead = audio_lead_s(probe(plan.dub_path, token), plan.dub_track) * plan.speed
+    moved = copy.deepcopy(plan)
+    moved.timeline = "container"
+    if video_lead < 1e-9 and dub_lead < 1e-9:
+        return moved
+    segments: List[Segment] = []
+    if video_lead > 0.0005:
+        segments.append(Segment("fill", 0.0, video_lead, 0.0, note="before the original's audio starts"))
+    for segment in moved.segments:
+        segment.start_s += video_lead
+        segment.end_s += video_lead
+        if segment.kind == "dub":
+            segment.source_start_s += dub_lead
+            segment.offset_s = (segment.offset_s or 0.0) + dub_lead - video_lead
+        else:
+            segment.source_start_s += video_lead
+        segments.append(segment)
+    if segments and video_lead <= 0.0005:
+        segments[0].start_s = 0.0
+    moved.segments = segments
+    moved.video_duration_s += video_lead
+    return moved
+
+
 def render(
     plan: DubSyncPlan,
     output_path: str,
@@ -347,6 +508,7 @@ def render(
     """Write the track the plan describes."""
     options = options or RenderOptions()
     say = log or (lambda _m: None)
+    plan = on_file_clock(plan, token) if plan.segments else plan
     if options.codec not in CODECS and options.codec != "wav16":
         raise MediaError(f"Unknown codec {options.codec!r}; choose from {', '.join(CODECS)}")
     if not plan.segments:
@@ -417,6 +579,17 @@ def render(
     # same instant -- and fades in over the same span, so adding the two
     # is the crossfade.
     held = np.zeros((0, channels), dtype=np.float32)
+    # One reader per file, each decoding its file once from the top, when
+    # the reads can be exact (see _TrackReader); otherwise every piece is
+    # sought, in chunks that bound the drift of a rounded rate.
+    dub_reader: Optional[_TrackReader] = None
+    video_reader: Optional[_TrackReader] = None
+    if options.exact:
+        native = dub_track.sample_rate if dub_track else None
+        if _decode_plan(rate, plan.speed, options.stretch, native)[2]:
+            dub_reader = _TrackReader(plan.dub_path, plan.dub_track, rate, channels, plan.speed,
+                                      options.stretch, token, native)
+        video_reader = _TrackReader(plan.video_path, plan.video_track, rate, channels, 1.0, "resample", token)
     try:
         for index, segment in enumerate(plan.segments):
             if token:
@@ -441,17 +614,22 @@ def render(
                     progress(int(100 * min(base + read, total) / max(1, total)), stage)
 
             if segment.kind == "dub":
-                audio = read_span(
-                    plan.dub_path, plan.dub_track, rate, channels, source, length,
-                    plan.speed, options.stretch, token, on_chunk,
-                )
+                if dub_reader is not None:
+                    audio = dub_reader.read(source, length, on_chunk)
+                else:
+                    audio = read_span(
+                        plan.dub_path, plan.dub_track, rate, channels, source, length,
+                        plan.speed, options.stretch, token, on_chunk,
+                    )
+            elif video_reader is not None:
+                audio = video_reader.read(source, length, on_chunk)
             else:
                 audio = read_span(
                     plan.video_path, plan.video_track, rate, channels, source, length,
                     1.0, "resample", token, on_chunk,
                 )
-                if abs(plan.fill_gain_db) > 1e-6:
-                    audio *= fill_gain
+            if segment.kind != "dub" and abs(plan.fill_gain_db) > 1e-6:
+                audio *= fill_gain
 
             if lead:
                 ramp = min(xfade, length)
@@ -490,6 +668,10 @@ def render(
         encoder.abort()
         _discard(staging)
         raise
+    finally:
+        for reader in (dub_reader, video_reader):
+            if reader is not None:
+                reader.close()
 
     if not os.path.isfile(staging) or os.path.getsize(staging) == 0:
         _discard(staging)
@@ -586,6 +768,7 @@ def clip_plan(plan: DubSyncPlan, lo_s: float, hi_s: float) -> DubSyncPlan:
         speed=plan.speed, fill_gain_db=plan.fill_gain_db,
         video_duration_s=hi_s - lo_s, dub_duration_s=plan.dub_duration_s,
         video_fps=plan.video_fps, dub_rate=plan.dub_rate, segments=pieces,
+        timeline=plan.timeline,
     )
     return clipped
 
@@ -698,14 +881,14 @@ def excerpt(
             segments=[Segment("fill", 0.0, hi_s - lo_s, lo_s)],
         )
         wav_path = root + ".wav"
-        render(source, wav_path, RenderOptions(codec="wav16"), token=token, log=log)
+        render(source, wav_path, RenderOptions(codec="wav16", exact=False), token=token, log=log)
         return wav_path, lo_s, hi_s
 
     clipped = clip_plan(plan, lo_s, hi_s)
     if not clipped.segments:
         raise MediaError("Nothing to preview in that span")
     wav_path = root + ".wav"
-    render(clipped, wav_path, RenderOptions(codec="wav16"), token=token, log=log)
+    render(clipped, wav_path, RenderOptions(codec="wav16", exact=False), token=token, log=log)
     if what == "audio":
         return wav_path, lo_s, hi_s
     command = [

@@ -279,8 +279,25 @@ export interface DubSegment {
   /** Envelope correlation across the stretch, 0-1, for "dub" pieces. */
   match: number | null;
   note: string;
+  /** For a fill, why the original plays there: before the dub starts
+   *  ("head"), after it ends ("tail"), the dub lacks the scene ("cut"), the
+   *  dub is silent ("silent"), dub replaced because it did not correlate
+   *  ("unmatched"), or not placed yet ("draft"). Absent from older plans. */
+  reason?: string;
   /** How far either edge might really sit from where it was placed. */
   uncertaintyS: number;
+}
+
+/** How much of the dub a plan uses, and why the original plays elsewhere. */
+export interface DubPlanSummary {
+  dubUsedS: number;
+  dubDurationS: number;
+  dubUsedShare: number | null;
+  /** Seconds of fill per reason (see DubSegment.reason). */
+  fillS: Record<string, number>;
+  /** Of the fills, seconds that are doubt about where a cut lies rather
+   *  than material the dub lacks. */
+  doubtS: number;
 }
 
 export interface DubSyncPlan {
@@ -315,6 +332,13 @@ export interface DubSyncPlan {
   error: string | null;
   /** Seconds of the output taken from the original. */
   filledS: number;
+  /** Absent from plans made before it was added. */
+  summary?: DubPlanSummary;
+  /** Which clock the times are on: each file's own ("container"), the
+   *  clock seeks, picture frames and muxers use; or, in plans made before
+   *  that, each audio stream's first sample ("stream", or absent). The
+   *  engine moves the latter onto the files' clocks before writing. */
+  timeline?: "container" | "stream";
 }
 
 export interface DubSpotCheck {
@@ -340,9 +364,37 @@ export interface DubVerification {
   sweepWindows: number;
   sweepMeasured: number;
   sweepWithinAudible: number;
+  /** Measured sweep windows within 1 ms and 5 ms. Absent from checks made
+   *  before they were counted. */
+  sweepWithin1Ms?: number;
+  sweepWithin5Ms?: number;
   sweepTypicalMs: number | null;
   sweepWorstMs: number | null;
   stretches: DubStretch[];
+  /** The line check: where the dub's lines sit against the original's,
+   *  which are in sync with the lips. Absent from older checks. */
+  lines?: DubLineCheck | null;
+}
+
+export interface DubLineWindow {
+  startS: number;
+  endS: number;
+  /** Where the dub's lines sit against the original's (+ = later); null
+   *  where the window could not be judged, and `note` says why. */
+  lagMs: number | null;
+  z: number;
+  note: string;
+}
+
+export interface DubLineCheck {
+  windows: DubLineWindow[];
+  judged: number;
+  /** The median lag over the judged windows: the dub's lip sync. */
+  overallMs?: number | null;
+  typicalMs: number | null;
+  worstMs: number | null;
+  withinTolerance: number;
+  toleranceMs: number;
 }
 
 export interface DubOutput {
@@ -435,15 +487,26 @@ export function formatClock(seconds: number): string {
 
 /** A span's length as people say it: "2m 30.0s", "0.7s". */
 export function formatSpan(seconds: number): string {
-  if (seconds >= 60) {
-    const minutes = Math.floor(seconds / 60);
-    return `${minutes}m ${(seconds - minutes * 60).toFixed(1).padStart(4, "0")}s`;
+  // To the tenth first: 359.96 s is 6m 00.0s, not 5m 60.0s.
+  const tenths = Math.round(seconds * 10);
+  if (tenths >= 600) {
+    const minutes = Math.floor(tenths / 600);
+    return `${minutes}m ${((tenths - minutes * 600) / 10).toFixed(1).padStart(4, "0")}s`;
   }
-  return `${seconds.toFixed(1)}s`;
+  return `${(tenths / 10).toFixed(1)}s`;
 }
 
-/** Lip-sync error becomes visible around here. */
-export const AUDIBLE_MS = 100;
+/** Lip-sync error becomes visible around here: sound 45 ms early is where
+ *  viewers start to see it (ITU-R BT.1359; late sound is tolerated to about
+ *  125 ms, and the stricter bound is held both ways). */
+export const AUDIBLE_MS = 45;
+
+/** A few milliseconds read as "0 ms" rounded to the unit, which hides the
+ *  difference between a track a tenth of a millisecond out and one four
+ *  out; under ten milliseconds the tenth is shown. */
+export function formatMs(ms: number): string {
+  return Math.abs(ms) < 10 ? ms.toFixed(1) : ms.toFixed(0);
+}
 
 /** The note the engine puts on a fill that replaced dub which was audible but
  *  could not be matched -- the "Replace stretches that did not correlate"

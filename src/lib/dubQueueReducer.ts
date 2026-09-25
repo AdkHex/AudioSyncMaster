@@ -8,7 +8,11 @@
  *  pair per run. */
 
 import {
+  AUDIBLE_MS,
+  formatClock,
   formatFps,
+  formatMs,
+  formatSpan,
   isUnmatchedFill,
   type DubJobOutcome,
   type DubSyncPlan,
@@ -285,7 +289,80 @@ export function describePlan(plan: DubSyncPlan): string {
   } else if (Math.abs(plan.speed - 1) > 1e-9) {
     parts.push(`dub played at ${plan.speed.toFixed(6)}×`);
   }
+  if (plan.summary?.dubUsedShare !== null && plan.summary?.dubUsedShare !== undefined) {
+    parts.push(`${(100 * plan.summary.dubUsedShare).toFixed(1)}% of the dub used`);
+  }
   return parts.join(", ");
+}
+
+/** Why the original plays, in the words the report uses. */
+const REASON_WORDS: Record<string, string> = {
+  head: "before the dub starts",
+  tail: "after the dub ends",
+  cut: "the dub lacks the scene",
+  silent: "the dub is silent",
+  unmatched: "dub replaced (did not correlate)",
+  draft: "not placed yet",
+};
+
+/** Everything about one job as plain text, for pasting into a message:
+ *  the files, what the plan does and why, every piece, what to check, and
+ *  how the written track measured against the video. */
+export function reportText(job: DubQueueJob): string {
+  const lines: string[] = [`Dub sync report: ${job.name} + ${job.dubName}`, `video: ${job.videoPath}`, `dub: ${job.dubPath}`];
+  const plan = job.plan;
+  if (job.error) lines.push(`error: ${job.error}`);
+  if (plan) {
+    lines.push("", describePlan(plan));
+    if (plan.summary) {
+      const fills = Object.entries(plan.summary.fillS)
+        .filter(([, seconds]) => seconds > 0)
+        .map(([reason, seconds]) => `${formatSpan(seconds)} ${REASON_WORDS[reason] ?? reason}`);
+      lines.push(
+        `dub used: ${formatClock(plan.summary.dubUsedS)} of ${formatClock(plan.summary.dubDurationS)}` +
+          (fills.length ? `; the original plays where ${fills.join("; ")}` : ""),
+      );
+    }
+    lines.push("", "pieces:");
+    for (const segment of plan.segments) {
+      const span = `${formatClock(segment.startS)} - ${formatClock(segment.endS)}`;
+      lines.push(
+        segment.kind === "dub"
+          ? `  dub   ${span}  offset ${(segment.offsetS ?? 0) >= 0 ? "+" : ""}${(segment.offsetS ?? 0).toFixed(4)}s  match ${(segment.match ?? 0).toFixed(2)}`
+          : `  fill  ${span}  ${formatSpan(segment.endS - segment.startS)}  ${segment.note}`,
+      );
+    }
+    if (plan.warnings.length) lines.push("", "to check:", ...plan.warnings.map((w) => `  ! ${w}`));
+    if (plan.notes?.length) lines.push("", "notes:", ...plan.notes.map((n) => `  - ${n}`));
+  }
+  const check = job.verification;
+  if (check) {
+    lines.push("", "checked against the video:");
+    lines.push(
+      `  spots: typically ${check.typicalMs === null ? "?" : formatMs(check.typicalMs)} ms, worst ${check.worstMs === null ? "?" : formatMs(check.worstMs)} ms`,
+      `  sweep: ${check.sweepMeasured} of ${check.sweepWindows} windows measured, ${check.sweepWithinAudible} within ${AUDIBLE_MS} ms` +
+        (check.sweepWithin1Ms !== undefined ? `, ${check.sweepWithin1Ms} within 1 ms` : "") +
+        (check.sweepWorstMs !== null ? `, worst ${formatMs(check.sweepWorstMs)} ms` : ""),
+    );
+    for (const stretch of check.stretches) {
+      lines.push(`  ! ${formatClock(stretch.startS)} - ${formatClock(stretch.endS)} out by ${formatMs(stretch.residualMs)} ms`);
+    }
+    if (check.lines) {
+      const l = check.lines;
+      lines.push(
+        `  lines: ${l.judged} of ${l.windows.length} dialogue windows judged` +
+          (l.overallMs !== null && l.overallMs !== undefined ? `, overall ${l.overallMs >= 0 ? "+" : ""}${l.overallMs.toFixed(0)} ms from the original's` : "") +
+          `, ${l.withinTolerance} within ${l.toleranceMs} ms`,
+      );
+      for (const w of l.windows) {
+        if (w.lagMs !== null && Math.abs(w.lagMs) > l.toleranceMs) {
+          lines.push(`  ! lines ${formatClock(w.startS)} - ${formatClock(w.endS)} at ${w.lagMs >= 0 ? "+" : ""}${w.lagMs.toFixed(0)} ms`);
+        }
+      }
+    }
+  }
+  if (job.output) lines.push("", `written: ${job.output.outputPath}`);
+  return lines.join("\n");
 }
 
 /** A stage name as the engine reports it, said the way the row says it. */

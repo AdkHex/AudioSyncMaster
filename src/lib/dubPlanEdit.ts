@@ -299,6 +299,7 @@ export function asLoadedPlan(pair: {
     videoDurationS: videoS,
     dubDurationS: dubS,
     segments,
+    timeline: "container",
     warnings: [],
     notes: [],
     error: null,
