@@ -334,6 +334,9 @@ export function reportText(job: DubQueueJob): string {
     }
     if (plan.warnings.length) lines.push("", "to check:", ...plan.warnings.map((w) => `  ! ${w}`));
     if (plan.notes?.length) lines.push("", "notes:", ...plan.notes.map((n) => `  - ${n}`));
+    if (plan.voicePieces?.length) {
+      lines.push("", "voices moved:", ...plan.voicePieces.map((p) => `  - ${p.note}`));
+    }
   }
   const check = job.verification;
   if (check) {

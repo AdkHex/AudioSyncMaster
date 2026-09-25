@@ -1,17 +1,26 @@
 import { RefreshCw } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { Dialog } from "@/components/Dialog";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { Button } from "@/components/ui";
+import { Button, ProgressBar } from "@/components/ui";
+import * as api from "@/lib/api";
 import { cx } from "@/lib/cx";
-import { DEFAULT_SETTINGS, type AppSettings, type SyncMode } from "@/lib/types";
+import {
+  DEFAULT_SETTINGS,
+  formatSize,
+  type AppSettings,
+  type SyncMode,
+  type VoiceToolsStatus,
+} from "@/lib/types";
 
 interface SettingsDialogProps {
   open: boolean;
   settings: AppSettings;
   mode: SyncMode;
   version: string;
+  /** A sync is running; disables installing or removing the voice tools. */
+  busy?: boolean;
   onChange: (settings: AppSettings) => void;
   onClose: () => void;
   onCheckForUpdate?: () => void;
@@ -97,6 +106,7 @@ export function SettingsDialog({
   settings,
   mode,
   version,
+  busy = false,
   onChange,
   onClose,
   onCheckForUpdate,
@@ -271,6 +281,23 @@ export function SettingsDialog({
               />
             }
           />
+
+          <Field
+            label="Check the dub's voices against the lips"
+            htmlFor={`${ids}-fix-voices`}
+            hint="Some dubs were cut apart from their music, so their voices land off the lips. The voice check finds those scenes and moves only the voices. Needs a one-time download."
+            control={
+              <input
+                id={`${ids}-fix-voices`}
+                type="checkbox"
+                checked={settings.fixVoices}
+                onChange={(event) => update({ fixVoices: event.target.checked })}
+                className="h-[15px] w-[15px] accent-primary"
+              />
+            }
+          >
+            <VoiceToolsPanel busy={busy} />
+          </Field>
         </Group>
       )}
 
@@ -318,5 +345,121 @@ export function SettingsDialog({
         />
       </Group>
     </Dialog>
+  );
+}
+
+/** Status of, and control over, the optional voice tools the voice check
+ *  needs: PyTorch, Demucs and Silero VAD, downloaded once into the app's
+ *  own data folder rather than bundled, since most runs never touch them. */
+function VoiceToolsPanel({ busy }: { busy: boolean }) {
+  const [status, setStatus] = useState<VoiceToolsStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<{ percent: number; stage: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!api.isDesktop()) return;
+    let active = true;
+    api
+      .voiceTools("status")
+      .then((result) => {
+        if (active) setStatus(result.status);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const refresh = async () => {
+    try {
+      const result = await api.voiceTools("status");
+      setStatus(result.status);
+    } catch {
+      /* left as it was */
+    }
+  };
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setError(null);
+    setProgress({ percent: 0, stage: "Starting…" });
+    const unlisten = await api.subscribeToVoiceToolsProgress((event) =>
+      setProgress({ percent: event.percent, stage: event.stage }),
+    );
+    try {
+      const result = await api.voiceTools("install");
+      setStatus(result.status);
+      if (result.error && result.error !== "cancelled") setError(result.error);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      unlisten();
+      setInstalling(false);
+      setProgress(null);
+    }
+  };
+
+  const handleRemove = async () => {
+    setError(null);
+    try {
+      const result = await api.voiceTools("remove");
+      setStatus(result.status);
+      if (result.error && result.error !== "cancelled") setError(result.error);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleStop = async () => {
+    await api.cancelSync();
+  };
+
+  if (!api.isDesktop()) return null;
+
+  const installed = status?.installed ?? false;
+  const outdated = status?.outdated ?? false;
+
+  return (
+    <div className="mt-2 w-full">
+      {installing ? (
+        <div className="space-y-1.5">
+          <ProgressBar percent={progress?.percent ?? 0} label="Installing voice tools" />
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground">
+              {progress?.stage ?? "Working…"}
+            </span>
+            <Button size="sm" variant="ghost" onClick={() => void handleStop()}>
+              Stop
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11.5px] text-muted-foreground">
+            {outdated
+              ? "Out of date"
+              : installed
+                ? `Installed (runs on ${status?.device === "cuda" || status?.device === "mps" ? "GPU" : "CPU"})`
+                : "Not installed"}
+            {installed && status?.sizeBytes ? ` · ${formatSize(status.sizeBytes)}` : ""}
+          </span>
+          {installed ? (
+            <Button size="sm" variant="ghost" onClick={() => void handleRemove()} disabled={busy}>
+              Remove
+            </Button>
+          ) : null}
+          {!installed || outdated ? (
+            <Button size="sm" onClick={() => void handleInstall()} disabled={busy}>
+              {outdated ? "Reinstall" : "Install voice tools (about 1 GB)"}
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={() => void refresh()} disabled={busy}>
+            Refresh
+          </Button>
+        </div>
+      )}
+      {error && <p className="mt-1.5 text-[11.5px] text-destructive">{error}</p>}
+    </div>
   );
 }

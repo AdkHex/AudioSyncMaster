@@ -34,6 +34,7 @@ import numpy as np
 
 from .codecdelay import codec_delay_ms
 from .dubsync import DubSyncPlan, Segment
+from .voicefix import VoicePiece
 from .media import (
     SEEK_PREROLL_S,
     CancellationToken,
@@ -94,6 +95,12 @@ class RenderOptions:
     (see ``_TrackReader``): exact to the sample, at the cost of decoding
     what lies before the first piece. Off for previews, which read a few
     seconds from anywhere in the film and must be ready at once."""
+    fix_voices: bool = True
+    """Move the dub's voices where the plan's voice pieces say (see
+    ``voicefix``). Needs the voice tools and the exact reads above: a voice
+    is taken out of the mix again only when it is cut from exactly the
+    samples written, so a preview (which seeks) plays the plan without
+    them."""
 
 
 @dataclass
@@ -493,6 +500,10 @@ def on_file_clock(plan: DubSyncPlan, token: Optional[CancellationToken] = None) 
     if segments and video_lead <= 0.0005:
         segments[0].start_s = 0.0
     moved.segments = segments
+    for piece in moved.voice_pieces:
+        piece.dub_start_s += dub_lead
+        piece.dub_end_s += dub_lead
+        piece.level_s += dub_lead - video_lead
     moved.video_duration_s += video_lead
     return moved
 
@@ -546,6 +557,8 @@ def render(
         if skip:
             say(f"writing {skip} samples early to cancel the raw {options.codec} decoder delay")
     fill_gain = float(10.0 ** (plan.fill_gain_db / 20.0))
+    voice_warnings: List[str] = []
+    patch = _voice_patch(plan, rate, channels, dub_track, options, fill_gain, token, say, voice_warnings)
     say(
         f"writing {channels} channel(s) at {rate} Hz as {options.codec}, "
         f"{len(plan.dub_segments)} dub piece(s) and {len(plan.fill_segments)} fill(s), "
@@ -644,6 +657,8 @@ def render(
                 held = np.zeros((0, channels), dtype=np.float32)
                 body = audio
 
+            if patch is not None:
+                patch.apply(written, body)
             over = np.abs(body) > 1.0
             if over.any():
                 clipped += int(over.sum())
@@ -653,11 +668,17 @@ def render(
             if progress:
                 progress(int(100 * min(written, total) / max(1, total)), stage)
         if len(held):
+            if patch is not None:
+                patch.apply(written, held)
             np.clip(held, -1.0, 1.0, out=held)
             written += len(held)
             emit(held)
         if written < total:
-            emit(np.zeros((total - written, channels), dtype=np.float32))
+            tail = np.zeros((total - written, channels), dtype=np.float32)
+            if patch is not None:
+                patch.apply(written, tail)
+                np.clip(tail, -1.0, 1.0, out=tail)
+            emit(tail)
             written = total
         if skip:
             # What was dropped at the head is made up at the tail, so the
@@ -686,7 +707,45 @@ def render(
             f"{clipped} samples clipped; the fills are {plan.fill_gain_db:+.1f} dB and the original "
             f"peaks close to full scale -- rerun with a lower --fill-gain if it is audible"
         )
+    result.warnings.extend(voice_warnings)
     return result
+
+
+def _voice_patch(plan: DubSyncPlan, rate: int, channels: int, dub_track, options: RenderOptions,
+                 fill_gain: float, token: Optional[CancellationToken], say: Callable[[str], None],
+                 warnings: List[str]):
+    """The voice pieces' additions (see ``voicefix.build_patch``), or None
+    when there are none to make or they cannot be made -- said in
+    ``warnings`` when the plan asked for them."""
+    if not plan.voice_pieces or not options.fix_voices:
+        return None
+    from . import voicefix, voicetools
+
+    count = len(plan.voice_pieces)
+    moves = f"the plan moves the dub's voices in {count} place{'s' if count != 1 else ''}"
+    native = dub_track.sample_rate if dub_track else None
+    if not options.exact or not _decode_plan(rate, plan.speed, options.stretch, native)[2]:
+        if options.exact:
+            warnings.append(f"{moves}, but at this rate and speed the dub cannot be read exactly enough "
+                            "to take its voices out; written without those moves")
+        return None
+    if not voicetools.installed():
+        warnings.append(f"{moves}, but the voice tools are not installed; written without those moves")
+        return None
+    say(f"separating the dub's voices for the {count} voice move{'s' if count != 1 else ''}")
+    dub_reader = _TrackReader(plan.dub_path, plan.dub_track, rate, channels, plan.speed,
+                              options.stretch, token, native)
+    video_reader = _TrackReader(plan.video_path, plan.video_track, rate, channels, 1.0, "resample", token)
+    try:
+        with voicetools.VoiceWorker(token=token, log=say) as worker:
+            return voicefix.build_patch(plan, plan.voice_pieces, worker, dub_reader, video_reader, rate,
+                                        fill_gain, options.xfade_s, token, say)
+    except MediaError as exc:
+        warnings.append(f"{moves}, but the voice tools failed ({exc}); written without those moves")
+        return None
+    finally:
+        dub_reader.close()
+        video_reader.close()
 
 
 def mux(
@@ -769,6 +828,10 @@ def clip_plan(plan: DubSyncPlan, lo_s: float, hi_s: float) -> DubSyncPlan:
         video_duration_s=hi_s - lo_s, dub_duration_s=plan.dub_duration_s,
         video_fps=plan.video_fps, dub_rate=plan.dub_rate, segments=pieces,
         timeline=plan.timeline,
+        voice_pieces=[
+            VoicePiece(p.dub_start_s, p.dub_end_s, p.level_s + lo_s, p.shift_s, p.join_end, p.note)
+            for p in plan.voice_pieces
+        ],
     )
     return clipped
 

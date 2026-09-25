@@ -33,6 +33,7 @@ MODULES = [
     "test_dubsync",
     "test_editor",
     "test_lipsync",
+    "test_voicefix",
 ]
 
 

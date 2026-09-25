@@ -252,6 +252,9 @@ jobs:
             --hidden-import audiosync.mux \
             --hidden-import audiosync.dubsync \
             --hidden-import audiosync.dubrender \
+            --hidden-import audiosync.voicefix \
+            --hidden-import audiosync.voicetools \
+            --add-data "../../audiosync/voiceworker.py:audiosync" \
             --collect-all numpy \
             --exclude-module scipy \
             --exclude-module matplotlib \

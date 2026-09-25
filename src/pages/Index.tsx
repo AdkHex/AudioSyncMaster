@@ -653,6 +653,7 @@ export default function Index() {
         language: config.dubMux && config.dubLanguage.trim() ? config.dubLanguage.trim() : null,
         fillUnmatched: config.dubFillUnmatched,
         dubRate: config.dubRate,
+        fixVoices: config.fixVoices,
         // The outputs are this app's own files, named after the dubs; a re-run
         // is meant to replace them.
         overwrite: true,
@@ -825,6 +826,7 @@ export default function Index() {
         mux,
         language: mux && config.dubLanguage.trim() ? config.dubLanguage.trim() : null,
         fillUnmatched: config.dubFillUnmatched,
+        fixVoices: config.fixVoices,
         overwrite: true,
         plan,
         outputPath,
@@ -1438,6 +1440,7 @@ export default function Index() {
         settings={settings}
         mode={state.mode}
         version={APP_VERSION}
+        busy={busy}
         onChange={setSettings}
         onClose={() => setShowSettings(false)}
         onCheckForUpdate={() => void handleCheckForUpdate()}

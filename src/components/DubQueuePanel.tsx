@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, ClipboardCopy, FolderOpen, Info, Play, Scissors, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ClipboardCopy, FolderOpen, Info, Mic, Play, Scissors, XCircle } from "lucide-react";
 import { memo, useState } from "react";
 
 import { Spinner, Tag } from "@/components/ui";
@@ -317,6 +317,24 @@ function JobRow({
                   </li>
                 ))}
               </ul>
+            )}
+            {(plan?.voicePieces?.length ?? 0) > 0 && (
+              <div className="border-t border-border px-[18px] py-4">
+                <h4 className="mb-1.5 text-[11px] font-semibold text-muted-foreground">
+                  Voices moved ({plan!.voicePieces!.length})
+                </h4>
+                <ul className="space-y-1.5">
+                  {plan!.voicePieces!.map((piece, index) => (
+                    <li
+                      key={`voice-piece-${index}`}
+                      className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-muted-foreground"
+                    >
+                      <Mic className="mt-[3px] h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+                      <span>{piece.note}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
         </details>

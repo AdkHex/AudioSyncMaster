@@ -58,6 +58,7 @@ from .framerate import COMMON_RATES, RATIO_TOLERANCE, _format_fps, exact_rate, s
 from .segments import find_step
 from .shots import PictureCuts
 from .media import Cancelled, CancellationToken, MediaError, audio_lead_s, load_audio, probe, stream_audio
+from .voicefix import VoicePiece
 
 ANALYSIS_SR = 16000
 ENVELOPE_RATE = ANALYSIS_SR // ENVELOPE_HOP  # 500 Hz: one value per 2 ms
@@ -1457,6 +1458,10 @@ class DubSyncPlan:
     doubt_s: float = 0.0
     """Seconds of the fills that are doubt about where a cut lies, not
     material the dub lacks (see ``_trim_uncertain_edges``)."""
+    voice_pieces: List[VoicePiece] = field(default_factory=list)
+    """Spans of the dub whose voices are laid at their own offset rather than
+    their stretch's: where the dub's voices were cut apart from its music
+    (see ``voicefix``). Empty unless the voice check ran and moved some."""
     timeline: str = "container"
     """Which clock the times are on. ``container``: each file's own clock,
     time zero its earliest stream -- the clock every seek, picture frame
@@ -1513,6 +1518,7 @@ class DubSyncPlan:
             "filledS": self.filled_s,
             "summary": self.summary(),
             "timeline": self.timeline,
+            "voicePieces": [piece.to_dict() for piece in self.voice_pieces],
         }
 
     @classmethod
@@ -1535,6 +1541,7 @@ class DubSyncPlan:
             error=data.get("error"),
             timeline=data.get("timeline") or "stream",
             doubt_s=float((data.get("summary") or {}).get("doubtS", 0.0) or 0.0),
+            voice_pieces=[VoicePiece.from_dict(piece) for piece in data.get("voicePieces") or []],
         )
 
     def describe(self) -> str:
@@ -1598,6 +1605,8 @@ class DubSyncPlan:
             lines.append(f"  ! {warning}")
         for note in self.notes:
             lines.append(f"  - {note}")
+        for piece in self.voice_pieces:
+            lines.append(f"  ~ voices: {piece.note}")
         return "\n".join(lines)
 
 

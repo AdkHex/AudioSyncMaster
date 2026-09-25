@@ -53,6 +53,8 @@ try:
     from audiosync.dubrender import render as render_dub
     from audiosync.dubsync import DubSyncPlan, build_envelope, plan_dubsync, verify_output
     from audiosync.linecheck import line_check
+    from audiosync import voicetools
+    from audiosync.voicefix import check_voices
     from audiosync.waveform import is_loaded as waveform_loaded
     from audiosync.waveform import load as waveform_load
     from audiosync.waveform import peaks as waveform_peaks
@@ -597,6 +599,8 @@ def handle_dubsync(request: dict) -> None:
                 token=token, progress=progress, log=emit_log, envelopes=envelopes,
                 draft=lambda sketch: emit({"type": "dubsyncDraft", "plan": sketch.to_dict()}),
             )
+            if not plan.error and request.get("fixVoices", True):
+                plan.voice_pieces = check_voices(plan, token=token, progress=progress, log=emit_log)
         started["plan"] = plan
         emit({"type": "dubsyncPlan", "plan": plan.to_dict(), "description": plan.describe()})
         if plan.error:
@@ -617,6 +621,7 @@ def handle_dubsync(request: dict) -> None:
             channels=request.get("channels"),
             xfade_s=float(request.get("xfadeMs", 10.0) or 10.0) / 1000.0,
             stretch=request.get("stretch") or "resample",
+            fix_voices=bool(request.get("fixVoices", True)),
         )
         result = render_dub(plan, output, options, token=token, progress=progress, log=emit_log)
         for warning in result.warnings:
@@ -709,6 +714,10 @@ def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken)
             token=token, progress=progress, log=log, envelopes=envelopes,
             draft=lambda sketch: emit({"type": "dubsyncJobDraft", "job": index, "plan": sketch.to_dict()}),
         )
+        if not plan.error and options.get("fixVoices", True):
+            # one job at a time holds the voice tools (see VoiceWorker); the
+            # others wait here with their plans made
+            plan.voice_pieces = check_voices(plan, token=token, progress=progress, log=log)
     except Cancelled:
         return outcome(cancelled=True)
     except (MediaError, OSError) as exc:
@@ -734,6 +743,7 @@ def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken)
             channels=options.get("channels"),
             xfade_s=float(options.get("xfadeMs", 10.0) or 10.0) / 1000.0,
             stretch=options.get("stretch") or "resample",
+            fix_voices=bool(options.get("fixVoices", True)),
         )
         result = render_dub(plan, output, render_options, token=token,
                             progress=progress, log=log)
@@ -982,6 +992,39 @@ def handle_dubsync_preview(request: dict) -> None:
         _set_token(None)
 
 
+def handle_voice_tools(request: dict) -> None:
+    """Status, install or removal of the voice tools (see ``voicetools``).
+
+    ``action``: ``status`` (default), ``install`` or ``remove``. Install
+    reports ``voiceToolsProgress`` and can be stopped with ``cancel``; every
+    action ends with one ``voiceTools`` event carrying the status."""
+    action = request.get("action") or "status"
+    token = CancellationToken()
+    error = None
+    if action == "install":
+        _set_token(token)
+    try:
+        if action == "install":
+            voicetools.install(
+                progress=lambda percent, stage: emit(
+                    {"type": "voiceToolsProgress", "percent": percent, "stage": stage}),
+                log=emit_log, token=token,
+            )
+        elif action == "remove":
+            voicetools.remove()
+    except Cancelled:
+        error = "cancelled"
+    except (MediaError, OSError) as exc:
+        error = str(exc)
+        emit_error(f"Voice tools: {exc}")
+    finally:
+        if action == "install":
+            _set_token(None)
+    state = voicetools.status()
+    state["sizeBytes"] = voicetools.size_bytes() if state.get("installed") else 0
+    emit({"type": "voiceTools", "action": action, "status": state, "error": error})
+
+
 def handle_cancel(request: dict) -> None:
     with _token_lock:
         token = _active_token
@@ -1005,6 +1048,7 @@ HANDLERS = {
     "waveformBuild": handle_waveform_build,
     "dubsyncPreview": handle_dubsync_preview,
     "shotCuts": handle_shot_cuts,
+    "voiceTools": handle_voice_tools,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }

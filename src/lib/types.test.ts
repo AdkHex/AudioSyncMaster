@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   confidenceLevel,
+  DEFAULT_SETTINGS,
   frameOffset,
   ffmpegCommandFor,
   formatDelay,
@@ -14,6 +15,8 @@ import {
   playerDelayMs,
   streamSummary,
   type AudioTrackInfo,
+  type DubSyncBatchRequest,
+  type DubSyncRequest,
   type SyncResult,
   type TrackListing,
 } from "./types";
@@ -245,5 +248,38 @@ describe("player delay convention", () => {
     expect(playerDelayMs(null)).toBeNull();
     expect(playerDelayMs(Number.NaN)).toBeNull();
     expect(formatPlayerDelay(null)).toBe("--");
+  });
+});
+
+describe("voice check setting", () => {
+  it("is on by default", () => {
+    expect(DEFAULT_SETTINGS.fixVoices).toBe(true);
+  });
+
+  it("carries through a single and a batch dub sync request", () => {
+    const single: DubSyncRequest = {
+      videoPath: "/v/film.mkv",
+      dubPath: "/a/film.dub.ac3",
+      videoTrack: 0,
+      dubTrack: 0,
+      codec: "same",
+      mux: false,
+      language: null,
+      fillUnmatched: false,
+      overwrite: true,
+      fixVoices: false,
+    };
+    const batch: DubSyncBatchRequest = {
+      jobs: [{ videoPath: "/v/film.mkv", dubPath: "/a/film.dub.ac3", videoTrack: 0, dubTrack: 0 }],
+      codec: "same",
+      mux: false,
+      language: null,
+      fillUnmatched: false,
+      overwrite: true,
+      maxWorkers: 1,
+      fixVoices: false,
+    };
+    expect(single.fixVoices).toBe(false);
+    expect(batch.fixVoices).toBe(false);
   });
 });
