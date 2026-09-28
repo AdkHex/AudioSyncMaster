@@ -30,6 +30,9 @@ class BatchOptions:
     max_offset_ms: float = 60000.0
     max_workers: int = DEFAULT_MAX_WORKERS
     fast: bool = False
+    timeline: bool = True
+    """Measure a pair the survey cannot settle along its whole timeline
+    (see ``analyze._measure_timeline``)."""
 
 
 class BatchEvents:
@@ -96,6 +99,7 @@ def run_batch(
                 primary_track=pair.primary_track,
                 secondary_track=pair.secondary_track,
                 prefer_fast=options.fast,
+                timeline=options.timeline,
                 progress=(
                     (lambda percent: events.on_pair_progress(name, percent))
                     if events.on_pair_progress
@@ -108,7 +112,10 @@ def run_batch(
             result = PairResult(
                 pair.primary_path,
                 pair.secondary_path,
-                error=f"{type(exc).__name__}: {exc}",
+                error=(
+                    f"Measuring this pair stopped on an unexpected error ({type(exc).__name__}: {exc}). "
+                    "The other pairs are unaffected."
+                ),
             )
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
 

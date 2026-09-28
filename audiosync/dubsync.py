@@ -54,7 +54,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .correlate import ENVELOPE_HOP, _fast_fft_size
-from .framerate import COMMON_RATES, RATIO_TOLERANCE, _format_fps, exact_rate, speed_candidates
+from .framerate import COMMON_RATES, RATIO_TOLERANCE, _format_fps, conversion_guide, exact_rate, speed_candidates
 from .segments import find_step
 from .shots import PictureCuts
 from .media import Cancelled, CancellationToken, MediaError, audio_lead_s, load_audio, probe, stream_audio
@@ -434,6 +434,48 @@ FILL_REASONS = {
     "not placed yet": "draft",
 }
 
+# A track shorter than this cannot be laid on anything: a coarse window is 30s.
+MIN_PLAN_S = 10.0
+
+# Frame energy (RMS) below which a whole track is silence: -80 dBFS, well under
+# any real mix's noise floor and above a dithered digital silence.
+SILENT_ENERGY = 1e-4
+
+# --- reporting the edits ----------------------------------------------------
+
+# A change of offset smaller than this between two stretches is measurement,
+# not an edit: the same floor ``segments.MIN_STEP_MS`` splits a stretch at.
+EDIT_MIN_MS = 20.0
+
+# How an edit is graded. A trim under a second is a frame or two of picture
+# (minor); up to half a minute is a line or a shot (moderate); beyond that a
+# scene (major). Every one is listed whatever its grade.
+MINOR_EDIT_S = 1.0
+MAJOR_EDIT_S = 30.0
+
+# The dub carrying this much of its own material inside a cut makes the cut a
+# replaced scene rather than a plain one. Below it, the unmatched dub is the
+# slack of a cut placed to within a second or so.
+REPLACED_MIN_S = 1.0
+
+# An edit resting on a stretch of dub shorter than this is marked to check:
+# long enough for a line or a shot, too short to rule out a repeated cue.
+SHORT_STRETCH_S = 30.0
+
+# Where lip-sync error becomes visible: ITU-R BT.1359's detectability bound
+# for sound arriving early, the stricter of its two.
+LIP_SYNC_VISIBLE_MS = 45.0
+
+# What each kind of gap means for someone watching.
+GAP_WORDS = {
+    "head": "before the dub starts; the original plays",
+    "tail": "after the dub ends; the original plays",
+    "silent": "the dub is silent here",
+    "unmatched": "the dub plays but does not match the video here (replaced or re-edited material) -- check it",
+    "cut": "the dub has nothing for this part of the video",
+    "draft": "not placed yet",
+}
+
 # --- choosing a speed -----------------------------------------------------
 
 # A dub timed against a 23.976fps master and laid on a 24fps video runs
@@ -716,6 +758,7 @@ def build_envelope(
     speed: float = 1.0,
     lead_s: Optional[float] = None,
     channels: Optional[int] = None,
+    issues: Optional[List[str]] = None,
 ) -> TrackEnvelope:
     """Decode a whole track once, keeping only its 500 Hz energy curve.
 
@@ -760,7 +803,7 @@ def build_envelope(
     bands = _BandFrames()
 
     def mono_blocks():
-        for block in stream_audio(path, rate, track=track, token=token, block_s=30.0, lead_s=lead_s):
+        for block in stream_audio(path, rate, track=track, token=token, block_s=30.0, lead_s=lead_s, issues=issues):
             yield block
 
     def on_samples(seen: int) -> None:
@@ -1497,7 +1540,141 @@ class DubSyncPlan:
             "doubtS": round(self.doubt_s, 3),
         }
 
+    def edits_and_gaps(self) -> Tuple[List[dict], List[dict]]:
+        """Every place the dub departs from the video, as a list a person can
+        check one by one, and every span of the video the dub does not cover.
+
+        An edit is a change of offset between two stretches of dub: material
+        the dub lacks, material only the dub has, or a scene one replaced with
+        the other. Each is reported however small -- a one-frame trim as much
+        as a ten-minute scene -- with where it is on both timelines and how
+        precisely it was placed. What is left of the fills (the dub starting
+        late, ending early, falling silent, or not matching) are the gaps.
+        """
+        speed = self.speed if self.speed and self.speed > 0 else 1.0
+        frame_s = 1.0 / self.video_fps if self.video_fps else None
+        ordered = sorted(self.segments, key=lambda s: s.start_s)
+        edits: List[dict] = []
+        consumed: set = set()
+        previous: Optional[Segment] = None
+        between: List[Segment] = []
+        for segment in ordered:
+            if segment.kind == "fill":
+                between.append(segment)
+                continue
+            if segment.offset_s is None:
+                continue
+            if previous is not None:
+                jump_s = segment.offset_s - previous.offset_s
+                if abs(jump_s) * 1000.0 >= EDIT_MIN_MS:
+                    edits.append(self._edit(len(edits) + 1, previous, segment, between, speed, frame_s))
+                    consumed.update(id(fill) for fill in between)
+            previous, between = segment, []
+
+        gaps = []
+        for fill in (s for s in ordered if s.kind == "fill" and id(s) not in consumed):
+            gaps.append({
+                "startS": fill.start_s,
+                "endS": fill.end_s,
+                "lengthS": fill.length_s,
+                "reason": fill.reason,
+                "uncertaintyS": fill.uncertainty_s,
+                "description": (
+                    f"{_clock(fill.start_s)} - {_clock(fill.end_s)} ({_amount(fill.length_s)}): "
+                    + GAP_WORDS.get(fill.reason, fill.note or fill.reason)
+                ),
+            })
+        return edits, gaps
+
+    def _edit(
+        self, index: int, before: Segment, after: Segment, fills: List[Segment],
+        speed: float, frame_s: Optional[float],
+    ) -> dict:
+        jump_s = after.offset_s - before.offset_s
+        # The video with no dub between the two stretches, and the dub between
+        # them that matches no video. A pure cut leaves only the first, a pure
+        # insert only the second; a scene the dub replaced leaves both.
+        video_gap = max(0.0, after.start_s - before.end_s)
+        dub_gap = video_gap + jump_s
+        size_s = abs(jump_s)
+        uncertainty = max([before.uncertainty_s, after.uncertainty_s] + [f.uncertainty_s for f in fills])
+        if jump_s < 0:
+            kind = "replaced" if dub_gap > max(REPLACED_MIN_S, 0.25 * video_gap) else "missing"
+            # Doubt about where the cut lies widens the unplayed span beyond
+            # what is actually missing; the difference is how far off it may be.
+            uncertainty = max(uncertainty, (video_gap - size_s) / 2.0) if kind == "missing" else uncertainty
+        else:
+            kind = "replaced" if video_gap > max(REPLACED_MIN_S, 0.25 * max(dub_gap, 0.0)) else "extra"
+        # Graded on the millisecond it was measured to, so a one-second cut
+        # measured at 0.99998 s is not "minor".
+        graded = round(size_s, 3)
+        severity = "minor" if graded < MINOR_EDIT_S else "moderate" if graded < MAJOR_EDIT_S else "major"
+        frames = int(round(size_s / frame_s)) if frame_s else None
+
+        at = _clock(before.end_s)
+        framed = f" ({frames} frame{'s' if frames != 1 else ''})" if frames else ""
+        if kind == "missing":
+            what = f"the dub is missing {_amount(size_s)}{framed} of the video"
+            if video_gap > size_s + 0.05:
+                what += f", somewhere in {_clock(before.end_s)} - {_clock(after.start_s)}"
+        elif kind == "extra":
+            what = (
+                f"the dub has {_amount(size_s)}{framed} the video does not "
+                f"(dub {_clock((before.end_s + before.offset_s) / speed)} - "
+                f"{_clock((before.end_s + before.offset_s + size_s) / speed)})"
+            )
+        else:
+            what = (
+                f"{_amount(video_gap)} of the video (to {_clock(after.start_s)}) is replaced in the dub by "
+                f"{_amount(max(dub_gap, 0.0))} of other material"
+            )
+        drift = f"from here it plays {_amount(size_s)} {'early' if jump_s < 0 else 'late'}"
+        if size_s * 1000.0 < LIP_SYNC_VISIBLE_MS:
+            drift += ", under the 45 ms where lip-sync error becomes visible"
+        about = f" (placed to within {uncertainty:.2f}s)" if uncertainty >= 0.05 else ""
+        # A real edit sits between stretches minutes long. One resting on a
+        # few seconds of dub is also what a repeated cue matched in the wrong
+        # place looks like -- in end credits the two versions do not share,
+        # say -- and a match score cannot tell them apart, since a repeated
+        # cue matches itself perfectly. So it is listed, and marked to check.
+        shortest = min(before.length_s, after.length_s)
+        check = shortest < SHORT_STRETCH_S
+        if check:
+            drift += (
+                f"; it rests on a {shortest:.1f} s stretch of dub, too short to rule out a repeated "
+                "passage -- check it by ear"
+            )
+        return {
+            "index": index,
+            "kind": kind,
+            "severity": severity,
+            "videoS": before.end_s,
+            "videoEndS": after.start_s,
+            "dubS": (before.end_s + before.offset_s) / speed,
+            "dubEndS": (after.start_s + after.offset_s) / speed,
+            "jumpMs": jump_s * 1000.0,
+            "sizeMs": size_s * 1000.0,
+            "missingS": size_s if kind == "missing" else max(0.0, video_gap) if kind == "replaced" else 0.0,
+            "extraS": size_s if kind == "extra" else max(0.0, dub_gap) if kind == "replaced" else 0.0,
+            "frames": frames,
+            "uncertaintyS": uncertainty,
+            "offsetBeforeMs": before.offset_s * 1000.0,
+            "offsetAfterMs": after.offset_s * 1000.0,
+            "shortestStretchS": shortest,
+            "check": check,
+            "description": f"{at}{about}: {what}; {drift}.",
+        }
+
+    def rate_guide(self) -> Optional[dict]:
+        """The frame-rate conversion the dub needs, from which rate to which."""
+        first = self.dub_segments[0] if self.dub_segments else None
+        return conversion_guide(
+            self.video_fps, self.speed, self.dub_duration_s, self.rate_confirmed,
+            offset_ms=first.offset_s * 1000.0 if first is not None and first.offset_s is not None else None,
+        )
+
     def to_dict(self) -> dict:
+        edits, gaps = self.edits_and_gaps()
         return {
             "version": 1,
             "videoPath": self.video_path,
@@ -1519,6 +1696,9 @@ class DubSyncPlan:
             "summary": self.summary(),
             "timeline": self.timeline,
             "voicePieces": [piece.to_dict() for piece in self.voice_pieces],
+            "edits": edits,
+            "gaps": gaps,
+            "rateGuide": self.rate_guide(),
         }
 
     @classmethod
@@ -1617,6 +1797,18 @@ def _clock(seconds: float) -> str:
     hours, rest = divmod(ms, 3_600_000)
     minutes, rest = divmod(rest, 60_000)
     return f"{hours}:{minutes:02d}:{rest / 1000.0:06.3f}"
+
+
+def _amount(seconds: float) -> str:
+    """An edit's size at the precision it was measured to: 42 ms, 5.000 s,
+    10m 00.000s."""
+    seconds = round(abs(seconds), 3)
+    if seconds < 1.0:
+        return f"{seconds * 1000.0:.0f} ms"
+    if seconds < 60.0:
+        return f"{seconds:.3f} s"
+    minutes, rest = divmod(int(round(seconds * 1000.0)), 60_000)
+    return f"{minutes}m {rest / 1000.0:06.3f}s"
 
 
 def _duration(seconds: float) -> str:
@@ -2913,20 +3105,47 @@ def plan_dubsync(
         plan.dub_duration_s = float(dub_info.duration or 0.0)
 
         report(2, "reading the original")
+        damage: Dict[str, List[str]] = {video_path: [], dub_path: []}
         primary = build_envelope(
             video_path, video_track, token,
             lambda f: report(2 + 18 * f, "reading the original"),
             plan.video_duration_s, lead_s=audio_lead_s(video_info, video_track),
+            issues=damage[video_path],
         )
         report(20, "reading the dub")
         secondary_native = build_envelope(
             dub_path, dub_track, token,
             lambda f: report(20 + 18 * f, "reading the dub"),
             plan.dub_duration_s, lead_s=audio_lead_s(dub_info, dub_track),
+            issues=damage.setdefault(dub_path, []),
         )
+        for path, lines in damage.items():
+            if lines:
+                plan.warnings.append(
+                    f"{os.path.basename(path)} is damaged: FFmpeg hit {len(lines)} decoding error"
+                    f"{'s' if len(lines) != 1 else ''} reading it and decoded past them (first: {lines[0]}). "
+                    "Anything measured across the damage may be off; a clean copy of the file is the fix."
+                )
         # The decoded length is the truth; the probe was only a progress hint.
         plan.video_duration_s = primary.duration_s
         plan.dub_duration_s = secondary_native.duration_s
+        # Said in the file's terms rather than as "no part of the dub could be
+        # matched", which is true of a silent or two-second dub but names
+        # nothing to fix.
+        for envelope, path, role in ((primary, video_path, "video"), (secondary_native, dub_path, "dub")):
+            name = os.path.basename(path)
+            if envelope.duration_s < MIN_PLAN_S:
+                plan.error = (
+                    f"{name} is only {envelope.duration_s:.1f} s long; laying a dub on a video needs at least "
+                    f"{MIN_PLAN_S:.0f} s of audio."
+                )
+                return plan
+            if envelope.energy.size == 0 or float(np.max(envelope.energy)) < SILENT_ENERGY:
+                plan.error = (
+                    f"The {role}'s audio ({name}) is silent from start to end. It may be an empty or muted "
+                    "track, or the wrong track of the file."
+                )
+                return plan
         if envelopes is not None:
             envelopes["primary"] = primary
             envelopes["secondary"] = secondary_native

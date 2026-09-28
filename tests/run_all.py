@@ -31,6 +31,7 @@ MODULES = [
     "test_mux",
     "test_bridge",
     "test_dubsync",
+    "test_measure_timeline",
     "test_editor",
     "test_lipsync",
     "test_voicefix",

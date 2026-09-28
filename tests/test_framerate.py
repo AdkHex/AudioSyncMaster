@@ -248,3 +248,66 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+# --- the conversion as an instruction -------------------------------------------
+
+from fractions import Fraction  # noqa: E402
+
+from audiosync.framerate import conversion_guide, exact_speed_filters  # noqa: E402
+from audiosync.media import choose_frame_rate  # noqa: E402
+
+FILM = 24000 / 1001
+
+
+def test_a_pal_dub_is_told_to_go_from_25_to_23_976_slower():
+    guide = conversion_guide(FILM, 25 / FILM, dub_duration_s=5400.0, confirmed=True, offset_ms=2600.0)
+    assert guide["named"] and guide["fromFps"] == 25.0 and abs(guide["toFps"] - FILM) < 1e-12
+    assert guide["stretch"] == {"num": 1001, "den": 960}
+    assert abs(guide["tempo"] - 960 / 1001) < 1e-12 and guide["tempoPercent"] < 0
+    assert "from 25 fps to 23.976 fps: slow it down by 4.096%" in guide["instruction"], guide["instruction"]
+    assert abs(guide["convertedDurationS"] - 5400.0 * 1001 / 960) < 1e-6
+    assert guide["delayWithStretchMs"] == 2600.0
+
+
+def test_the_other_way_round_is_sped_up():
+    guide = conversion_guide(25.0, FILM / 25.0)
+    assert guide["fromFps"] == FILM and guide["toFps"] == 25.0 and guide["stretch"] == {"num": 960, "den": 1001}
+    assert "speed it up by 4.271%" in guide["instruction"]
+
+
+def test_a_shared_ratio_is_exact_but_not_named_without_the_video_rate():
+    guide = conversion_guide(None, 1.001)
+    assert not guide["named"] and guide["stretch"] == {"num": 1001, "den": 1000}
+    assert set(guide["alternatives"]) == {"24 -> 23.976", "30 -> 29.97", "60 -> 59.94"}
+
+
+def test_no_guide_when_the_dub_runs_at_the_video_speed():
+    assert conversion_guide(FILM, 1.0) is None
+    assert conversion_guide(FILM, 1.0000004) is None
+
+
+def test_both_known_rates_explain_the_drift_directly():
+    """Both rates known used to be compared the wrong way round, so this branch
+    never matched a real conversion; the search behind it happened to."""
+    drift = (FILM / 25.0 - 1.0) * 1000.0
+    diagnosis = diagnose(drift, primary_fps=FILM, secondary_fps=25.0)
+    assert diagnosis.is_rate_mismatch and diagnosis.source_fps == 25.0
+    assert abs(diagnosis.speed_ratio - 25 / FILM) < 1e-12
+
+
+def test_the_frame_rate_is_the_one_the_picture_plays_at():
+    assert choose_frame_rate(60000 / 1001, 30000 / 1001) == 30000 / 1001, "interlaced field rate"
+    assert choose_frame_rate(30000 / 1001, FILM) == FILM, "soft-telecined film"
+    assert choose_frame_rate(None, 23.976024) == FILM, "no nominal rate"
+    assert choose_frame_rate(23.98, 23.976) == FILM, "rounded metadata"
+    assert choose_frame_rate(25.0, 25.0) == 25.0
+
+
+def test_exact_speed_filters_hit_the_ratio_exactly():
+    for tempo in (960 / 1001, 1001 / 960, 1000 / 1001, 24 / 25, 25 / 24):
+        for rate in (16000, 44100, 48000, 96000):
+            working, relabelled, back = exact_speed_filters(tempo, rate)
+            w, r = int(working.split("=")[1]), int(relabelled.split("=")[1])
+            assert Fraction(r, w) == Fraction(tempo).limit_denominator(2000), (tempo, rate, working, relabelled)
+            assert back == f"aresample={rate}"

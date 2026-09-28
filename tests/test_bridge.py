@@ -455,3 +455,20 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+def test_a_pair_with_a_missing_file_comes_back_with_its_own_error():
+    """It used to be dropped before measuring, so the app got no result for it
+    and the batch said only that none of the pairs could be used."""
+    case = _case("offset_500ms")
+    events, _ = run_bridge([{
+        "command": "analyze", "mode": "series", "windowSeconds": 8.0, "windowCount": 3,
+        "pairs": [
+            {"primaryPath": case["primary"], "secondaryPath": case["secondary"], "key": "good"},
+            {"primaryPath": case["primary"], "secondaryPath": "/gone/dub.m4a", "key": "missing"},
+        ],
+    }])
+    results = {e["secondaryPath"]: e for e in events if e["type"] == "result"}
+    assert results[case["secondary"]]["error"] is None
+    assert "dub.m4a was not found" in results["/gone/dub.m4a"]["error"], results["/gone/dub.m4a"]["error"]
+    assert any(e["type"] == "done" for e in events)

@@ -73,7 +73,75 @@ SEEK_PREROLL_S = 20.0
 
 
 class MediaError(RuntimeError):
-    """Raised when a media file cannot be decoded or probed."""
+    """Raised when a media file cannot be decoded or probed.
+
+    The message is for the user; ``detail`` keeps FFmpeg's own words, all of
+    them, for working out what went wrong."""
+
+    def __init__(self, message: str, detail: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
+# FFmpeg's ways of saying what is wrong with a file, and what that means to
+# someone who has to fix it. Matched against the whole of FFmpeg's error
+# output, in order, because the line that names the cause is rarely the last
+# one: "matches no streams" is followed by "Error opening output files:
+# Invalid argument", which on its own says nothing.
+_FAILURES = [
+    ("permission denied", "{name} cannot be read (permission denied). Check its permissions, or close the program that has it open."),
+    ("moov atom not found", "{name} is incomplete: its index is missing, which usually means the download or copy stopped early."),
+    ("matches no streams", "{name} has no audio track {track}. Choose a track the file has."),
+    ("does not contain any stream", "{name} has no audio in it."),
+    ("decoder not found", "{name} uses a codec this FFmpeg build cannot decode. Install a full FFmpeg build."),
+    ("unknown decoder", "{name} uses a codec this FFmpeg build cannot decode. Install a full FFmpeg build."),
+    ("not currently supported", "{name} uses a codec feature this FFmpeg build cannot decode. Install a newer FFmpeg build."),
+    ("encrypt", "{name} is encrypted (DRM) and cannot be decoded."),
+    ("drm", "{name} is encrypted (DRM) and cannot be decoded."),
+    ("end of file", "{name} ends early: it is incomplete or damaged."),
+    ("invalid data found", "{name} is damaged, incomplete, or not a media file; FFmpeg could not read it."),
+    ("ebml header parsing failed", "{name} is not a valid Matroska file, or it is damaged."),
+    ("could not find codec parameters", "{name} is damaged or incomplete; FFmpeg could not work out what its audio is."),
+    ("no such file", "{name} was not found. It may have been moved or renamed, or be on a drive that is not connected."),
+]
+
+
+def describe_failure(path: str, detail: Optional[str], track: int = 0) -> str:
+    """What FFmpeg's error output means for this file, in words a user can act
+    on, with FFmpeg's own last line kept after it for anyone diagnosing."""
+    name = os.path.basename(path) or path
+    text = (detail or "").strip()
+    lowered = text.lower()
+    last = text.splitlines()[-1].strip() if text else ""
+    for needle, message in _FAILURES:
+        if needle in lowered:
+            said = message.format(name=name, track=track + 1)
+            return f"{said} (FFmpeg: {last})" if last else said
+    return f"FFmpeg could not read {name}: {last or 'no reason given'}"
+
+
+def check_readable(path: str) -> None:
+    """Refuse a path that cannot be a readable media file, saying why, before
+    FFmpeg is asked to make sense of it."""
+    name = os.path.basename(path.rstrip("/\\")) or path
+    if os.path.isdir(path):
+        raise MediaError(f"{name} is a folder, not a media file.")
+    if not os.path.isfile(path):
+        folder = os.path.dirname(path)
+        where = (
+            f"its folder {folder} is missing too" if folder and not os.path.isdir(folder)
+            else f"it is not in {folder}" if folder else "it does not exist"
+        )
+        raise MediaError(
+            f"{name} was not found ({where}). It may have been moved or renamed, or be on a drive that is "
+            "not connected."
+        )
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise MediaError(f"{name} cannot be read: {exc.strerror or exc}.") from exc
+    if size == 0:
+        raise MediaError(f"{name} is empty (0 bytes); the download or copy did not finish.")
 
 
 class Cancelled(RuntimeError):
@@ -325,6 +393,30 @@ def _parse_float(raw) -> Optional[float]:
     return value if math.isfinite(value) else None
 
 
+def choose_frame_rate(nominal: Optional[float], average: Optional[float]) -> Optional[float]:
+    """The rate a video's picture actually plays at, from ffprobe's two answers.
+
+    ``r_frame_rate`` is the rate the timestamps are written at and
+    ``avg_frame_rate`` frames over duration. They agree on almost every file,
+    and where they do not the nominal one is the one that is wrong for timing:
+    interlaced 29.97 reports its field rate, 59.94; soft-telecined film on a
+    DVD or broadcast stream reports 29.97 while its pictures, and so its
+    runtime, are 23.976 film. A dub is mastered to the runtime, so the average
+    is taken whenever it is a standard rate the nominal one is not.
+    """
+    from .framerate import exact_rate
+
+    nominal_rate = exact_rate(nominal) if nominal else None
+    average_rate = exact_rate(average) if average else None
+    if nominal_rate is not None and average_rate is not None:
+        return float(average_rate) if average_rate != nominal_rate else float(nominal_rate)
+    if average_rate is not None:
+        return float(average_rate)
+    if nominal_rate is not None:
+        return float(nominal_rate)
+    return average or nominal
+
+
 def _parse_frame_rate(raw: Optional[str]) -> Optional[float]:
     """Parse ffprobe's ``num/den`` frame rate.
 
@@ -349,8 +441,7 @@ def _parse_frame_rate(raw: Optional[str]) -> Optional[float]:
 
 def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
     """Read stream metadata via ffprobe."""
-    if not os.path.isfile(path):
-        raise MediaError(f"File not found: {path}")
+    check_readable(path)
 
     command = [
         ffprobe_path(), "-v", "error",
@@ -359,7 +450,12 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
         "-show_entries", "format=duration,format_name,start_time",
         "-show_streams", "-of", "json", path,
     ]
-    stdout = _run(command, PROBE_TIMEOUT_S, token, what=f"probe {os.path.basename(path)}")
+    try:
+        stdout = _run(command, PROBE_TIMEOUT_S, token, what=f"probe {os.path.basename(path)}")
+    except MediaError as exc:
+        if exc.detail is None:
+            raise
+        raise MediaError(describe_failure(path, exc.detail), exc.detail) from exc
 
     try:
         payload = json.loads(stdout.decode("utf-8", errors="replace"))
@@ -421,7 +517,10 @@ def probe(path: str, token: Optional[CancellationToken] = None) -> MediaInfo:
             if stream.get("disposition", {}).get("attached_pic"):
                 continue
             has_video = True
-            fps = fps or _parse_frame_rate(stream.get("r_frame_rate"))
+            fps = fps or choose_frame_rate(
+                _parse_frame_rate(stream.get("r_frame_rate")),
+                _parse_frame_rate(stream.get("avg_frame_rate")),
+            )
 
     duration = None
     raw_duration = (payload.get("format") or {}).get("duration")
@@ -533,8 +632,7 @@ def load_audio(
             frequently carry several (original language, dub, commentary), and
             without this every comparison silently used the first one.
     """
-    if not os.path.isfile(path):
-        raise MediaError(f"File not found: {path}")
+    check_readable(path)
     if token:
         token.raise_if_cancelled()
 
@@ -575,7 +673,12 @@ def load_audio(
     what = os.path.basename(path)
     if track:
         what = f"{what} (track {track + 1})"
-    stdout = _run(command, DECODE_TIMEOUT_S, token, what=f"decode {what}")
+    try:
+        stdout = _run(command, DECODE_TIMEOUT_S, token, what=f"decode {what}")
+    except MediaError as exc:
+        if exc.detail is None:
+            raise
+        raise MediaError(describe_failure(path, exc.detail, track), exc.detail) from exc
     if not stdout:
         raise MediaError(f"No audio decoded from {os.path.basename(path)}")
 
@@ -595,6 +698,7 @@ def stream_audio(
     block_s: float = 4.0,
     audio_filter: Optional[str] = None,
     lead_s: float = 0.0,
+    issues: Optional[List[str]] = None,
 ) -> Iterator[np.ndarray]:
     """Decode a whole stream from t=0 in fixed blocks, without ever seeking.
 
@@ -620,9 +724,10 @@ def stream_audio(
             clock (see ``audio_lead_s``) and position ``i`` of what is
             yielded is the file's time ``i / sr`` -- the time a seek, a
             picture frame and a muxer all use.
+        issues: given a list, the decode errors FFmpeg reported and decoded
+            past are added to it: a damaged file that still decodes.
     """
-    if not os.path.isfile(path):
-        raise MediaError(f"File not found: {path}")
+    check_readable(path)
     if token:
         token.raise_if_cancelled()
 
@@ -685,12 +790,16 @@ def stream_audio(
         drain.join(timeout=5)
         if token and token.cancelled:
             raise Cancelled("operation cancelled")
+        detail = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
         if process.returncode != 0:
-            detail = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
-            tail = detail.splitlines()[-1] if detail else f"exit code {process.returncode}"
-            raise MediaError(f"Failed to {what}: {tail}")
+            raise MediaError(describe_failure(path, detail or f"exit code {process.returncode}", track), detail)
         if produced == 0:
             raise MediaError(f"No audio decoded from {os.path.basename(path)}")
+        if detail and issues is not None:
+            # At -v error anything FFmpeg says is an error it decoded past:
+            # damaged packets it skipped or concealed. The audio is still
+            # usable, but not across the damage, and the reader should know.
+            issues.extend(line.strip() for line in detail.splitlines() if line.strip())
     finally:
         if token:
             token.unregister(process)
@@ -734,15 +843,18 @@ def _run(
         except subprocess.TimeoutExpired:
             _terminate(process)
             process.communicate()
-            raise MediaError(f"Timed out after {timeout}s: {what}")
+            raise MediaError(
+                f"Gave up after {timeout}s trying to {what}; the file may be on a slow or disconnected drive, "
+                "or FFmpeg stalled on a damaged part of it."
+            )
 
         if token and token.cancelled:
             raise Cancelled("operation cancelled")
 
         if process.returncode != 0:
-            detail = stderr.decode("utf-8", errors="replace").strip().splitlines()
-            tail = detail[-1] if detail else f"exit code {process.returncode}"
-            raise MediaError(f"Failed to {what}: {tail}")
+            detail = stderr.decode("utf-8", errors="replace").strip()
+            tail = detail.splitlines()[-1] if detail else f"exit code {process.returncode}"
+            raise MediaError(f"Failed to {what}: {tail}", detail or f"exit code {process.returncode}")
         return stdout
     finally:
         if token:

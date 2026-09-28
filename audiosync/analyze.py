@@ -29,13 +29,14 @@ import numpy as np
 
 from .codecdelay import describe as describe_codec_delay
 from .codecdelay import relative_codec_delay_ms
-from .correlate import OffsetEstimate, estimate_offset
+from .correlate import NO_PEAK, SILENT_PRIMARY, SILENT_SECONDARY, OffsetEstimate, estimate_offset
 from .framerate import (
     RateDiagnosis,
+    conversion_guide,
     diagnose,
     speed_candidates,
 )
-from .media import CancellationToken, MediaError, load_audio, probe
+from .media import Cancelled, CancellationToken, MediaError, load_audio, probe
 from .segments import Step, find_step
 
 ANALYSIS_SR = 16000
@@ -82,6 +83,38 @@ FAST_AGREEMENT_MS = 500.0
 # How long the end check is. The survey's window length is calibrated for the
 # correlation threshold, so it is reused rather than invented.
 FAST_CHECK_WINDOW_S = 45.0
+
+# A survey is the whole answer only when it is clean (see _survey_is_clean):
+# confidence at the "high" band, and every window within this of the others.
+# 20ms is the smallest step a cut makes that the step search looks for.
+CLEAN_MIN_CONFIDENCE = 0.75
+CLEAN_MAX_SPREAD_MS = 20.0
+
+# Where the survey's progress ends and the timeline's begins, when it may run.
+TIMELINE_PROGRESS_FROM = 60
+
+# A timeline result is fully trusted once the dub covers this much of the
+# video, and the stretch the delay is read from must be this long to stand on
+# its own (see _timeline_confidence).
+TIMELINE_FULL_COVERAGE = 0.8
+TIMELINE_MIN_STRETCH_S = 30.0
+
+# The most a survey resting on fewer than MIN_USABLE_WINDOWS windows, with
+# nothing else confirming it, may claim: under MkvBatchMux's and the report's
+# 0.5 bar for using a delay unchecked.
+WEAK_SURVEY_CONFIDENCE = 0.45
+
+# Shorter than this, a file has too little audio to measure a delay from:
+# fewer than two of the shortest windows the survey uses.
+MIN_MEASURABLE_S = 10.0
+
+# How a plan says a file decoded with errors (dubsync.plan_dubsync); the one
+# plan warning a measurement repeats.
+DAMAGE_MARK = " is damaged: FFmpeg hit "
+
+# This many edits marked to check (see dubsync.SHORT_STRETCH_S) are one region
+# to look at, not a list of independent edits, and are said to be.
+DOUBTFUL_RUN = 3
 
 
 @dataclass
@@ -144,10 +177,37 @@ class PairResult:
     files use different codecs."""
     primary_codec: Optional[str] = None
     secondary_codec: Optional[str] = None
+    method: str = "survey"
+    """How the numbers were reached. ``survey``: the windows alone, which is
+    the whole answer for a file that is one offset throughout. ``timeline``:
+    the dub laid along the whole video (see ``_measure_timeline``), because the
+    survey saw a cut, a drift, a speed change, windows that found nothing, or
+    too weak a match to stand on its own."""
+    edits: List[dict] = field(default_factory=list)
+    """Every place the dub departs from the video, however small, from the
+    timeline route (``DubSyncPlan.edits_and_gaps``). Empty for a survey."""
+    gaps: List[dict] = field(default_factory=list)
+    """Spans of the video the dub does not cover, from the timeline route."""
+    warnings: List[str] = field(default_factory=list)
+    """Things to check before trusting the delay."""
+    rate_guide: Optional[dict] = None
+    """The frame-rate conversion the dub needs, from which rate to which
+    (``framerate.conversion_guide``); None when it runs at the video's speed."""
+    timeline: Optional[dict] = None
+    """The whole-timeline plan the timeline route measured from, so a caller
+    that wants it need not plan the pair a second time."""
+    timeline_description: Optional[str] = None
+    """The plan as a table (``DubSyncPlan.describe``), for a details view."""
+    secondary_sample_rate: Optional[int] = None
+    """The compared track's sample rate, for the exact resample filter the
+    frame-rate guide writes out."""
+    timeline_error: Optional[str] = None
+    """Why the timeline route could not measure the pair, when it was tried
+    and could not."""
 
     @property
     def is_likely_cut(self) -> bool:
-        return bool(self.cut) or bool(
+        return bool(self.cut) or bool(self.edits) or bool(
             self.rate_diagnosis and self.rate_diagnosis.is_likely_cut
         )
 
@@ -202,15 +262,22 @@ class PairResult:
             "primaryFps": self.primary_fps,
             "secondaryFps": self.secondary_fps,
             "isLikelyCut": self.is_likely_cut,
-            "cutPositionS": self.cut.position_s if self.cut else None,
-            "cutUncertaintyS": self.cut.uncertainty_s if self.cut else None,
-            "cutMagnitudeMs": self.cut.magnitude_ms if self.cut else None,
+            "cutPositionS": self.cut.position_s if self.cut else (self.edits[0]["videoS"] if self.edits else None),
+            "cutUncertaintyS": self.cut.uncertainty_s if self.cut else (self.edits[0]["uncertaintyS"] if self.edits else None),
+            "cutMagnitudeMs": self.cut.magnitude_ms if self.cut else (self.edits[0]["jumpMs"] if self.edits else None),
             "isRateMismatch": self.is_rate_mismatch,
             "speedCompensation": self.speed_compensation,
             "codecDelayMs": self.codec_delay_ms,
             "primaryCodec": self.primary_codec,
             "secondaryCodec": self.secondary_codec,
             "rateDiagnosis": self.rate_diagnosis.to_dict() if self.rate_diagnosis else None,
+            "method": self.method,
+            "edits": list(self.edits),
+            "gaps": list(self.gaps),
+            "warnings": list(self.warnings),
+            "rateGuide": self.rate_guide,
+            "timeline": self.timeline,
+            "timelineDescription": self.timeline_description,
         }
 
 
@@ -257,6 +324,7 @@ def analyze_pair(
     secondary_track: int = 0,
     cut_probes: int = 6,
     prefer_fast: bool = False,
+    timeline: bool = True,
 ) -> PairResult:
     """Measure the offset between two media files.
 
@@ -273,6 +341,11 @@ def analyze_pair(
         prefer_fast: try the fast route first. One long window and an end check
             replace the survey when they agree; anything they cannot settle
             falls through to the full survey unchanged.
+        timeline: when the survey is not clean -- a window found nothing, the
+            windows disagree, the offset steps or drifts, the speed had to be
+            changed, or the match is weak -- lay the dub along the whole video
+            and measure from that instead (see ``_measure_timeline``). A clean
+            survey is returned exactly as it was measured.
     """
     result = PairResult(
         primary_path,
@@ -281,9 +354,13 @@ def analyze_pair(
         secondary_track=secondary_track,
     )
 
+    # The survey's share of the progress bar: all of it when it is the whole
+    # answer, the first part when the timeline may follow it.
+    survey_share = TIMELINE_PROGRESS_FROM / 100.0 if timeline else 1.0
+
     def report(percent: int) -> None:
         if progress:
-            progress(max(0, min(100, percent)))
+            progress(max(0, min(100, int(percent * survey_share))))
 
     try:
         report(0)
@@ -307,6 +384,7 @@ def analyze_pair(
         secondary_stream = _track_of(secondary_info, secondary_track)
         result.primary_codec = primary_stream[0]
         result.secondary_codec = secondary_stream[0]
+        result.secondary_sample_rate = int(secondary_stream[1]) if secondary_stream[1] else None
         result.codec_delay_ms = relative_codec_delay_ms(
             primary_stream[0], primary_stream[1],
             secondary_stream[0], secondary_stream[1],
@@ -319,6 +397,21 @@ def analyze_pair(
         if not secondary_duration or secondary_duration <= 0:
             result.error = f"Could not read duration of {result.secondary_name}"
             return result
+        # Said up front, in the file's terms, rather than left to surface as a
+        # decoder's "Invalid argument" or a correlation that found nothing.
+        for info, path, track, role in (
+            (primary_info, primary_path, primary_track, "video"),
+            (secondary_info, secondary_path, secondary_track, "dub"),
+        ):
+            problem = _unusable(info, path, track, role)
+            if problem:
+                result.error = problem
+                return result
+        if os.path.realpath(primary_path) == os.path.realpath(secondary_path) and primary_track == secondary_track:
+            result.warnings.append(
+                "The video and the dub are the same file and track, so the delay is zero by definition. "
+                "Check the pairing."
+            )
 
         # Measure at the files' own speed first. A duration ratio can sit
         # inside the tolerance of a standard conversion without being one -- a
@@ -431,12 +524,287 @@ def analyze_pair(
             cut_magnitude_ms=result.cut.magnitude_ms if result.cut else None,
             cut_uncertainty_s=result.cut.uncertainty_s if result.cut else None,
         )
-        report(100)
+        if not _survey_is_clean(result):
+            measured = timeline and _measure_timeline(
+                result, primary_path, secondary_path, max_offset_ms, token,
+                primary_track, secondary_track,
+                (lambda percent: progress(TIMELINE_PROGRESS_FROM + int(percent * (100 - TIMELINE_PROGRESS_FROM) / 100)))
+                if progress else None,
+            )
+            if not measured:
+                _guard_weak_survey(result)
+                if result.error:
+                    result.error = _explain_no_match(result)
+        if progress:
+            progress(100)
         return result
 
     except MediaError as exc:
         result.error = str(exc)
         return result
+
+
+def _survey_is_clean(result: PairResult) -> bool:
+    """Whether the survey is the whole answer: one offset across the file.
+
+    Every window found the dub, they agree to within a fraction of a frame,
+    nothing steps, nothing drifts, the files ran at their own speed and the
+    match is strong. A survey like that has nothing a longer look would add,
+    and it is returned untouched, so a clean pair measures exactly as it
+    always has.
+    """
+    if result.error or result.delay_ms is None or not result.windows:
+        return False
+    usable = [w for w in result.windows if w.usable]
+    if len(usable) < len(result.windows):
+        return False
+    if result.is_likely_cut or result.is_rate_mismatch or result.has_significant_drift:
+        return False
+    if abs(result.speed_compensation - 1.0) > 1e-9:
+        return False
+    if result.confidence < CLEAN_MIN_CONFIDENCE:
+        return False
+    offsets = [w.estimate.delay_ms for w in usable]
+    return max(offsets) - min(offsets) <= CLEAN_MAX_SPREAD_MS
+
+
+def _measure_timeline(
+    result: PairResult,
+    primary_path: str,
+    secondary_path: str,
+    max_offset_ms: float,
+    token: Optional[CancellationToken],
+    primary_track: int,
+    secondary_track: int,
+    progress: Optional[Callable[[int], None]],
+) -> bool:
+    """Measure the pair by laying the dub along the whole video.
+
+    Six windows answer one question well -- is this one offset? -- and every
+    other question badly. Past a cut bigger than the search range the windows
+    find nothing and the survey calls the file one delay; two cuts are one
+    step to it, placed to within minutes; a frame-rate conversion needs one
+    window to clear a bar a weak dub never clears; and a single window that
+    locked onto a repeated cue is reported as the answer. The dub-sync planner
+    reads both tracks end to end and finds every stretch, every cut and the
+    speed, so when the survey is not clean it is the better witness.
+
+    Returns:
+        Whether the result now comes from the timeline. False leaves the
+        survey's numbers in place with a warning saying why.
+    """
+    from .dubsync import DEFAULT_SEARCH_S, plan_dubsync
+
+    try:
+        plan = plan_dubsync(
+            primary_path, secondary_path,
+            video_track=primary_track, dub_track=secondary_track,
+            search_s=max(DEFAULT_SEARCH_S, max_offset_ms / 1000.0),
+            token=token,
+            progress=(lambda percent, _stage: progress(percent)) if progress else None,
+        )
+    except Cancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the survey still stands without it
+        result.timeline_error = f"{type(exc).__name__}: {exc}"
+        if result.error is None:
+            result.warnings.append(
+                f"The whole-timeline check stopped with an error ({result.timeline_error}), "
+                "so this delay rests on the survey alone."
+            )
+        return False
+    if plan.error or not plan.dub_segments:
+        result.timeline_error = plan.error or "nothing could be placed"
+        if result.error is None:
+            result.warnings.append(
+                f"The whole-timeline check could not lay the dub on the video ({result.timeline_error}), "
+                "so this delay rests on the survey alone."
+            )
+        result.warnings.extend(w for w in plan.warnings if DAMAGE_MARK in w and w not in result.warnings)
+        return False
+    _apply_timeline(result, plan)
+    return True
+
+
+def _apply_timeline(result: PairResult, plan) -> None:
+    """Restate the result from a whole-timeline plan, in the survey's terms.
+
+    The plan's offsets are on the video's clock, with the dub already brought
+    to the video's speed. The survey reports the files the user has: at video
+    time t the dub's own time is (t + offset) / speed, so its offset there is
+    that less t, and at t=0 it is offset / speed. Reported that way the delay
+    means what a survey's does, with or without a speed change; the delay to
+    pair with a timestamp stretch is in ``rate_guide`` instead.
+    """
+    speed = plan.speed if plan.speed and plan.speed > 0 else 1.0
+    dubs = plan.dub_segments
+    first, last = dubs[0], dubs[-1]
+    codec = result.codec_delay_ms
+
+    def native_ms(offset_s: float, at_s: float) -> float:
+        return ((at_s + offset_s) / speed - at_s) * 1000.0 - codec
+
+    changed_speed = abs(speed - 1.0) > 1e-9
+    result.method = "timeline"
+    result.error = None
+    result.cut = None
+    result.speed_compensation = speed
+    result.drift_ms_per_s = (1.0 / speed - 1.0) * 1000.0 if changed_speed else 0.0
+    result.delay_at_start_ms = native_ms(first.offset_s, 0.0)
+    # As the survey quotes it: with a drift, the value at the middle of the
+    # stretch a delay can act on.
+    result.delay_ms = (
+        native_ms(first.offset_s, (first.start_s + first.end_s) / 2.0) if changed_speed
+        else result.delay_at_start_ms
+    )
+    result.start_delay_ms = native_ms(first.offset_s, first.start_s)
+    result.end_delay_ms = native_ms(last.offset_s, last.end_s)
+    result.confidence = _timeline_confidence(plan)
+    result.edits, result.gaps = plan.edits_and_gaps()
+    result.rate_guide = conversion_guide(
+        plan.video_fps or result.primary_fps, speed, plan.dub_duration_s, plan.rate_confirmed,
+        offset_ms=first.offset_s * 1000.0 - codec,
+        sample_rate=result.secondary_sample_rate,
+    )
+    # The plan's own warnings are written for laying the dub ("filled from
+    # the original") and stay with it in ``timeline``; a measurement carries
+    # the ones that bear on the delay.
+    result.warnings.extend(w for w in plan.warnings if DAMAGE_MARK in w and w not in result.warnings)
+    if plan.rate_confirmed is False:
+        result.warnings.append(
+            "The dub's frame rate could not be confirmed from the audio, so it was taken to be the video's. "
+            "If the dub was mastered at another rate (23.976 against 24 is the common case), the delay will drift."
+        )
+    result.timeline = plan.to_dict()
+    result.timeline_description = plan.describe()
+    doubtful = [edit for edit in result.edits if edit.get("check")]
+    if len(doubtful) >= DOUBTFUL_RUN:
+        result.warnings.insert(0, (
+            f"{len(doubtful)} of the {len(result.edits)} edits rest on short stretches of dub, from "
+            f"{_clock_of(doubtful[0]['videoS'])} to {_clock_of(doubtful[-1]['videoEndS'])}: the two versions "
+            "diverge there (often different end credits or a re-edited scene), and some of those edits may be "
+            "a repeated passage matched in the wrong place. Check that part as a whole."
+        ))
+
+    guide = result.rate_guide
+    first_edit = result.edits[0] if result.edits else None
+    story = []
+    if guide:
+        story.append(guide["instruction"])
+    if result.edits:
+        story.append(
+            f"The dub departs from the video {len(result.edits)} time{'s' if len(result.edits) != 1 else ''}; "
+            f"the first is at {first_edit['description']} The delay aligns everything before it."
+        )
+    if not story:
+        story.append("The whole timeline agrees with one delay.")
+    named = bool(guide and guide["named"])
+    result.rate_diagnosis = RateDiagnosis(
+        drift_ms_per_s=result.drift_ms_per_s,
+        speed_ratio=guide["speed"] if guide else 1.0,
+        source_fps=guide["dubFps"] if named else None,
+        target_fps=guide["videoFps"] if named else None,
+        is_rate_mismatch=bool(guide),
+        is_likely_cut=bool(result.edits),
+        cut_position_s=first_edit["videoS"] if first_edit else None,
+        cut_magnitude_ms=first_edit["jumpMs"] if first_edit else None,
+        explanation=" ".join(story),
+    )
+
+
+def _unusable(info, path: str, track: int, role: str) -> Optional[str]:
+    """Why a file cannot be measured as it stands, or None if it can."""
+    name = os.path.basename(path)
+    if not info.has_audio:
+        return f"{name} has no audio track{' to compare against' if role == 'video' else ''}."
+    tracks = getattr(info, "audio_tracks", None) or []
+    if tracks and not 0 <= track < len(tracks):
+        return (
+            f"{name} has {len(tracks)} audio track{'s' if len(tracks) != 1 else ''}, so track {track + 1} "
+            "does not exist. Choose a track the file has."
+        )
+    if info.duration and info.duration < MIN_MEASURABLE_S:
+        return (
+            f"{name} is only {info.duration:.1f} s long; measuring a delay needs at least "
+            f"{MIN_MEASURABLE_S:.0f} s of audio."
+        )
+    return None
+
+
+def _explain_no_match(result: PairResult) -> str:
+    """The reason no delay could be found, in terms of the files.
+
+    By the time this is asked both the survey and the whole-timeline search
+    have come up empty, so the survey's per-window reason ("no distinct
+    correlation peak") is only half the story and names nothing a user can
+    check. A file problem the timeline ran into outranks it; silence is said
+    of the track that is silent; otherwise the two are different audio.
+    """
+    reasons = [w.estimate.reason for w in result.windows if w.estimate.reason]
+    planned = getattr(result, "timeline_error", None)
+    if planned and "matched" not in planned and "placed" not in planned:
+        return planned
+    if reasons and all(reason == SILENT_SECONDARY for reason in reasons):
+        return (
+            f"The dub ({result.secondary_name}) is silent everywhere it was sampled. It may be an empty or muted "
+            "track, or the wrong track of the file."
+        )
+    if reasons and all(reason == SILENT_PRIMARY for reason in reasons):
+        return (
+            f"The video's audio ({result.primary_name}) is silent everywhere it was sampled, so there is nothing "
+            "to compare the dub with. Choose another reference track."
+        )
+    if reasons and all(reason in (NO_PEAK, SILENT_PRIMARY, SILENT_SECONDARY) for reason in reasons):
+        return (
+            "The dub does not match the video anywhere: neither the sample windows nor a search of the whole "
+            "timeline found it. They are probably different audio -- another episode or cut, a different film, "
+            "or a track that is not this video's dub. Check the pairing and the chosen tracks."
+        )
+    return result.error
+
+
+def _clock_of(seconds: float) -> str:
+    ms = int(round(max(0.0, seconds) * 1000.0))
+    hours, rest = divmod(ms, 3_600_000)
+    minutes, rest = divmod(rest, 60_000)
+    return f"{hours}:{minutes:02d}:{rest / 1000.0:06.3f}"
+
+
+def _timeline_confidence(plan) -> float:
+    """How far to trust a timeline result, from how much of the video the dub
+    was found across.
+
+    The planner keeps only stretches that cleared its own evidence bars, so
+    what is left to judge is coverage: a dub found across most of the video is
+    the same audio beyond reasonable doubt, one found in a corner of it may
+    not be. The stretch the delay comes from must also be long enough to stand
+    on its own, and a frame rate the audio did not confirm caps it.
+    """
+    dubs = plan.dub_segments
+    covered = sum(s.length_s for s in dubs) / max(plan.video_duration_s, 1e-9)
+    confidence = 0.5 + (0.95 - 0.5) * min(1.0, covered / TIMELINE_FULL_COVERAGE)
+    if dubs[0].length_s < TIMELINE_MIN_STRETCH_S or plan.rate_confirmed is False:
+        confidence = min(confidence, 0.7)
+    return confidence
+
+
+def _guard_weak_survey(result: PairResult) -> None:
+    """Keep a survey that barely found the dub from passing as a measurement.
+
+    One or two windows out of six are what a coincidence looks like: a
+    repeated cue, a stinger, a sound effect used twice. Nothing else confirmed
+    them, so the delay is held below the confidence at which it would be used
+    without a look, and the reason is said.
+    """
+    total = len(result.windows)
+    usable = sum(1 for w in result.windows if w.usable)
+    if result.delay_ms is None or total < MIN_USABLE_WINDOWS or usable >= MIN_USABLE_WINDOWS:
+        return
+    result.confidence = min(result.confidence, WEAK_SURVEY_CONFIDENCE)
+    result.warnings.append(
+        f"Only {usable} of {total} windows found the dub and nothing else confirmed it, so this delay "
+        "may be a repeated passage rather than the real offset. Check it before using it."
+    )
 
 
 def _measure_window(

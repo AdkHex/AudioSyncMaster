@@ -35,6 +35,13 @@ MIN_PEAK_RATIO = 12.0
 # A segment with less energy than this contributes nothing but numerical noise.
 MIN_RMS = 1e-4
 
+# Why a silent segment was refused, by side.
+SILENT_PRIMARY = "the reference track is silent or near-silent here"
+SILENT_SECONDARY = "the compared track is silent or near-silent here"
+
+# Why a match was refused: no correlation peak stood out from the rest.
+NO_PEAK = "no distinct correlation peak; tracks appear unrelated"
+
 # How far the waveform refinement may move the envelope's answer. Its only job
 # is to undo envelope quantisation, which is ENVELOPE_HOP frames wide, so a
 # couple of frames either side is all it can legitimately need. The original
@@ -217,7 +224,8 @@ def estimate_offset(
     primary_rms = float(np.sqrt(np.mean(primary.astype(np.float64) ** 2)))
     secondary_rms = float(np.sqrt(np.mean(secondary.astype(np.float64) ** 2)))
     if primary_rms < MIN_RMS or secondary_rms < MIN_RMS:
-        return OffsetEstimate(None, 0.0, 0.0, "segment is silent or near-silent")
+        # Which side, since "silent" is only actionable once it names a track.
+        return OffsetEstimate(None, 0.0, 0.0, SILENT_PRIMARY if primary_rms < MIN_RMS else SILENT_SECONDARY)
 
     env_primary = onset_envelope(primary)
     env_secondary = onset_envelope(secondary)
@@ -254,7 +262,7 @@ def estimate_offset(
             None,
             _ratio_to_confidence(ratio, min_peak_ratio),
             ratio,
-            "no distinct correlation peak; tracks appear unrelated",
+            NO_PEAK,
         )
 
     refined_index = _parabolic_vertex(corr, peak_index)

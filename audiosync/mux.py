@@ -20,6 +20,7 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
+from .framerate import exact_speed_filters
 from .media import PROBE_TIMEOUT_S, CancellationToken, MediaError, ffmpeg_path, ffprobe_path, probe, _run
 
 _log = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ class MuxPlan:
     attachments: bool = True
     #: What had to be left out, for the user.
     warnings: List[str] = field(default_factory=list)
+    #: The audio's own sample rate, which a sample-exact rate change needs;
+    #: None falls back to atempo.
+    audio_sample_rate: Optional[int] = None
 
     @property
     def needs_resample(self) -> bool:
@@ -61,7 +65,11 @@ class MuxPlan:
         else:
             parts.append("no significant shift")
         if self.needs_resample:
-            parts.append(f"resample audio by {self.speed_ratio:.6f}x to correct drift")
+            how = (
+                "pitch follows the speed, as a frame-rate conversion's does" if self.audio_sample_rate
+                else "pitch kept"
+            )
+            parts.append(f"resample audio by {self.speed_ratio:.6f}x to correct drift ({how})")
         return "; ".join(parts)
 
 
@@ -115,21 +123,31 @@ def build_command(plan: MuxPlan) -> List[str]:
 
     filters: List[str] = []
 
+    # The delay is where the video's first moment sits on the dub's own clock.
+    # Once atempo has put the dub on the video's clock, that same moment sits
+    # delay / atempo from the start, and that is the shift to make there:
+    # trimming the unconverted figure leaves the dub out by delay * (1 - atempo)
+    # -- 107ms on a 2.6s PAL delay, 3.8s on a 92s one.
+    shift_ms = plan.delay_ms / plan.speed_ratio if plan.needs_resample else plan.delay_ms
+
     # Rate correction comes FIRST. atempo rescales every timestamp after it, so
     # a shift applied beforehand is itself scaled, leaving a residual offset
     # proportional to the shift even though the drift is gone.
     if plan.needs_resample:
-        # atempo is limited to 0.5-2.0 per instance; drift corrections are
-        # always tiny, so a single instance always suffices here.
-        filters.append(f"atempo={plan.speed_ratio:.9f}")
+        if plan.audio_sample_rate:
+            filters.extend(exact_speed_filters(plan.speed_ratio, plan.audio_sample_rate))
+        else:
+            # atempo is limited to 0.5-2.0 per instance; drift corrections are
+            # always tiny, so a single instance always suffices here.
+            filters.append(f"atempo={plan.speed_ratio:.9f}")
 
         # Shift on the rate-corrected timeline.
-        if plan.delay_ms > 1e-6:
-            filters.append(f"atrim=start={plan.delay_ms / 1000.0:.6f}")
+        if shift_ms > 1e-6:
+            filters.append(f"atrim=start={shift_ms / 1000.0:.6f}")
             filters.append("asetpts=PTS-STARTPTS")
 
-    if plan.delay_ms < -1e-6:
-        filters.append(f"adelay={-plan.delay_ms:.3f}:all=1")
+    if shift_ms < -1e-6:
+        filters.append(f"adelay={-shift_ms:.3f}:all=1")
 
     if filters:
         command.extend(["-filter:a", ",".join(filters), "-c:a", "aac", "-b:a", "320k"])
@@ -249,6 +267,13 @@ def plan_correction(
     # Probed now so the command shown before running is the one that runs.
     if os.path.isfile(video_path):
         plan_subtitles(plan)
+    if plan.needs_resample and os.path.isfile(audio_path):
+        try:
+            info = probe(audio_path)
+            rate = (info.audio_tracks[0].sample_rate if info.audio_tracks else None) or info.sample_rate
+            plan.audio_sample_rate = int(rate) if rate else None
+        except MediaError:
+            plan.audio_sample_rate = None  # atempo still corrects it, less exactly
     return plan
 
 

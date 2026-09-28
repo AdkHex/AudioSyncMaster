@@ -135,6 +135,7 @@ def handle_analyze(request: dict) -> None:
         max_offset_ms=float(request.get("maxOffsetMs", 60000.0)),
         max_workers=int(request.get("maxWorkers", 3)),
         fast=bool(request.get("fast", False)),
+        timeline=bool(request.get("timeline", True)),
     )
 
     # A pairing the user corrected by hand wins outright. Re-matching here
@@ -147,9 +148,9 @@ def handle_analyze(request: dict) -> None:
             audio = entry.get("secondaryPath")
             if not video or not audio:
                 continue
-            if not os.path.isfile(video) or not os.path.isfile(audio):
-                emit_log(f"Skipping a pair whose files are missing: {os.path.basename(video or '?')}")
-                continue
+            # A pair whose file is missing is measured anyway: it comes back
+            # with an error saying which file and why, on its own row, where
+            # dropping it here left the app a pair with no result at all.
             pairs.append(
                 MatchPair(
                     video,

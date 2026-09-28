@@ -248,3 +248,29 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+def test_a_file_problem_is_said_in_the_files_terms():
+    from audiosync.media import describe_failure
+
+    said = describe_failure("/x/dub.m4a", "[mov,mp4] moov atom not found\ndub.m4a: Invalid data found when processing input")
+    assert said.startswith("dub.m4a is incomplete"), said
+    said = describe_failure("/x/v.mkv", "Stream map '0:a:5' matches no streams.\nError opening output files: Invalid argument", 5)
+    assert said.startswith("v.mkv has no audio track 6"), said
+    assert "Invalid argument" in said, "FFmpeg's own words are kept for diagnosis"
+    assert describe_failure("/x/a.wav", "something new").startswith("FFmpeg could not read a.wav")
+
+
+def test_folders_and_empty_files_are_refused_up_front():
+    with Workspace() as ws:
+        folder = ws.path("folder.mkv")
+        os.makedirs(folder)
+        empty = ws.path("empty.m4a")
+        open(empty, "wb").close()
+        for path, words in ((folder, "is a folder"), (empty, "is empty (0 bytes)"), (ws.path("gone.mkv"), "was not found")):
+            try:
+                probe(path)
+            except MediaError as exc:
+                assert words in str(exc), str(exc)
+            else:
+                raise AssertionError(f"{path} was probed")
