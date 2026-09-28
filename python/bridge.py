@@ -67,6 +67,7 @@ try:
         extract_preview,
         plan_correction,
     )
+    from audiosync.subs import service as subs_service
 except Exception as exc:  # noqa: BLE001
     sys.stderr.write(f"Failed to import audiosync package: {exc}\n")
     traceback.print_exc(file=sys.stderr)
@@ -528,7 +529,7 @@ def handle_apply(request: dict) -> None:
             )
             try:
                 output = apply_correction(
-                    plan, token, overwrite=bool(request.get("overwrite"))
+                    plan, token, overwrite=bool(request.get("overwrite")), log=emit_log
                 )
                 written.append(output)
                 emit({"type": "applyProgress", "done": index + 1, "total": len(items),
@@ -1025,6 +1026,78 @@ def handle_voice_tools(request: dict) -> None:
     emit({"type": "voiceTools", "action": action, "status": state, "error": error})
 
 
+# ------------------------------------------------------------------ subsync
+#
+# Every Subsync command answers with exactly one terminal event, even when
+# something unexpected breaks: the host waits for that event, and a handler
+# that died silently would leave the app spinning until its timeout.
+
+
+def _terminal_on_error(terminal: str, **extra):
+    def wrap(handler):
+        def run(request: dict) -> None:
+            try:
+                handler(request)
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc(file=sys.stderr)
+                emit({"type": terminal, **extra, "error": f"{type(exc).__name__}: {exc}"})
+        return run
+    return wrap
+
+
+@_terminal_on_error("subsBatchDone", outcomes=[])
+def handle_subs_batch(request: dict) -> None:
+    if not has_ffmpeg():
+        emit_error("FFmpeg was not found.", fatal=True)
+        emit({"type": "subsBatchDone", "outcomes": [], "error": "FFmpeg was not found"})
+        return
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        subs_service.run_batch(request, emit, token)
+    finally:
+        _set_token(None)
+
+
+@_terminal_on_error("subsProbeResult", files=[])
+def handle_subs_probe(request: dict) -> None:
+    emit({"type": "subsProbeResult", "files": subs_service.probe(list(request.get("paths") or []))})
+
+
+@_terminal_on_error("subsCapsResult", caps=None)
+def handle_subs_caps(request: dict) -> None:
+    emit({"type": "subsCapsResult", "caps": subs_service.capabilities(request.get("secrets") or {})})
+
+
+@_terminal_on_error("subsLoadResult", preview=None)
+def handle_subs_load(request: dict) -> None:
+    result = subs_service.load(request.get("ref") or {}, int(request.get("limit") or 5000))
+    emit({"type": "subsLoadResult", **result})
+
+
+@_terminal_on_error("subsSaveResult", path=None)
+def handle_subs_save(request: dict) -> None:
+    path = subs_service.save(
+        request["path"], request.get("format"), list(request.get("cues") or []), request.get("language")
+    )
+    emit({"type": "subsSaveResult", "path": path})
+
+
+@_terminal_on_error("packDone", ok=False, pack=None)
+def handle_pack_install(request: dict) -> None:
+    token = CancellationToken()
+    _set_token(token)
+    try:
+        subs_service.pack_install(str(request.get("pack") or ""), request.get("model"), emit, token)
+    finally:
+        _set_token(None)
+
+
+@_terminal_on_error("packDone", ok=False, pack=None)
+def handle_pack_remove(request: dict) -> None:
+    subs_service.pack_remove(str(request.get("pack") or ""), emit, model=request.get("model"))
+
+
 def handle_cancel(request: dict) -> None:
     with _token_lock:
         token = _active_token
@@ -1049,6 +1122,13 @@ HANDLERS = {
     "dubsyncPreview": handle_dubsync_preview,
     "shotCuts": handle_shot_cuts,
     "voiceTools": handle_voice_tools,
+    "subsBatch": handle_subs_batch,
+    "subsProbe": handle_subs_probe,
+    "subsCaps": handle_subs_caps,
+    "subsLoad": handle_subs_load,
+    "subsSave": handle_subs_save,
+    "packInstall": handle_pack_install,
+    "packRemove": handle_pack_remove,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }

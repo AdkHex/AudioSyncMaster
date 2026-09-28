@@ -44,6 +44,8 @@ if "%BUILD_SIDECAR%"=="1" (
   REM A directory build, NOT --onefile. Onefile re-extracts its whole payload
   REM to a temp folder on every launch, costing tens of seconds per run.
   if exist src-tauri\resources\engine rmdir /s /q src-tauri\resources\engine
+  REM PYTHONPATH lets --collect-submodules find audiosync.subs (see the CI step).
+  set "PYTHONPATH=%CD%"
   "%VENV%\Scripts\pyinstaller" --onedir --clean --noconfirm --log-level WARN ^
     --distpath build\engine --workpath build\pyi --specpath build\pyi ^
     --name audiosync-cli ^
@@ -57,6 +59,8 @@ if "%BUILD_SIDECAR%"=="1" (
     --hidden-import audiosync.mux ^
     --hidden-import audiosync.dubsync ^
     --hidden-import audiosync.dubrender ^
+    --collect-submodules audiosync.subs ^
+    --add-data "%CD%\audiosync\subs\workers;audiosync\subs\workers" ^
     --collect-all numpy ^
     --exclude-module scipy ^
     --exclude-module matplotlib ^

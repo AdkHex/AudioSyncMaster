@@ -239,7 +239,18 @@ jobs:
           # --onedir, NOT --onefile. A onefile build re-extracts its entire
           # payload to a temp directory on every launch; that measured 32-63
           # seconds per run on macOS. A directory build starts in ~0.12s.
-          pyinstaller --onedir --clean --noconfirm --log-level WARN \
+          # The subtitle engine packs run these scripts with their own Python,
+          # so they ship as plain files, not frozen modules. The source is
+          # absolute because --specpath makes relative data paths resolve
+          # against build/pyi; Windows wants ';' between source and target.
+          WORKERS="$(cd audiosync/subs/workers && (pwd -W 2>/dev/null || pwd))"
+          DATA_SEP=":"
+          [ "${{ runner.os }}" = "Windows" ] && DATA_SEP=";"
+          # PYTHONPATH: --collect-submodules looks the package up in a child
+          # Python before --paths applies, and without the repo on its path it
+          # finds "audiosync.subs is not a package" and bundles none of the
+          # subtitle engines (they are imported by name at run time).
+          PYTHONPATH="$(pwd -W 2>/dev/null || pwd)" pyinstaller --onedir --clean --noconfirm --log-level WARN \
             --distpath build/engine --workpath build/pyi --specpath build/pyi \
             --name audiosync-cli \
             --paths . \
@@ -255,6 +266,8 @@ jobs:
             --hidden-import audiosync.voicefix \
             --hidden-import audiosync.voicetools \
             --add-data "../../audiosync/voiceworker.py:audiosync" \
+            --collect-submodules audiosync.subs \
+            --add-data "${WORKERS}${DATA_SEP}audiosync/subs/workers" \
             --collect-all numpy \
             --exclude-module scipy \
             --exclude-module matplotlib \
@@ -268,6 +281,14 @@ jobs:
           mkdir -p src-tauri/resources
           cp -R build/engine/audiosync-cli src-tauri/resources/engine
           [ "${{ runner.os }}" = "Windows" ] || chmod +x src-tauri/resources/engine/audiosync-cli
+
+      # Subsync's OCR reads subtitles with Apple Vision through a small
+      # Swift helper; it ships in resources/tools beside the engine. Other
+      # platforms keep the folder empty (only its .gitkeep).
+      - name: Build the Apple Vision OCR helper (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: sh native/vision-ocr/build.sh
 
       - name: Verify the engine starts and measures correctly
         shell: bash

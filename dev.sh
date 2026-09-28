@@ -37,7 +37,8 @@ if [[ "$BUILD_SIDECAR" == "1" ]]; then
   # a temp folder on every launch, which measured 32-63s per run on macOS.
   # A directory build starts in ~0.12s because nothing is unpacked.
   rm -rf src-tauri/resources/engine
-  "$VENV/bin/pyinstaller" --onedir --clean --noconfirm --log-level WARN \
+  # PYTHONPATH lets --collect-submodules find audiosync.subs (see the CI step).
+  PYTHONPATH="$PWD" "$VENV/bin/pyinstaller" --onedir --clean --noconfirm --log-level WARN \
     --distpath build/engine --workpath build/pyi --specpath build/pyi \
     --name audiosync-cli \
     --paths . \
@@ -50,6 +51,8 @@ if [[ "$BUILD_SIDECAR" == "1" ]]; then
     --hidden-import audiosync.mux \
     --hidden-import audiosync.dubsync \
     --hidden-import audiosync.dubrender \
+    --collect-submodules audiosync.subs \
+    --add-data "$PWD/audiosync/subs/workers:audiosync/subs/workers" \
     --collect-all numpy \
     --exclude-module scipy \
     --exclude-module matplotlib \

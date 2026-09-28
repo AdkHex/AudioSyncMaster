@@ -1,5 +1,6 @@
 mod bridge;
 mod csv;
+mod subsync;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 
 use bridge::{BridgeHandle, ShotBridge, WaveformBridge};
+use subsync::SubsInfoBridge;
 
 /// How long to wait for a single engine event before assuming it has stalled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -1291,6 +1293,7 @@ pub fn run() {
         .manage(BridgeHandle::default())
         .manage(WaveformBridge::default())
         .manage(ShotBridge::default())
+        .manage(SubsInfoBridge::default())
         .invoke_handler(tauri::generate_handler![
             pick_video_folder,
             pick_audio_folder,
@@ -1317,6 +1320,17 @@ pub fn run() {
             export_json,
             reveal_path,
             open_path,
+            subsync::subs_pick_files,
+            subsync::subs_pick_folder,
+            subsync::subs_resolve_dropped,
+            subsync::subs_probe,
+            subsync::subs_caps,
+            subsync::subs_load,
+            subsync::subs_save,
+            subsync::start_subs_batch,
+            subsync::subs_pack,
+            subsync::subs_secret_status,
+            subsync::subs_secret_set,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
@@ -1327,6 +1341,9 @@ pub fn run() {
                     handle.0.shutdown();
                 }
                 if let Some(handle) = window.app_handle().try_state::<ShotBridge>() {
+                    handle.0.shutdown();
+                }
+                if let Some(handle) = window.app_handle().try_state::<SubsInfoBridge>() {
                     handle.0.shutdown();
                 }
             }

@@ -15,6 +15,7 @@ import { ResultsPanel } from "@/components/ResultsPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBar } from "@/components/StatusBar";
+import { SubsyncWorkspace } from "@/components/subsync/SubsyncWorkspace";
 import { UpdateDialog } from "@/components/UpdateDialog";
 import * as api from "@/lib/api";
 import {
@@ -98,6 +99,8 @@ export default function Index() {
   const [showSettings, setShowSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
+  // A Subsync batch is running: the mode switch waits for it.
+  const [subsBusy, setSubsBusy] = useState(false);
   const [dragTarget, setDragTarget] = useState<"video" | "audio" | null>(null);
   const [pairingLoading, setPairingLoading] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -482,6 +485,8 @@ export default function Index() {
     api
       .subscribeToFileDrop(
         (paths) => {
+          // The Subsync workspace takes its own drops.
+          if (stateRef.current.mode === "subsync") return;
           const kind: "video" | "audio" = dragTargetRef.current ?? "video";
           const accept = stateRef.current.mode === "dubsync" ? "media" : kind;
           void api
@@ -1019,6 +1024,10 @@ export default function Index() {
       } else if (meta && event.key.toLowerCase() === ",") {
         event.preventDefault();
         setShowSettings(true);
+      } else if (stateRef.current.mode === "subsync") {
+        // Subsync runs and stops from its own buttons; Enter must stay the
+        // key that presses whatever button has focus there.
+        return;
       } else if (
         event.key === "Enter" &&
         stateRef.current.status !== "processing" &&
@@ -1061,6 +1070,7 @@ export default function Index() {
   // excluded video must disappear from the button too.
   const pairCount = effectivePairing?.pairs.length ?? 0;
   const dubsync = state.mode === "dubsync";
+  const subsync = state.mode === "subsync";
   const busy = state.status === "processing" || dub.status === "running";
   const hasResults = state.results.length > 0;
 
@@ -1156,6 +1166,9 @@ export default function Index() {
     });
   }, []);
 
+  const handleSubsLog = useCallback((message: string) => dispatch({ type: "log", message }), []);
+  const openConsole = useCallback(() => setShowConsole(true), []);
+
   const setMode = useCallback((mode: SyncMode) => {
     dispatch({ type: "setMode", mode });
     dubDispatch({ type: "reset" });
@@ -1177,7 +1190,7 @@ export default function Index() {
       <AppHeader
         mode={state.mode}
         onModeChange={setMode}
-        disabled={busy}
+        disabled={busy || subsBusy}
         showConsole={showConsole}
         showHistory={showHistory}
         onToggleConsole={() => setShowConsole((open) => !open)}
@@ -1186,6 +1199,14 @@ export default function Index() {
       />
 
       <div className="relative flex min-h-0 flex-1">
+        {subsync ? (
+          <SubsyncWorkspace
+            onLog={handleSubsLog}
+            onBusyChange={setSubsBusy}
+            onOpenConsole={openConsole}
+          />
+        ) : (
+        <>
         <Sidebar
           mode={state.mode}
           videoFiles={state.videoFiles}
@@ -1394,6 +1415,8 @@ export default function Index() {
             </>
           )}
         </main>
+        </>
+        )}
 
         {showHistory && (
           <HistoryPanel
@@ -1431,7 +1454,7 @@ export default function Index() {
         pairCount={pairCount}
         resultCount={state.results.length}
         summary={state.summary}
-        busy={busy}
+        busy={busy || subsBusy}
         version={APP_VERSION}
       />
 

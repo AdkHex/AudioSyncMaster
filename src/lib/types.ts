@@ -1,7 +1,9 @@
 /** Shared types. Field names match the Rust structs and the Python engine
  *  exactly -- all three layers speak camelCase across the wire. */
 
-export type SyncMode = "movie" | "series" | "compare" | "dubsync";
+/** "subsync" is the subtitle workspace, which keeps its own state; the
+ *  sync reducer only records that it is the open mode. */
+export type SyncMode = "movie" | "series" | "compare" | "dubsync" | "subsync";
 
 /** What the Dub sync tab is pairing: a batch of movies by filename, or a
  *  season of episodes by season/episode number. */

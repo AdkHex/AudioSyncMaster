@@ -34,6 +34,18 @@ MODULES = [
     "test_editor",
     "test_lipsync",
     "test_voicefix",
+    "test_subs_formats",
+    "test_subs_tracks",
+    "test_subs_retime",
+    "test_subs_style",
+    "test_subs_translate",
+    "test_subs_packs",
+    "test_subs_generate",
+    "test_subs_sync",
+    "test_subs_hdr",
+    "test_subs_tonemap",
+    "test_subs_pgs",
+    "test_subs_ocr",
 ]
 
 

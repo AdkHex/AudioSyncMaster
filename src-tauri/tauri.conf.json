@@ -45,7 +45,8 @@
     "targets": "all",
     "resources": [
       "resources/ffmpeg",
-      "resources/engine"
+      "resources/engine",
+      "resources/tools"
     ],
     "icon": [
       "icons/32x32.png",

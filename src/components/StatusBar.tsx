@@ -16,6 +16,7 @@ const MODE_LABEL: Record<SyncMode, string> = {
   series: "Series",
   compare: "Compare",
   dubsync: "Dub sync",
+  subsync: "Subsync",
 };
 
 /** The persistent footer: what is loaded, and the two shortcuts that matter.
@@ -43,7 +44,10 @@ export const StatusBar = memo(function StatusBar({
       <span className="min-w-0 truncate">{left.join("  ·  ")}</span>
       <span className="flex-1" />
       <span className="hidden items-center gap-3 sm:flex">
-        <Shortcut keys={busy ? "esc" : "↵"} label={busy ? "stop" : mode === "dubsync" ? "sync" : "analyse"} />
+        {/* Subsync runs from its own Run button; Enter is not bound there. */}
+        {mode !== "subsync" && (
+          <Shortcut keys={busy ? "esc" : "↵"} label={busy ? "stop" : mode === "dubsync" ? "sync" : "analyse"} />
+        )}
         <Shortcut keys="&#8963;," label="settings" />
       </span>
       <span className="tabular font-mono">v{version}</span>

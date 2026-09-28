@@ -24,6 +24,8 @@ src-tauri/resources/ffmpeg/*
 !src-tauri/resources/ffmpeg/.gitkeep
 src-tauri/resources/engine/*
 !src-tauri/resources/engine/.gitkeep
+src-tauri/resources/tools/*
+!src-tauri/resources/tools/.gitkeep
 src-tauri/target/
 src-tauri/gen/
 

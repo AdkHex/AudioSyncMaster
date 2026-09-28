@@ -40,6 +40,11 @@ const MODES: { id: SyncMode; label: string; hint: string }[] = [
     label: "Dub sync",
     hint: "Lays a dub with scenes missing onto the video, filling every gap with the original audio at the same moment.",
   },
+  {
+    id: "subsync",
+    label: "Subsync",
+    hint: "Sync, OCR, translate, generate and tone-map subtitles.",
+  },
 ];
 
 /** Wordmark, mode switch, and the panels that are not part of the main flow. */
