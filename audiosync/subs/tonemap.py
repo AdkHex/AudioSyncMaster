@@ -50,6 +50,7 @@ import json
 import math
 import os
 import platform
+import queue
 import re
 import subprocess
 import sys
@@ -999,6 +1000,7 @@ def run_ffmpeg(
         raise TaskError(f"Could not start FFmpeg: {exc}") from exc
 
     tail: collections.deque = collections.deque(maxlen=40)
+    lines: "queue.Queue[Optional[bytes]]" = queue.Queue()
 
     def drain() -> None:
         assert process.stderr is not None
@@ -1007,14 +1009,32 @@ def run_ffmpeg(
             if line:
                 tail.append(line)
 
+    def pump() -> None:
+        assert process.stdout is not None
+        for raw in process.stdout:
+            lines.put(raw)
+        lines.put(None)
+
+    # stdout is read on its own thread too, so the loop below can notice a
+    # cancel without waiting for end-of-file: a descendant that outlives the
+    # kill (a Windows shim's real ffmpeg) keeps the pipe open, and a read
+    # loop over it would wait for that process forever.
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
+    threading.Thread(target=pump, daemon=True).start()
     ctx.token.register(process)
     stats: Dict[str, Any] = {"outTimeS": 0.0, "speed": None, "frames": 0}
     last_pct, last_emit = -1, 0.0
     try:
-        assert process.stdout is not None
-        for raw in process.stdout:
+        while True:
+            if ctx.token.cancelled:
+                break
+            try:
+                raw = lines.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if raw is None:
+                break
             key, _, value = raw.decode("utf-8", "replace").strip().partition("=")
             if key in ("out_time_us", "out_time_ms") and value not in ("", "N/A"):
                 try:
@@ -1041,12 +1061,19 @@ def run_ffmpeg(
                     speed = f", {stats['speed']:.2f}x" if stats["speed"] else ""
                     ctx.progress(pct, f"{stage} ({_clock(stats['outTimeS'])}{speed})")
                     last_pct, last_emit = pct, now
-        process.wait()
-        reader.join(timeout=5)
+        if not ctx.token.cancelled:
+            process.wait()
+            reader.join(timeout=5)
     finally:
         ctx.token.unregister(process)
         if process.poll() is None:
             _terminate(process)
+            # Windows keeps the output file open until the process has
+            # really exited; wait briefly so it can be removed at once.
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
     if ctx.token.cancelled:
         raise Cancelled("operation cancelled")
     if process.returncode != 0:

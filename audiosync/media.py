@@ -125,11 +125,22 @@ def _terminate(process: subprocess.Popen) -> None:
         return
     try:
         if os.name == "nt":
-            process.kill()
+            # Kill the tree, not just the process: ffmpeg from Chocolatey or
+            # Scoop is a shim that runs the real ffmpeg as a child, and a
+            # venv's python.exe is a launcher for the real interpreter.
+            # Killing only the parent left the child running with our pipes
+            # open, so a cancelled read waited for it forever.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10,
+            )
+            if process.poll() is None:
+                process.kill()
         else:
             # Kill the whole group so ffmpeg's own children go too.
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
         try:
             process.kill()
         except Exception:  # noqa: BLE001 - already exiting

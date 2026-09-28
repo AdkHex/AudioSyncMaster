@@ -417,6 +417,66 @@ def test_progress_and_cancellation_kill_ffmpeg():
     assert events and events[0][1].startswith("Tone-mapping"), events
 
 
+# A stand-in for a Chocolatey/Scoop ffmpeg shim or a venv python.exe
+# launcher: the process we start runs the real worker as a child that shares
+# our stdout pipe, then waits for it.
+_LAUNCHER = r"""
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]])
+child.wait()
+"""
+_CHILD = r"""
+import os, sys, time
+with open(sys.argv[1], "w") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    sys.stdout.write("frame=1\nprogress=continue\n")
+    sys.stdout.flush()
+    time.sleep(0.1)
+"""
+
+
+def _alive(pid):
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_cancel_kills_a_launcher_and_the_child_holding_the_pipe():
+    """Stop must end the whole tree. Killing only the launcher left the real
+    worker writing into our pipe, and the read loop waited for it forever --
+    the Windows CI job hung here for an hour."""
+    token = CancellationToken()
+
+    def progress(pct, stage):
+        token.cancel()
+
+    with Workspace() as ws:
+        pid_file = ws.path("child.pid")
+        ctx = TaskContext(token=token, progress=progress, log=lambda m: None, workdir=ws.root)
+        started = time.monotonic()
+        try:
+            tonemap.run_ffmpeg([sys.executable, "-c", _LAUNCHER, _CHILD, pid_file], ctx, duration=None)
+        except Cancelled:
+            pass
+        else:
+            raise AssertionError("cancel did not stop the launcher")
+        assert time.monotonic() - started < 15, "cancel waited on the child's pipe"
+        with open(pid_file) as handle:
+            child = int(handle.read())
+        deadline = time.monotonic() + 5
+        while _alive(child) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not _alive(child), f"the launcher's child {child} outlived the cancel"
+
+
 # ------------------------------------------------------- end-to-end, measured
 
 
