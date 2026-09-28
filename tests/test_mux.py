@@ -20,7 +20,7 @@ import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
 from audiosync.analyze import analyze_pair  # noqa: E402
-from audiosync.media import ffmpeg_path, load_audio, probe  # noqa: E402
+from audiosync.media import ffmpeg_path, ffprobe_path, load_audio, probe  # noqa: E402
 from audiosync.mux import (  # noqa: E402
     MuxPlan,
     apply_correction,
@@ -211,6 +211,120 @@ def test_command_string_is_shell_safe():
     assert "'/v/My Show S01.mkv'" in rendered or '"/v/My Show S01.mkv"' in rendered, (
         f"spaces not quoted: {rendered}"
     )
+
+
+_SRT = "1\n00:00:00,500 --> 00:00:01,500\nHello\n\n2\n00:00:02,000 --> 00:00:03,000\nWorld\n"
+
+
+def _minimal_sup(path):
+    """A two-cue HDMV PGS stream, built by hand (ffmpeg cannot encode PGS)."""
+    import struct
+
+    def segment(kind, payload, pts):
+        return b"PG" + struct.pack(">IIBH", int(pts * 90000), 0, kind, len(payload)) + payload
+
+    def display_set(pts, show, number):
+        pcs = struct.pack(">HHBHBBBB", 160, 120, 0x10, number, 0x80 if show else 0, 0, 0, 1 if show else 0)
+        if show:
+            pcs += struct.pack(">HBBHH", 0, 0, 0, 20, 90)
+        out = segment(0x16, pcs, pts) + segment(0x17, struct.pack(">BBHHHH", 1, 0, 20, 90, 40, 10), pts)
+        if show:
+            out += segment(0x14, bytes([0, 0, 1, 235, 128, 128, 255]), pts)
+            rle = (bytes([0x00, 0xC0, 40, 1]) + b"\x00\x00") * 10
+            body = struct.pack(">HBB", 0, 0, 0xC0) + (len(rle) + 4).to_bytes(3, "big") + struct.pack(">HH", 40, 10) + rle
+            out += segment(0x15, body, pts)
+        return out + segment(0x80, b"", pts)
+
+    with open(path, "wb") as handle:
+        handle.write(display_set(0.5, True, 0) + display_set(1.5, False, 1))
+    return path
+
+
+def _streams(path):
+    result = subprocess.run(
+        [ffprobe_path(), "-v", "error", "-show_entries",
+         "stream=codec_type,codec_name:stream_tags=language,filename", "-of", "json", path],
+        capture_output=True, text=True, check=True,
+    )
+    import json
+
+    return json.loads(result.stdout).get("streams") or []
+
+
+def _video_with_subtitles(workspace, audio, seconds, with_pgs=False):
+    """An MKV carrying an SRT track (Japanese), optionally a PGS track, and a
+    font attachment -- the shape of a real anime/film release."""
+    wav = workspace.path("base.wav")
+    sf.write(wav, audio, SR)
+    srt = workspace.path("subs.srt")
+    with open(srt, "w", encoding="utf-8") as handle:
+        handle.write(_SRT)
+    font = workspace.path("font.ttf")
+    with open(font, "wb") as handle:
+        handle.write(b"not really a font")
+    inputs = ["-i", srt]
+    maps = ["-map", "0:v:0", "-map", "1:a:0", "-map", "2:0"]
+    if with_pgs:
+        inputs += ["-i", _minimal_sup(workspace.path("subs.sup"))]
+        maps += ["-map", "3:0"]
+    out = workspace.path("source.mkv")
+    subprocess.run(
+        [
+            ffmpeg_path(), "-nostdin", "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"testsrc=size=160x120:rate=10:duration={seconds}",
+            "-i", wav, *inputs, *maps,
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-c:s", "copy", "-metadata:s:s:0", "language=jpn",
+            "-attach", font, "-metadata:s:t", "mimetype=font/ttf", "-shortest", out,
+        ],
+        capture_output=True, check=True,
+    )
+    return out
+
+
+def test_correction_keeps_subtitles_and_attachments():
+    """Audio sync used to map only 0:v:0 and 1:a:0, so every synced file
+    silently lost its subtitle tracks and fonts. The video timeline does not
+    change, so they are carried over untouched."""
+    with Workspace() as workspace:
+        base = _speechlike(4.0, seed=3)
+        video = _video_with_subtitles(workspace, base, 4.0, with_pgs=True)
+        audio = workspace.path("dub.wav")
+        sf.write(audio, base, SR)
+        plan = plan_correction(video, audio, 120.0, output_path=workspace.path("synced.mkv"))
+        assert "0:s:0" in command_string(plan) and "0:t?" in command_string(plan), command_string(plan)
+        output = apply_correction(plan)
+        streams = _streams(output)
+        subtitles = [s for s in streams if s.get("codec_type") == "subtitle"]
+        attachments = [s for s in streams if s.get("codec_type") == "attachment"]
+        assert [s.get("codec_name") for s in subtitles] == ["subrip", "hdmv_pgs_subtitle"], streams
+        assert (subtitles[0].get("tags") or {}).get("language") == "jpn", "subtitle language lost"
+        assert len(attachments) == 1, f"font attachment lost: {streams}"
+        assert plan.warnings == [], plan.warnings
+
+
+def test_correction_to_mp4_drops_only_what_mp4_cannot_hold():
+    """PGS cannot go into MP4: it is left out with a warning, the text track
+    is converted to mov_text, and the correction still succeeds."""
+    with Workspace() as workspace:
+        base = _speechlike(4.0, seed=4)
+        video = _video_with_subtitles(workspace, base, 4.0, with_pgs=True)
+        audio = workspace.path("dub.wav")
+        sf.write(audio, base, SR)
+        plan = plan_correction(video, audio, 0.0, output_path=workspace.path("synced.mp4"))
+        logged = []
+        output = apply_correction(plan, log=logged.append)
+        codecs = [s.get("codec_name") for s in _streams(output) if s.get("codec_type") == "subtitle"]
+        assert codecs == ["mov_text"], codecs
+        assert any("hdmv_pgs_subtitle" in w for w in logged), logged
+        assert any("attachment" in w for w in logged), logged
+
+
+def test_unprobed_plan_carries_subtitles_into_matroska_only():
+    mkv = build_command(MuxPlan("/v.mkv", "/a.ac3", "/out.mkv", delay_ms=0.0))
+    assert "0:s?" in mkv and "0:t?" in mkv and "-c:s" in mkv, mkv
+    mp4 = build_command(MuxPlan("/v.mkv", "/a.ac3", "/out.mp4", delay_ms=0.0))
+    assert "0:s?" not in mp4 and "0:t?" not in mp4, mp4
 
 
 def _run_all():

@@ -13,12 +13,16 @@ Two correction shapes are supported:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shlex
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Tuple
 
-from .media import CancellationToken, MediaError, ffmpeg_path, probe, _run
+from .media import PROBE_TIMEOUT_S, CancellationToken, MediaError, ffmpeg_path, ffprobe_path, probe, _run
+
+_log = logging.getLogger(__name__)
 
 # Below this the correction is inaudible; muxing would waste time and disk.
 NEGLIGIBLE_DELAY_MS = 5.0
@@ -36,6 +40,14 @@ class MuxPlan:
     delay_ms: float
     speed_ratio: Optional[float] = None
     copy_video: bool = True
+    #: The video's subtitle streams to carry over, as ``(N of 0:s:N, codec
+    #: to write it with)``. None = not probed yet: every subtitle stream and
+    #: attachment is copied when the output is Matroska, none otherwise.
+    subtitles: Optional[List[Tuple[int, str]]] = None
+    #: Carry font attachments (Matroska only; ASS subtitles need them).
+    attachments: bool = True
+    #: What had to be left out, for the user.
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def needs_resample(self) -> bool:
@@ -85,6 +97,20 @@ def build_command(plan: MuxPlan) -> List[str]:
     command.extend(["-i", plan.audio_path])
 
     command.extend(["-map", "0:v:0", "-map", "1:a:0"])
+    # The video's subtitles and fonts ride along unchanged: only the audio is
+    # retimed, the video timeline is not, so they are still in sync. Without
+    # this every synced file silently lost its subtitle tracks.
+    matroska = _container_kind(plan.output_path) == "matroska"
+    if plan.subtitles is None:
+        if matroska:
+            command.extend(["-map", "0:s?", "-map", "0:t?", "-c:s", "copy"])
+    else:
+        for index, _codec in plan.subtitles:
+            command.extend(["-map", f"0:s:{index}"])
+        if plan.attachments and matroska:
+            command.extend(["-map", "0:t?"])
+        for position, (_index, codec) in enumerate(plan.subtitles):
+            command.extend([f"-c:s:{position}", codec])
     command.extend(["-c:v", "copy" if plan.copy_video else "libx264"])
 
     filters: List[str] = []
@@ -112,6 +138,77 @@ def build_command(plan: MuxPlan) -> List[str]:
 
     command.append(plan.output_path)
     return command
+
+
+#: Subtitle codecs each output container takes as they are, and the text
+#: codec other text subtitles are converted to (None: text is left out too).
+_SUBTITLE_SUPPORT = {
+    "matroska": ({"subrip", "ass", "ssa", "webvtt", "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}, "srt"),
+    "webm": ({"webvtt"}, "webvtt"),
+    "mp4": ({"mov_text"}, "mov_text"),
+    "mpegts": ({"dvb_subtitle", "dvb_teletext"}, None),
+}
+_TEXT_SUBTITLE_CODECS = {"subrip", "ass", "ssa", "webvtt", "mov_text", "text"}
+
+
+def _container_kind(path: str) -> Optional[str]:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".mkv", ".mka", ".mks", ".mk3d"):
+        return "matroska"
+    if ext == ".webm":
+        return "webm"
+    if ext in (".mp4", ".m4v", ".mov", ".m4a"):
+        return "mp4"
+    if ext in (".ts", ".m2ts", ".mts"):
+        return "mpegts"
+    return None
+
+
+def _probe_subtitles(path: str, token: Optional[CancellationToken]) -> Tuple[List[str], int]:
+    """Codec of every subtitle stream (0:s:N order) and the attachment count."""
+    stdout = _run(
+        [ffprobe_path(), "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", path],
+        PROBE_TIMEOUT_S, token, what=f"probe {os.path.basename(path)}",
+    )
+    streams = json.loads(stdout.decode("utf-8", errors="replace") or "{}").get("streams") or []
+    codecs = [s.get("codec_name") or "unknown" for s in streams if s.get("codec_type") == "subtitle"]
+    attachments = sum(1 for s in streams if s.get("codec_type") == "attachment")
+    return codecs, attachments
+
+
+def plan_subtitles(plan: MuxPlan, token: Optional[CancellationToken] = None) -> MuxPlan:
+    """Decide which of the video's subtitle streams the output can hold.
+
+    A stream the output container cannot take (PGS into MP4, say) is left
+    out with a warning instead of failing the whole correction: the audio
+    fix is what was asked for.
+    """
+    try:
+        codecs, attachments = _probe_subtitles(plan.video_path, token)
+    except (MediaError, ValueError):
+        return plan
+    kind = _container_kind(plan.output_path)
+    copyable, text_codec = _SUBTITLE_SUPPORT.get(kind, (set(), None))
+    kept: List[Tuple[int, str]] = []
+    dropped: List[str] = []
+    for index, codec in enumerate(codecs):
+        if codec in copyable:
+            kept.append((index, "copy"))
+        elif text_codec and codec in _TEXT_SUBTITLE_CODECS:
+            kept.append((index, text_codec))
+        else:
+            dropped.append(f"track {index + 1} ({codec})")
+    plan.subtitles = kept
+    plan.attachments = kind == "matroska"
+    plan.warnings = []
+    if dropped:
+        plan.warnings.append(
+            f"Left out subtitle {', '.join(dropped)}: {os.path.splitext(plan.output_path)[1] or 'this'} "
+            "files cannot hold that format. Write an .mkv to keep every subtitle."
+        )
+    if attachments and kind != "matroska":
+        plan.warnings.append(f"Left out {attachments} attachment(s) (fonts): only .mkv output can hold them.")
+    return plan
 
 
 def command_string(plan: MuxPlan) -> str:
@@ -142,21 +239,30 @@ def plan_correction(
         if not 0.5 <= speed_ratio <= 2.0:
             speed_ratio = None
 
-    return MuxPlan(
+    plan = MuxPlan(
         video_path=video_path,
         audio_path=audio_path,
         output_path=output_path,
         delay_ms=delay_ms,
         speed_ratio=speed_ratio,
     )
+    # Probed now so the command shown before running is the one that runs.
+    if os.path.isfile(video_path):
+        plan_subtitles(plan)
+    return plan
 
 
 def apply_correction(
     plan: MuxPlan,
     token: Optional[CancellationToken] = None,
     overwrite: bool = False,
+    log: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Execute a plan, writing the corrected file. Returns the output path."""
+    """Execute a plan, writing the corrected file. Returns the output path.
+
+    ``log`` receives a warning for every subtitle stream or attachment the
+    output container could not hold (also kept in ``plan.warnings``).
+    """
     if not os.path.isfile(plan.video_path):
         raise MediaError(f"Video not found: {plan.video_path}")
     if not os.path.isfile(plan.audio_path):
@@ -177,6 +283,10 @@ def apply_correction(
     source = probe(plan.video_path, token)
     if not source.has_video:
         raise MediaError(f"{os.path.basename(plan.video_path)} has no video stream to mux into")
+    if plan.subtitles is None:
+        plan_subtitles(plan, token)
+    for warning in plan.warnings:
+        (log or _log.warning)(warning)
 
     _run(
         build_command(plan),
