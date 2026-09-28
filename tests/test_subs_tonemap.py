@@ -587,7 +587,10 @@ def test_text_burn_with_libass_and_an_awkward_path():
         return
     w, h, frames = 320, 180, 48
     with Workspace() as ws:
-        folder = ws.path("It's a [weird], dir; x:y")
+        # Every character libass's filter syntax treats specially. Windows
+        # forbids ':' in a file name; there the drive letter ("C:") is the
+        # colon that must survive escaping.
+        folder = ws.path("It's a [weird], dir; x" if os.name == "nt" else "It's a [weird], dir; x:y")
         os.makedirs(folder)
         grey = np.full((h, w), _pq_codes([10])[0], np.uint16)
         chroma = np.full((h // 2, w // 2), 512, np.uint16)

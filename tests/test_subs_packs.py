@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import tarfile
+import zipfile
 import tempfile
 import threading
 import time
@@ -111,9 +112,11 @@ def test_status_lists_every_pack_in_packstatus_shape():
 
 
 def test_packs_dir_override():
+    # Compared through abspath/join: Windows makes "/tmp/..." "D:\\tmp\\...".
+    expected = os.path.abspath("/tmp/somewhere/packs")
     with env(AUDIOSYNC_PACKS_DIR="/tmp/somewhere/packs"):
-        assert packs.packs_dir() == "/tmp/somewhere/packs"
-        assert packs.pack_dir("asr-faster") == "/tmp/somewhere/packs/asr-faster"
+        assert packs.packs_dir() == expected
+        assert packs.pack_dir("asr-faster") == os.path.join(expected, "asr-faster")
 
 
 def test_python_override_adopts_an_external_environment():
@@ -428,20 +431,26 @@ def test_uv_download_is_checksum_verified():
     """ensure_uv without uv anywhere: download (served locally), verify the
     release's sha256, unpack into packs/bin. A wrong checksum is refused."""
     with sandbox() as (root, _):
-        target, _ext = packs._uv_target()
-        archive = os.path.join(root, "uv.tar.gz")
+        # uv ships a .zip for Windows and a .tar.gz elsewhere; serve the kind
+        # this platform's download expects.
+        target, ext = packs._uv_target()
+        archive = os.path.join(root, f"uv{ext}")
         payload = os.path.join(root, "payload", f"uv-{target}")
         os.makedirs(payload)
         exe = "uv.exe" if os.name == "nt" else "uv"
         with open(os.path.join(payload, exe), "w") as handle:
             handle.write("#!/bin/sh\necho uv 0.0.0\n")
-        with tarfile.open(archive, "w:gz") as tf:
-            tf.add(payload, arcname=f"uv-{target}")
+        if ext == ".zip":
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(os.path.join(payload, exe), f"uv-{target}/{exe}")
+        else:
+            with tarfile.open(archive, "w:gz") as tf:
+                tf.add(payload, arcname=f"uv-{target}")
         good = hashlib.sha256(open(archive, "rb").read()).hexdigest()
         original_download, original_fetch = packs.download, packs._fetch_bytes
         checksum = {"value": good}
         packs.download = lambda url, dest, *a, **k: shutil.copy(archive, dest)
-        packs._fetch_bytes = lambda url, token: f"{checksum['value']}  uv-{target}.tar.gz\n".encode()
+        packs._fetch_bytes = lambda url, token: f"{checksum['value']}  uv-{target}{ext}\n".encode()
         try:
             checksum["value"] = "0" * 64
             try:
