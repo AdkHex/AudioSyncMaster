@@ -33,6 +33,11 @@ class BatchOptions:
     timeline: bool = True
     """Measure a pair the survey cannot settle along its whole timeline
     (see ``analyze._measure_timeline``)."""
+    find_cuts: bool = True
+    """Look for a cut between the survey windows and probe for where it is."""
+    find_speed: bool = True
+    """Try the standard frame-rate conversions when a pair finds nothing at
+    its own speed."""
 
 
 class BatchEvents:
@@ -100,6 +105,8 @@ def run_batch(
                 secondary_track=pair.secondary_track,
                 prefer_fast=options.fast,
                 timeline=options.timeline,
+                find_cuts=options.find_cuts,
+                find_speed=options.find_speed,
                 progress=(
                     (lambda percent: events.on_pair_progress(name, percent))
                     if events.on_pair_progress

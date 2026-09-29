@@ -136,6 +136,8 @@ def handle_analyze(request: dict) -> None:
         max_workers=int(request.get("maxWorkers", 3)),
         fast=bool(request.get("fast", False)),
         timeline=bool(request.get("timeline", True)),
+        find_cuts=bool(request.get("findCuts", True)),
+        find_speed=bool(request.get("findSpeed", True)),
     )
 
     # A pairing the user corrected by hand wins outright. Re-matching here

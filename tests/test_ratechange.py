@@ -109,6 +109,20 @@ def test_a_pal_speedup_is_measured_and_named():
     )
 
 
+def test_no_speed_is_tried_when_the_frame_rate_check_is_off():
+    """Off, a PAL dub is measured at its own speed, finds nothing, and the
+    error names the checks that could have found it."""
+    case = _case("rate_pal")
+    result = analyze_pair(
+        case["primary"], case["secondary"], window_s=10.0, window_count=5,
+        max_offset_ms=3000.0, find_speed=False, timeline=False,
+    )
+    assert result.speed_compensation == 1.0, result.speed_compensation
+    assert result.error and "turn on the frame-rate and whole-timeline checks in Settings" in result.error, (
+        result.error
+    )
+
+
 def test_the_narrowest_conversion_is_still_named():
     case = _case("rate_film")
     result = analyze_pair(

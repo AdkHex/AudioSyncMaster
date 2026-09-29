@@ -566,6 +566,9 @@ export default function Index() {
       windowCount: config.windowCount,
       maxOffsetMs: config.maxOffsetMs,
       maxWorkers: config.maxWorkers,
+      findCuts: config.cutCheck,
+      timeline: config.timelineCheck,
+      findSpeed: config.rateCheck,
     };
   }, []);
 

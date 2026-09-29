@@ -176,6 +176,12 @@ export interface AnalyzeRequest {
   windowCount: number;
   maxOffsetMs: number;
   maxWorkers: number;
+  /** Look for a cut between the sample windows and locate it. */
+  findCuts: boolean;
+  /** Lay the dub along the whole video when the windows do not settle it. */
+  timeline: boolean;
+  /** Try the standard frame-rate conversions when nothing matches as is. */
+  findSpeed: boolean;
 }
 
 export interface CorrectionItem {
@@ -244,6 +250,17 @@ export interface AppSettings {
    *  from them (a dub whose voices were cut separately from its music).
    *  Needs the voice tools installed; on by default. */
   fixVoices: boolean;
+  /** Delay finding: look for a cut between the sample windows and probe for
+   *  where it is. Off by default: one delay is fitted across the file. */
+  cutCheck: boolean;
+  /** Delay finding: when the sample windows do not settle a pair, lay the
+   *  dub along the whole video and list every cut, gap and frame-rate
+   *  change. Off by default, since it reads both files end to end. */
+  timelineCheck: boolean;
+  /** Delay finding: when nothing matches at the files' own speed, try the
+   *  standard frame-rate conversions. On by default, since it only runs on
+   *  a pair that would otherwise fail. */
+  rateCheck: boolean;
 }
 
 /** Mastering rates a dub can be declared to have, for the override. */
@@ -269,6 +286,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dubFillUnmatched: false,
   dubRate: null,
   fixVoices: true,
+  cutCheck: false,
+  timelineCheck: false,
+  rateCheck: true,
 };
 
 // ------------------------------------------------------------------ dub sync

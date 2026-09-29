@@ -152,6 +152,14 @@ describe("settings", () => {
     expect(loaded.maxWorkers).toBeLessThanOrEqual(16);
   });
 
+  it("leaves the cut and whole-timeline checks off for settings saved before they existed", () => {
+    localStorage.setItem("audiosync.settings.v2", JSON.stringify({ windowSeconds: 90 }));
+    const loaded = loadSettings();
+    expect(loaded.cutCheck).toBe(false);
+    expect(loaded.timelineCheck).toBe(false);
+    expect(loaded.rateCheck).toBe(true);
+  });
+
   it("ignores non-numeric values", () => {
     localStorage.setItem(
       "audiosync.settings.v2",

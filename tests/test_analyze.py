@@ -301,6 +301,36 @@ def test_a_cut_resting_on_one_window_needs_corroboration():
     assert not unprobed.is_likely_cut
 
 
+def test_a_cut_is_not_looked_for_when_the_cut_check_is_off():
+    """Off, the windows are fitted with one delay and no probe is spent
+    locating a cut, so a pair with a splice costs no more than one without."""
+    import audiosync.analyze as analyze  # noqa: PLC0415
+
+    case = _case("local_cut")
+    measured = []
+    original = analyze._measure_window
+
+    def counting(*args, **kwargs):
+        measured.append(args[2])
+        return original(*args, **kwargs)
+
+    analyze._measure_window = counting
+    try:
+        checked = analyze_pair(case["primary"], case["secondary"], window_s=6.0, window_count=6, timeline=False)
+        probed = len(measured)
+        measured.clear()
+        unchecked = analyze_pair(
+            case["primary"], case["secondary"], window_s=6.0, window_count=6, timeline=False, find_cuts=False,
+        )
+    finally:
+        analyze._measure_window = original
+
+    assert checked.cut is not None and probed > 6, f"precondition: the cut check found and probed it ({probed})"
+    assert unchecked.cut is None, unchecked.cut
+    assert unchecked.to_dict()["cutPositionS"] is None
+    assert len(measured) == 6, f"{len(measured)} windows measured, want the 6 survey windows alone"
+
+
 def test_the_search_range_covers_the_offset_the_user_asked_for():
     """The secondary is decoded with a head start so a shifted match still fits,
     and that head start lands in the measurement. Bounding the search at the

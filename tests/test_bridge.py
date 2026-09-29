@@ -472,3 +472,15 @@ def test_a_pair_with_a_missing_file_comes_back_with_its_own_error():
     assert results[case["secondary"]]["error"] is None
     assert "dub.m4a was not found" in results["/gone/dub.m4a"]["error"], results["/gone/dub.m4a"]["error"]
     assert any(e["type"] == "done" for e in events)
+
+
+def test_the_delay_checks_the_app_turns_off_are_skipped():
+    case = _case("local_cut")
+    events, _ = run_bridge([{
+        "command": "analyze", "mode": "series", "windowSeconds": 6.0, "windowCount": 6,
+        "findCuts": False, "timeline": False, "findSpeed": False,
+        "pairs": [{"primaryPath": case["primary"], "secondaryPath": case["secondary"], "key": "cut"}],
+    }])
+    result = next(e for e in events if e["type"] == "result")
+    assert result["method"] == "survey" and result["edits"] == [], result
+    assert result["cutPositionS"] is None, result["cutPositionS"]

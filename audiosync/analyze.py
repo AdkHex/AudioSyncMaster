@@ -325,6 +325,8 @@ def analyze_pair(
     cut_probes: int = 6,
     prefer_fast: bool = False,
     timeline: bool = True,
+    find_cuts: bool = True,
+    find_speed: bool = True,
 ) -> PairResult:
     """Measure the offset between two media files.
 
@@ -346,6 +348,11 @@ def analyze_pair(
             changed, or the match is weak -- lay the dub along the whole video
             and measure from that instead (see ``_measure_timeline``). A clean
             survey is returned exactly as it was measured.
+        find_cuts: look for a step between the survey windows and probe for
+            where it is. False fits one delay across every window and spends
+            no probes, whatever ``cut_probes`` says.
+        find_speed: when too few windows find the dub at its own speed, try
+            the standard frame-rate conversions before giving up.
     """
     result = PairResult(
         primary_path,
@@ -462,7 +469,7 @@ def analyze_pair(
             # cannot, since a dub that starts late or an episode with different
             # credits moves the ratio further than the conversion does. Ask the
             # audio instead.
-            if sum(1 for w in windows if w.usable) < MIN_USABLE_WINDOWS:
+            if find_speed and sum(1 for w in windows if w.usable) < MIN_USABLE_WINDOWS:
                 alternative = _search_speed(
                     primary_path, secondary_path, effective_window, max_offset_ms,
                     token, primary_track, secondary_track,
@@ -482,7 +489,7 @@ def analyze_pair(
         # withdraws it, and the second pass re-derives every number from the
         # answer. Re-running is cheaper than unpicking a provisional result,
         # and it keeps one code path deciding what a segmented file reports.
-        step = _reconcile(result)
+        step = _reconcile(result, allow_step=find_cuts)
         if step is not None:
             confirmed = _localize_cut(
                 step,
@@ -534,7 +541,7 @@ def analyze_pair(
             if not measured:
                 _guard_weak_survey(result)
                 if result.error:
-                    result.error = _explain_no_match(result)
+                    result.error = _explain_no_match(result, timeline, find_speed)
         if progress:
             progress(100)
         return result
@@ -731,14 +738,17 @@ def _unusable(info, path: str, track: int, role: str) -> Optional[str]:
     return None
 
 
-def _explain_no_match(result: PairResult) -> str:
+def _explain_no_match(
+    result: PairResult, searched_timeline: bool = True, searched_speed: bool = True
+) -> str:
     """The reason no delay could be found, in terms of the files.
 
-    By the time this is asked both the survey and the whole-timeline search
-    have come up empty, so the survey's per-window reason ("no distinct
-    correlation peak") is only half the story and names nothing a user can
-    check. A file problem the timeline ran into outranks it; silence is said
-    of the track that is silent; otherwise the two are different audio.
+    By the time this is asked the survey, and the whole-timeline search when
+    it was switched on, have come up empty, so the survey's per-window reason
+    ("no distinct correlation peak") is only half the story and names nothing
+    a user can check. A file problem the timeline ran into outranks it;
+    silence is said of the track that is silent; otherwise the two are
+    different audio, or audio only a check that was switched off could place.
     """
     reasons = [w.estimate.reason for w in result.windows if w.estimate.reason]
     planned = getattr(result, "timeline_error", None)
@@ -755,6 +765,14 @@ def _explain_no_match(result: PairResult) -> str:
             "to compare the dub with. Choose another reference track."
         )
     if reasons and all(reason in (NO_PEAK, SILENT_PRIMARY, SILENT_SECONDARY) for reason in reasons):
+        if not searched_timeline:
+            skipped = ([] if searched_speed else ["frame-rate"]) + ["whole-timeline"]
+            return (
+                "The dub does not match the video at any of the sample windows. They are probably different audio "
+                "-- another episode or cut, a different film, or a track that is not this video's dub. Check the "
+                f"pairing and the chosen tracks, or turn on the {' and '.join(skipped)} "
+                f"check{'s' if len(skipped) > 1 else ''} in Settings to search further."
+            )
         return (
             "The dub does not match the video anywhere: neither the sample windows nor a search of the whole "
             "timeline found it. They are probably different audio -- another episode or cut, a different film, "

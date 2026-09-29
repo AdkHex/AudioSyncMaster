@@ -227,6 +227,55 @@ export function SettingsDialog({
         />
       </Group>
 
+      {(mode === "movie" || mode === "series" || mode === "compare") && (
+        <Group title="Delay checks">
+          <Field
+            label="Cut check"
+            htmlFor={`${ids}-cut-check`}
+            hint="Looks for a cut between the sample windows and pins down where it is with a few extra short windows. Off, one delay is fitted across the whole file."
+            control={
+              <input
+                id={`${ids}-cut-check`}
+                type="checkbox"
+                checked={settings.cutCheck}
+                onChange={(event) => update({ cutCheck: event.target.checked })}
+                className="h-[15px] w-[15px] accent-primary"
+              />
+            }
+          />
+
+          <Field
+            label="Whole-timeline check"
+            htmlFor={`${ids}-timeline-check`}
+            hint="When the sample windows do not agree on one clean delay, lays the dub along the whole video and lists every cut, gap and frame-rate change. Reads both files end to end, so it can add minutes per pair."
+            control={
+              <input
+                id={`${ids}-timeline-check`}
+                type="checkbox"
+                checked={settings.timelineCheck}
+                onChange={(event) => update({ timelineCheck: event.target.checked })}
+                className="h-[15px] w-[15px] accent-primary"
+              />
+            }
+          />
+
+          <Field
+            label="Frame-rate check"
+            htmlFor={`${ids}-rate-check`}
+            hint="When the sample windows find nothing at the files' own speed, tries the standard frame-rate conversions (25 to 23.976 and others) before giving up. Runs only on a pair that would otherwise fail, and costs a few extra windows there."
+            control={
+              <input
+                id={`${ids}-rate-check`}
+                type="checkbox"
+                checked={settings.rateCheck}
+                onChange={(event) => update({ rateCheck: event.target.checked })}
+                className="h-[15px] w-[15px] accent-primary"
+              />
+            }
+          />
+        </Group>
+      )}
+
       {mode === "series" && (
         <Group title="Matching · Series">
           <Field
