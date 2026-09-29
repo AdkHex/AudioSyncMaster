@@ -17,6 +17,7 @@ Two behaviours differ deliberately from the original code:
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -26,7 +27,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -383,6 +384,55 @@ def audio_lead_s(info: MediaInfo, track: int = 0) -> float:
     return lead if math.isfinite(lead) and lead > 0.0 else 0.0
 
 
+# The most encoder priming a container marks to be skipped: AAC's 1024 samples
+# are 128 ms at 8 kHz, HE-AAC's 2048 at 16 kHz the same; AC-3 and E-AC-3 are
+# 256 samples, Opus 312. A file starting further before zero than this is not
+# priming, and is left as it is.
+MAX_PRIMING_S = 0.25
+
+
+@functools.lru_cache(maxsize=256)
+def _origins(path: str, track: int, size: int, mtime_ns: int, reader: str) -> Tuple[float, float]:
+    # ``reader`` is only a key: what a file reports depends on which build reads it.
+    info = probe(path)
+    stream = info.audio_tracks[min(max(0, track), len(info.audio_tracks) - 1)] if info.audio_tracks else None
+    track_start = stream.start_time if stream and stream.start_time is not None else 0.0
+    return (info.start_time if info.start_time is not None else 0.0), track_start
+
+
+def kept_priming(path: str, track: int = 0) -> Tuple[float, float]:
+    """Encoder priming this FFmpeg build decodes as sound, for a seek and for a
+    decode from the top, in seconds.
+
+    A container marks the priming an encoder put in front of the audio (1024
+    samples of AAC, 256 of AC-3 or E-AC-3) to be skipped. FFmpeg 7 and later
+    skip it. FFmpeg 6.1 -- what Ubuntu 24.04 packages -- decodes it as sound
+    and reports the stream as starting that far before zero, and everything
+    then comes out that much late: 64 ms on a 16 kHz AAC track in Matroska,
+    21 ms at 48 kHz, 5.3 ms on E-AC-3. Measured with the same file both ways,
+    it was the reader and never the writer.
+
+    Two numbers, because the two ways of decoding are off by different
+    amounts: a seek is taken from the file's earliest timestamp, a decode
+    from the top starts at this track's first sample.
+
+    Returns:
+        (seek, top): how much later to seek, and how much to drop from the
+        front of a decode from the top. Zero for a build that skips priming,
+        a container that trims it itself, or a file starting at zero.
+    """
+    try:
+        stat = os.stat(path)
+        file_start, track_start = _origins(path, int(track), stat.st_size, stat.st_mtime_ns, ffprobe_path())
+    except (OSError, MediaError, IndexError):
+        return 0.0, 0.0
+
+    def priming(start: float) -> float:
+        return -start if math.isfinite(start) and -MAX_PRIMING_S <= start < 0.0 else 0.0
+
+    return priming(file_start), priming(track_start)
+
+
 def _parse_float(raw) -> Optional[float]:
     if raw in (None, "N/A", ""):
         return None
@@ -636,6 +686,13 @@ def load_audio(
     if token:
         token.raise_if_cancelled()
 
+    # On a build that decodes encoder priming as sound, the file's zero is
+    # that far into what it decodes (see ``kept_priming``). Every read here is
+    # a seek -- one from zero included, once there is priming to pass -- and
+    # FFmpeg takes a seek from the file's earliest timestamp, so it is the
+    # file's priming that is added, not this track's.
+    offset = offset + kept_priming(path, track)[0]
+
     command = [ffmpeg_path(), "-nostdin"]
 
     # Seeking in two stages: jump most of the way with an input seek, then let
@@ -766,6 +823,9 @@ def stream_audio(
         token.register(process)
 
     produced = 0
+    # Priming this build decodes as sound, dropped before anything is yielded
+    # (see ``kept_priming``); zero on a build that skips it.
+    drop = int(round(kept_priming(path, track)[1] * sr))
     try:
         assert process.stdout is not None
         pad = int(round(max(0.0, lead_s) * sr))
@@ -785,6 +845,12 @@ def stream_audio(
             block = np.frombuffer(pending[:usable], dtype=np.float32)
             pending = pending[usable:]
             produced += usable // frame_bytes
+            if drop:
+                skip = min(drop, len(block) // channels)
+                block = block[skip * channels:]
+                drop -= skip
+                if block.size == 0:
+                    continue
             yield block.reshape(-1, channels) if channels > 1 else block.copy()
         process.wait()
         drain.join(timeout=5)

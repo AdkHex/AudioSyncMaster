@@ -12,7 +12,8 @@ identical source content, AAC reference against the same E-AC3 stream:
     .mka / .mkv, Ubuntu packaged  +5.35 ms   priming still present
 
 So the shift cannot be predicted from the file alone, and this module does not
-try. The correction is scoped to raw streams, where it is unconditionally
+try. (A build that keeps the priming says so, by reporting the track as starting
+before zero; ``media.kept_priming`` reads that and decodes past it.) The correction is scoped to raw streams, where it is unconditionally
 right. A container is left alone: on a build that trims, correcting would
 introduce the very 5.333ms error the correction exists to remove, and on a
 build that does not, the residue is 5.333ms -- an order of magnitude below the

@@ -274,3 +274,30 @@ def test_folders_and_empty_files_are_refused_up_front():
                 assert words in str(exc), str(exc)
             else:
                 raise AssertionError(f"{path} was probed")
+
+
+def test_encoder_priming_is_not_decoded_as_sound_on_any_build():
+    """AAC in Matroska carries 1024 samples of encoder priming marked to be
+    skipped. FFmpeg 6.1, Ubuntu 24.04's, decodes them as sound and reports the
+    track starting 64 ms before zero at 16 kHz, so every read of the file came
+    out that much late. A click placed at a known time must decode there both
+    when sought to and when read from the top, whichever build reads it."""
+    from audiosync.media import stream_audio
+
+    with Workspace() as ws:
+        click_at = 3.0
+        signal = np.zeros(SR * 8, dtype=np.float32)
+        signal[int(click_at * SR)] = 0.9
+        source = ws.path("click.wav")
+        sf.write(source, signal, SR)
+        encoded = ws.path("click.mka")
+        subprocess.run([ffmpeg_path(), "-v", "error", "-y", "-i", source, "-c:a", "aac", "-b:a", "320k", encoded], check=True)
+
+        def lands(samples: np.ndarray, start_s: float) -> float:
+            return (start_s + int(np.argmax(np.abs(samples))) / SR - click_at) * 1000.0
+
+        from_top = np.concatenate(list(stream_audio(encoded, SR)))
+        assert abs(lands(from_top, 0.0)) < 1.0, f"read from the top, the click is {lands(from_top, 0.0):+.2f} ms off"
+        for start in (0.0, 1.5):
+            window = load_audio(encoded, SR, duration=4.0, offset=start)
+            assert abs(lands(window, start)) < 1.0, f"sought to {start}s, the click is {lands(window, start):+.2f} ms off"

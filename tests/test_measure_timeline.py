@@ -129,23 +129,10 @@ def test_a_pal_correction_lands_on_the_picture():
         assert plan.audio_sample_rate == SR
         subprocess.run(build_command(plan), check=True, capture_output=True)
         after = analyze_pair(video, plan.output_path)
-        # The correction is written as AAC, whose encoder puts 1024 samples of
-        # priming at the front. Newer FFmpeg builds record it and it is skipped
-        # on playback; Ubuntu 24.04's 6.1 does not, and there every re-encoded
-        # correction plays that much late (see codecdelay's note on priming).
-        # That is the build, not the correction, so it is measured the same way
-        # -- the video's own audio through the same encoder -- and taken off.
-        reference = ws.path("priming.mkv")
-        subprocess.run([
-            ffmpeg_path(), "-v", "error", "-y", "-i", video, "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "320k", reference,
-        ], check=True)
-        priming_ms = analyze_pair(video, reference).delay_at_start_ms
-        residual = after.delay_at_start_ms - priming_ms
-        assert abs(residual) < 3.0, (
-            f"corrected dub is {after.delay_at_start_ms:+.1f} ms off, {residual:+.1f} ms beyond this "
-            f"FFmpeg's {priming_ms:+.1f} ms of AAC priming"
-        )
+        # Written as AAC in Matroska, with the encoder's priming marked to be
+        # skipped; FFmpeg 6.1 used to read it as sound and put this 64 ms late
+        # (see media.kept_priming). It lands on the picture on every build.
+        assert abs(after.delay_at_start_ms) < 3.0, f"corrected dub is {after.delay_at_start_ms:+.1f} ms off"
         assert not after.is_rate_mismatch and not after.edits, after.to_dict()
 
 
