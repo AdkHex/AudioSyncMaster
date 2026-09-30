@@ -1270,6 +1270,89 @@ fn context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// macOS keeps an app's menus in the system menu bar, so the window draws
+/// none there. These native menus carry the same commands as the in-window
+/// menu bar on Windows and Linux; each one is handed to the page as an
+/// `app-menu` event with the item's id.
+#[cfg(target_os = "macos")]
+fn app_menu<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let item = |id: &str, text: &str, accelerator: Option<&str>| {
+        let builder = MenuItemBuilder::with_id(id, text);
+        match accelerator {
+            Some(keys) => builder.accelerator(keys).build(app),
+            None => builder.build(app),
+        }
+    };
+
+    let about = SubmenuBuilder::new(app, "AudioSyncMaster")
+        .about(Some(AboutMetadata::default()))
+        .separator()
+        .item(&item("prefs", "Preferences…", Some("CmdOrCtrl+,"))?)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let file = SubmenuBuilder::new(app, "File")
+        .item(&item("add-videos", "Add Videos…", Some("CmdOrCtrl+O"))?)
+        .item(&item("add-audio", "Add a Dub…", Some("CmdOrCtrl+Shift+O"))?)
+        .item(&item("add-folder", "Add a Folder…", None)?)
+        .separator()
+        .item(&item("export", "Export Results…", Some("CmdOrCtrl+E"))?)
+        .item(&item("export-json", "Export as JSON…", None)?)
+        .separator()
+        .close_window()
+        .build()?;
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .separator()
+        .item(&item("remove", "Remove", None)?)
+        .item(&item("clear", "Clear the List", None)?)
+        .build()?;
+    let view = SubmenuBuilder::new(app, "View")
+        .item(&item("page-movie", "Movies", Some("CmdOrCtrl+1"))?)
+        .item(&item("page-series", "Series", Some("CmdOrCtrl+2"))?)
+        .item(&item("page-compare", "Find Match", Some("CmdOrCtrl+3"))?)
+        .item(&item("page-dubsync", "Dub Sync", Some("CmdOrCtrl+4"))?)
+        .item(&item("page-subsync", "Subsync", Some("CmdOrCtrl+5"))?)
+        .separator()
+        .item(&item("output", "Output", Some("CmdOrCtrl+`"))?)
+        .item(&item("history", "History", None)?)
+        .separator()
+        .fullscreen()
+        .build()?;
+    let tools = SubmenuBuilder::new(app, "Tools")
+        .item(&item("engines", "Engines and API Keys…", None)?)
+        .item(&item("voice-tools", "Voice Tools…", None)?)
+        .build()?;
+    let window = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .build()?;
+    let help = SubmenuBuilder::new(app, "Help")
+        .item(&item("updates", "Check for Updates…", None)?)
+        .item(&item("release-notes", "Release Notes", None)?)
+        .build()?;
+
+    MenuBuilder::new(app)
+        .items(&[&about, &file, &edit, &view, &tools, &window, &help])
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -1290,6 +1373,18 @@ pub fn run() {
     }
 
     builder
+        .setup(|_app| {
+            #[cfg(target_os = "macos")]
+            {
+                let menu = app_menu(_app.handle())?;
+                _app.set_menu(menu)?;
+            }
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            // Predefined items (copy, quit…) act on their own; ours go to the page.
+            let _ = app.emit("app-menu", event.id().as_ref());
+        })
         .manage(BridgeHandle::default())
         .manage(WaveformBridge::default())
         .manage(ShotBridge::default())

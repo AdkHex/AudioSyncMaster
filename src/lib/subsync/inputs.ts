@@ -413,16 +413,18 @@ export function cleanOutput(output: OutputOptions): OutputOptions {
   return { ...output, dir, suffix: output.suffix ?? "" };
 }
 
-/** One job per runnable item, in queue order. */
+/** One job per runnable item, in queue order, with each job's label and
+ *  the key of the item it came from. */
 export function buildJobs(
   task: SubTask,
   items: InputItem[],
   options: TaskOptions[SubTask],
   output: OutputOptions,
   newId: (index: number) => string,
-): { jobs: SubJob[]; labels: string[] } {
+): { jobs: SubJob[]; labels: string[]; keys: string[] } {
   const jobs: SubJob[] = [];
   const labels: string[] = [];
+  const keys: string[] = [];
   const out = cleanOutput(output);
   for (const item of items) {
     if (item.problem) continue;
@@ -446,8 +448,9 @@ export function buildJobs(
     }
     jobs.push({ id: newId(jobs.length), task, input, options, output: { ...out } });
     labels.push(itemLabel(item));
+    keys.push(item.key);
   }
-  return { jobs, labels };
+  return { jobs, labels, keys };
 }
 
 /** The frame rate of the first video among the items, for fps defaults. */

@@ -509,12 +509,16 @@ export async function subscribeToVoiceToolsProgress(
  *  path in Tauri v2, so drops must come from the window event instead. */
 export async function subscribeToFileDrop(
   handler: (paths: string[]) => void,
-  onHover?: (hovering: boolean) => void,
+  /** `paths` comes with the drag entering the window, so the drop target can
+   *  say what it is about to receive. */
+  onHover?: (hovering: boolean, paths?: string[]) => void,
 ): Promise<UnlistenFn> {
   if (!isDesktop()) return () => undefined;
 
   const unlisten = await getCurrentWindow().onDragDropEvent((event) => {
-    if (event.payload.type === "over") {
+    if (event.payload.type === "enter") {
+      onHover?.(true, event.payload.paths);
+    } else if (event.payload.type === "over") {
       onHover?.(true);
     } else if (event.payload.type === "drop") {
       onHover?.(false);

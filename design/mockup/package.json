@@ -1,0 +1,8 @@
+{
+  "name": "audiosyncmaster-mockup",
+  "private": true,
+  "description": "Design mockup only. Uses the app's React from the repo root; this adds Microsoft's Fluent icons.",
+  "dependencies": {
+    "@fluentui/react-icons": "^2.0.343"
+  }
+}

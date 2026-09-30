@@ -92,6 +92,26 @@ export function createHistoryEntry(
   };
 }
 
+/** A run that is recorded but not reloadable: a dub sync queue or a
+ *  Subsync batch. It keeps what the row needs and no results. */
+export function createSummaryEntry(
+  mode: SyncMode,
+  name: string,
+  outcome: { tone: "ok" | "warn" | "bad"; text: string },
+  fileCount: number,
+): HistoryEntry {
+  return {
+    id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    date: new Date().toISOString(),
+    mode,
+    results: [],
+    summary: null,
+    fileCount,
+    name,
+    outcome,
+  };
+}
+
 /** Parse a stored ISO date defensively -- entries written by older builds may
  *  hold any shape, and an Invalid Date renders as "Invalid Date" in the UI. */
 export function parseHistoryDate(value: string): Date | null {

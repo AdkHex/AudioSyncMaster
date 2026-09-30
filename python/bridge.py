@@ -41,6 +41,7 @@ try:
         MAX_COMPARE_INPUTS,
         MatchPair,
         list_media,
+        match_auto,
         match_folders,
         match_lists,
         match_movies,
@@ -363,11 +364,16 @@ def handle_preview_pairs(request: dict) -> None:
             videos = list_media(request["videoFolder"], "video")
         if not dubs and request.get("audioFolder"):
             dubs = list_media(request["audioFolder"])
-        report = (
-            match_movies(videos, dubs)
-            if request.get("dubKind") == "movies"
-            else match_lists(videos, dubs)
-        )
+        # "auto" tries the episode matcher and keeps it only if it paired
+        # every video by episode; otherwise the movie matcher decides. A
+        # missing dubKind stays "series", as before.
+        kind = request.get("dubKind")
+        if kind == "movies":
+            report = match_movies(videos, dubs)
+        elif kind == "auto":
+            report = match_auto(videos, dubs)
+        else:
+            report = match_lists(videos, dubs)
         emit({"type": "pairs", **report.to_dict()})
         return
 

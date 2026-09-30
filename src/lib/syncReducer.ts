@@ -35,6 +35,9 @@ export interface SyncState {
   progress: { processed: number; total: number };
   currentFile: string | null;
   fileProgress: number;
+  /** Every file being measured right now, by name, with its percent. The
+   *  engine measures several at a time; currentFile is the latest started. */
+  inFlight: Record<string, number>;
   logs: string[];
   startedAt: number | null;
   error: string | null;
@@ -55,6 +58,7 @@ export const initialSyncState: SyncState = {
   progress: { processed: 0, total: 0 },
   currentFile: null,
   fileProgress: 0,
+  inFlight: {},
   logs: [],
   startedAt: null,
   error: null,
@@ -188,6 +192,7 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
         progress: { processed: 0, total: action.total },
         currentFile: null,
         fileProgress: 0,
+        inFlight: {},
         startedAt: Date.now(),
         logs: [],
       };
@@ -204,14 +209,18 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
         ...state,
         currentFile: action.file,
         fileProgress: 0,
+        inFlight: { ...state.inFlight, [action.file]: 0 },
         logs: appendLogs(state.logs, `Analysing ${action.file}`),
       };
 
-    case "fileProgress":
-      // Ignore progress for a file that is no longer the active one, so a
-      // straggling event cannot rewind the bar.
-      if (state.currentFile && state.currentFile !== action.file) return state;
-      return { ...state, fileProgress: action.percent };
+    case "fileProgress": {
+      // A straggling event after the file's result must not bring it back.
+      const inFlight = action.file in state.inFlight ? { ...state.inFlight, [action.file]: action.percent } : state.inFlight;
+      // The single bar follows the active file only, so another file's
+      // progress cannot rewind it.
+      if (state.currentFile && state.currentFile !== action.file) return inFlight === state.inFlight ? state : { ...state, inFlight };
+      return { ...state, fileProgress: action.percent, inFlight };
+    }
 
     case "result": {
       // Merge by identity: re-running or receiving a duplicate updates in place
@@ -221,7 +230,12 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
       const results = state.results.slice();
       if (index >= 0) results[index] = action.result;
       else results.push(action.result);
-      return { ...state, results };
+      let inFlight = state.inFlight;
+      if (action.result.videoFile in inFlight) {
+        inFlight = { ...inFlight };
+        delete inFlight[action.result.videoFile];
+      }
+      return { ...state, results, inFlight };
     }
 
     case "runFinished": {
@@ -235,6 +249,7 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
         summary: action.summary,
         currentFile: null,
         fileProgress: 100,
+        inFlight: {},
         startedAt: null,
       };
     }
@@ -246,6 +261,7 @@ export function syncReducer(state: SyncState, action: SyncAction): SyncState {
         error: action.message,
         currentFile: null,
         fileProgress: 0,
+        inFlight: {},
         startedAt: null,
         logs: appendLogs(state.logs, `Error: ${action.message}`),
       };

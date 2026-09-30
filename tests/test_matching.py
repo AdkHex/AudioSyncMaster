@@ -11,6 +11,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from audiosync.matching import (  # noqa: E402
+    match_auto,
     match_folders,
     match_lists,
     match_movies,
@@ -235,6 +236,130 @@ def test_match_movies_orders_entirely_unrelated_lists_and_reports_leftovers():
         assert len(report.unmatched_primary) == 1
         assert any(path.endswith("Charlie.mkv") for path in report.unmatched_primary)
         assert report.warning is None
+
+
+def _paths(folder, names):
+    return [os.path.join(folder, n) for n in names]
+
+
+def test_match_auto_pairs_a_season_by_episode():
+    """A season of episodes with their dubs takes the episode matcher."""
+    with Folders(
+        [f"Show.S01E0{n}.1080p.WEB-DL.mkv" for n in range(1, 6)],
+        [f"Show.S01E0{n} Hindi.eac3" for n in (4, 2, 5, 1, 3)],
+    ) as f:
+        videos = _paths(f.primary, sorted(os.listdir(f.primary)))
+        dubs = _paths(f.secondary, sorted(os.listdir(f.secondary)))
+        report = match_auto(videos, dubs)
+        assert report.method.startswith("episode"), report.method
+        assert len(report.pairs) == 5 and not report.unmatched_primary, report
+        for pair in report.pairs:
+            assert pair.primary_name[:10] == pair.secondary_name[:10], (
+                f"mismatched: {pair.primary_name} <-> {pair.secondary_name}"
+            )
+        assert report.to_dict() == {
+            **match_lists(videos, dubs).to_dict()
+        }, "auto on a clean season must equal the series result"
+
+
+def test_match_auto_pairs_movies_by_filename_despite_resolution_tokens():
+    """"1920x1080" reads as 20x108 and "1080" as a number to an episode
+    pattern; the movies must still pair by name, never as episodes."""
+    with Folders(
+        ["Movie.Title.2019.1080p.BluRay.x264.mkv", "Other.Film.1920x1080.mkv"],
+        ["Other Film hin.eac3", "Movie Title hindi.ac3"],
+    ) as f:
+        videos = _paths(f.primary, [
+            "Movie.Title.2019.1080p.BluRay.x264.mkv", "Other.Film.1920x1080.mkv",
+        ])
+        dubs = _paths(f.secondary, ["Movie Title hindi.ac3", "Other Film hin.eac3"])
+        report = match_auto(videos, dubs)
+        assert not report.method.startswith("episode"), report.method
+        assert report.method == "filename similarity", report.method
+        by_video = {p.primary_name: p for p in report.pairs}
+        assert len(report.pairs) == 2 and not report.unmatched_primary, report
+        assert by_video["Movie.Title.2019.1080p.BluRay.x264.mkv"].secondary_name == (
+            "Movie Title hindi.ac3"
+        )
+        assert by_video["Other.Film.1920x1080.mkv"].secondary_name == "Other Film hin.eac3"
+        assert all(p.method == "filename similarity" for p in report.pairs)
+
+
+def test_match_auto_rejects_episode_keys_that_appear_on_both_sides_by_accident():
+    """Resolution tokens on both a movie and its dub give the episode
+    matcher a shared key ("1920x1080" -> s19e...), but it pairs only
+    part of the list, so the movies fall back to filename pairing."""
+    with Folders(
+        ["Alpha.Quest.1920x1080.mkv", "Beta.Run.mkv"],
+        ["Alpha Quest 1920x1080 hin.eac3", "Beta Run hin.eac3"],
+    ) as f:
+        videos = _paths(f.primary, ["Alpha.Quest.1920x1080.mkv", "Beta.Run.mkv"])
+        dubs = _paths(f.secondary, ["Alpha Quest 1920x1080 hin.eac3", "Beta Run hin.eac3"])
+        assert match_lists(videos, dubs).unmatched_primary, "premise: episode path leaves one out"
+        report = match_auto(videos, dubs)
+        assert report.method == "filename similarity", report.method
+        assert len(report.pairs) == 2 and not report.unmatched_primary
+        by_video = {p.primary_name: p.secondary_name for p in report.pairs}
+        assert by_video == {
+            "Alpha.Quest.1920x1080.mkv": "Alpha Quest 1920x1080 hin.eac3",
+            "Beta.Run.mkv": "Beta Run hin.eac3",
+        }, by_video
+
+
+def test_match_auto_falls_back_to_movies_when_episodes_do_not_cover_every_video():
+    """Two episodes plus a film: the episode matcher pairs two of three,
+    so the whole selection goes to the filename matcher instead."""
+    with Folders(
+        ["Show.S01E01.mkv", "Show.S01E02.mkv", "Some.Film.mkv"],
+        ["Show.S01E01 Hindi.ac3", "Show.S01E02 Hindi.ac3", "Some Film Hindi.ac3"],
+    ) as f:
+        videos = _paths(f.primary, ["Show.S01E01.mkv", "Show.S01E02.mkv", "Some.Film.mkv"])
+        dubs = _paths(f.secondary, [
+            "Show.S01E01 Hindi.ac3", "Show.S01E02 Hindi.ac3", "Some Film Hindi.ac3",
+        ])
+        by_episode = match_lists(videos, dubs)
+        assert by_episode.method.startswith("episode") and by_episode.unmatched_primary, (
+            "premise: episode matcher pairs some, not all"
+        )
+        report = match_auto(videos, dubs)
+        assert report.method == match_movies(videos, dubs).method
+        assert not report.method.startswith("episode"), report.method
+        assert len(report.pairs) == 3 and not report.unmatched_primary, report
+        by_video = {p.primary_name: p.secondary_name for p in report.pairs}
+        assert by_video["Some.Film.mkv"] == "Some Film Hindi.ac3", by_video
+
+
+def test_match_auto_keeps_episode_pairing_for_a_season_with_a_missing_dub():
+    """16 episodes, 15 episode dubs and a Special: E08 has no dub and the
+    Special belongs to no episode. Both stay unpaired; the movie matcher
+    would have paired them with each other by list order."""
+    episodes = [f"Goblin.S01E{n:02d}.1080p.mkv" for n in range(1, 17)]
+    dubs = [f"Goblin.S01E{n:02d}.hin.eac3" for n in range(1, 17) if n != 8]
+    special = "Goblin.S01.Special.hin.eac3"
+    with Folders(episodes, [*dubs, special]) as f:
+        videos = _paths(f.primary, episodes)
+        audio = _paths(f.secondary, [*dubs, special])
+        report = match_auto(videos, audio)
+        assert report.method.startswith("episode"), report.method
+        assert len(report.pairs) == 15, len(report.pairs)
+        assert [os.path.basename(p) for p in report.unmatched_primary] == [
+            "Goblin.S01E08.1080p.mkv"
+        ], report.unmatched_primary
+        assert [os.path.basename(p) for p in report.unmatched_secondary] == [special], (
+            report.unmatched_secondary
+        )
+        for pair in report.pairs:
+            assert pair.primary_name[:14] == pair.secondary_name[:14], pair
+        assert report.to_dict() == match_lists(videos, audio).to_dict()
+        # The premise: the movie matcher would have got this one wrong.
+        wrong = {p.primary_name: p.secondary_name for p in match_movies(videos, audio).pairs}
+        assert wrong.get("Goblin.S01E08.1080p.mkv") == special, wrong
+
+
+def test_match_auto_with_nothing_to_pair_reports_like_the_other_matchers():
+    assert match_auto([], []).pairs == []
+    report = match_auto(["/v/a.mkv"], [])
+    assert report.pairs == [] and report.unmatched_primary == ["/v/a.mkv"]
 
 
 def test_duplicate_keys_produce_warning():

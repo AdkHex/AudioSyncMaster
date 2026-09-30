@@ -285,6 +285,44 @@ def match_movies(
     )
 
 
+def match_auto(
+    primaries: Sequence[str],
+    secondaries: Sequence[str],
+) -> MatchReport:
+    """Pair a mixed or unlabelled selection: episodes if they are, else movies.
+
+    The episode matcher runs first. Its answer stands when it paired by an
+    episode key (an "episode (...)" method) and either
+
+    * left no video without a dub, or
+    * paired at least 3 videos and at least 75% of them -- a season with a
+      missing dub or a stray extra file (16 episodes, 15 dubs and a
+      "Special"). The unpaired episode and the unused dub stay reported as
+      such; the movie matcher would pair them with each other by list order.
+
+    Anything else -- a filename-similarity result, no pairs, an empty list,
+    or episode keys on only a few of the videos -- means the selection is
+    not a season, and the movie matcher pairs it by filename instead.
+
+    The decision is the matcher's result, not a regex on the names:
+    "1920x1080" reads as episode 108 of season 20 and ".1080." as an episode
+    number, so a name test alone would send movies down the episode path.
+    A false key from resolution tokens does not produce three or more
+    consistent episode pairs covering most of a movie batch.
+    """
+    primaries = list(primaries)
+    secondaries = list(secondaries)
+    by_episode = match_lists(primaries, secondaries)
+    if by_episode.method.startswith("episode") and by_episode.pairs:
+        paired = len(by_episode.pairs)
+        if (
+            not by_episode.unmatched_primary
+            or (paired >= 3 and paired >= 0.75 * len(primaries))
+        ):
+            return by_episode
+    return match_movies(primaries, secondaries)
+
+
 def _match_by_pattern(
     primaries: Sequence[str], secondaries: Sequence[str], pattern: str, method: str
 ) -> MatchReport:

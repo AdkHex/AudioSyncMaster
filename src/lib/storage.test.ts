@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createHistoryEntry,
+  createSummaryEntry,
   formatHistoryDate,
   loadHistory,
   loadSettings,
@@ -73,6 +74,26 @@ beforeEach(() => {
 });
 
 describe("history", () => {
+  it("round-trips a summary entry for a run that cannot be reloaded", () => {
+    const entry = createSummaryEntry("dubsync", "Goblin · 5 pairs", { tone: "warn", text: "4 synced, 1 failed" }, 5);
+    saveHistory([entry]);
+    const [loaded] = loadHistory();
+    expect(loaded.mode).toBe("dubsync");
+    expect(loaded.name).toBe("Goblin · 5 pairs");
+    expect(loaded.outcome).toEqual({ tone: "warn", text: "4 synced, 1 failed" });
+    expect(loaded.results).toEqual([]);
+    expect(loaded.fileCount).toBe(5);
+  });
+
+  it("reads an analysis entry written before summaries existed", () => {
+    const legacy = { id: "run-1", date: "2026-09-20T10:00:00.000Z", mode: "series", results: [result("e01.mkv")], summary: null, fileCount: 1 };
+    localStorage.setItem("audiosync.history.v2", JSON.stringify([legacy]));
+    const [loaded] = loadHistory();
+    expect(loaded.name).toBeUndefined();
+    expect(loaded.outcome).toBeUndefined();
+    expect(loaded.results).toHaveLength(1);
+  });
+
   it("round-trips an entry", () => {
     const entry = createHistoryEntry("movie", [result("a.mkv")], null);
     saveHistory([entry]);

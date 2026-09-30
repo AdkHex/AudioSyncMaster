@@ -385,6 +385,46 @@ def test_preview_pairs_dub_scope_chooses_the_matcher():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_preview_pairs_dub_scope_auto_and_default():
+    """dubKind "auto" picks episode pairing for a season and filename
+    pairing for movies whose names carry resolution tokens; a missing
+    dubKind stays the series matcher."""
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="audiosync-bridge-auto-")
+    try:
+        def make(names):
+            paths = [os.path.join(root, n) for n in names]
+            for path in paths:
+                open(path, "w").close()
+            return paths
+
+        def preview(videos, dubs, **extra):
+            events, _ = run_bridge([{
+                "command": "previewPairs", "mode": "dubsync",
+                "videoFiles": videos, "audioFiles": dubs, **extra,
+            }])
+            return [e for e in events if e["type"] == "pairs"][0]
+
+        eps = make([f"Show.S01E0{n}.mkv" for n in (1, 2, 3)])
+        ep_dubs = make([f"Show.S01E0{n} Hindi.ac3" for n in (3, 1, 2)])
+        pairs = preview(eps, ep_dubs, dubKind="auto")
+        assert len(pairs["pairs"]) == 3 and pairs["method"].startswith("episode"), pairs
+
+        movies = make(["Movie.Title.2019.1080p.BluRay.x264.mkv", "Other.Film.1920x1080.mkv"])
+        movie_dubs = make(["Movie Title hindi.ac3", "Other Film hin.eac3"])
+        pairs = preview(movies, movie_dubs, dubKind="auto")
+        assert pairs["method"] == "filename similarity", pairs
+        assert len(pairs["pairs"]) == 2 and pairs["unmatchedPrimary"] == [], pairs
+
+        # No dubKind at all: the series matcher, as before "auto" existed.
+        pairs = preview(eps, ep_dubs)
+        assert pairs["method"].startswith("episode"), pairs
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_shot_cuts_reports_the_picture_cuts_of_a_span():
     """The cut editor's ruler: the shot changes of a span on the video's
     clock, to the frame, with the frame's length; a span too long is

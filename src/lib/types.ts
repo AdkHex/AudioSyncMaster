@@ -5,9 +5,11 @@
  *  sync reducer only records that it is the open mode. */
 export type SyncMode = "movie" | "series" | "compare" | "dubsync" | "subsync";
 
-/** What the Dub sync tab is pairing: a batch of movies by filename, or a
- *  season of episodes by season/episode number. */
-export type DubScope = "movies" | "series";
+/** What the Dub sync tab is pairing: a batch of movies by filename, a
+ *  season of episodes by season/episode number, or "auto" -- episodes when
+ *  the episode matcher pairs every video, movies otherwise (the engine
+ *  decides from the match, not from the names alone). */
+export type DubScope = "movies" | "series" | "auto";
 
 /** Upper bound per side in compare mode. The work is the product of both
  *  sides, so five against five is already 25 analyses. */
@@ -207,6 +209,11 @@ export interface HistoryEntry {
   results: SyncResult[];
   summary: RunSummary | null;
   fileCount: number;
+  /** Set for runs that are recorded but cannot be reloaded (Dub sync,
+   *  Subsync): what to call the row and what it says happened. Analysis runs
+   *  written by older builds have neither and read as before. */
+  name?: string;
+  outcome?: { tone: "ok" | "warn" | "bad"; text: string };
 }
 
 /** Output codecs the dub sync renderer can write. "same" follows the dub's
@@ -230,6 +237,8 @@ export interface AppSettings {
   maxWorkers: number;
   matchPattern: string;
   outputSuffix: string;
+  /** Where corrected copies are written; null writes each beside its source. */
+  outputDir: string | null;
   theme: "light" | "dark" | "system";
   /** Dub sync output. */
   dubCodec: DubCodec;
@@ -261,6 +270,9 @@ export interface AppSettings {
    *  standard frame-rate conversions. On by default, since it only runs on
    *  a pair that would otherwise fail. */
   rateCheck: boolean;
+  /** Look for a newer release on launch. Optional so settings saved by
+   *  older builds read as on. */
+  autoUpdateCheck?: boolean;
 }
 
 /** Mastering rates a dub can be declared to have, for the override. */
@@ -279,6 +291,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   maxWorkers: 3,
   matchPattern: "",
   outputSuffix: ".synced",
+  outputDir: null,
   theme: "dark",
   dubCodec: "same",
   dubMux: false,
@@ -289,6 +302,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cutCheck: false,
   timelineCheck: false,
   rateCheck: true,
+  autoUpdateCheck: true,
 };
 
 // ------------------------------------------------------------------ dub sync
@@ -526,6 +540,8 @@ export interface DubSyncBatchRequest {
   /** Whether to check each dub's voices against the lips and move any that
    *  sit away from them. Engine default is true. */
   fixVoices?: boolean;
+  /** Where the tracks go; null writes each beside its dub. */
+  outputDir?: string | null;
 }
 
 /** The engine's final word on one job of a batch. */

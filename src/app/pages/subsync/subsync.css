@@ -1,0 +1,81 @@
+/* Subsync page: the settings pane, the Files list's second lines, the Cues
+ * dock and the result view, in the metrics of design/mockup/screens/subs.tsx
+ * (F: label over control, 6 px; S: section, 12 px; the pane, 16 px). Every
+ * rule is under an ss- class so nothing here reaches another page. */
+
+/* ------------------------------------------------------------ settings pane */
+.ss-panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.ss-sec { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ss-fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ss-inline { gap: 12px; min-width: 0; }
+.ss-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.ss-pair .combo { min-width: 0; }
+.ss-hint, .ss-hintline { display: block; }
+.ss-indent { padding-left: 24px; }
+
+.ss-link { color: var(--ac-text); }
+.ss-link:hover { text-decoration: underline; }
+.ss-link:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; border-radius: 2px; }
+
+/* "More options": a native <details>, its chevron turning as it opens. */
+.ss-more > summary { list-style: none; gap: 8px; width: fit-content; cursor: default; }
+.ss-more > summary::-webkit-details-marker { display: none; }
+.ss-more > summary:hover { color: var(--text); }
+.ss-more > summary:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 2px; }
+.ss-chev { display: grid; font-size: 16px; transition: transform 150ms var(--ease); }
+.ss-more[open] > summary .ss-chev { transform: rotate(90deg); }
+.ss-more-b { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+
+.ss-seg, .ss-fld .seg { align-self: stretch; max-width: 100%; }
+.ss-seg button, .ss-fld .seg button { white-space: nowrap; }
+.ss-seg button:disabled, .ss-fld .seg button:disabled { opacity: .45; pointer-events: none; }
+
+.ss-num input { text-align: left; }
+.ss-num input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.ss-num input::-webkit-inner-spin-button, .ss-num input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+.ss-sldrow { gap: 12px; }
+.ss-sldv { min-width: 16px; }
+
+/* A switch row: the mockup's toggle over a native checkbox. */
+.ss-tgl { gap: 12px; min-height: 20px; }
+.ss-tgl.disabled { opacity: .45; }
+.ss-tgl .tgl { position: relative; flex-shrink: 0; }
+.ss-tgl .tgl-native { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: default; }
+.ss-tgl .tgl:has(.tgl-native:focus-visible) { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 12px; }
+
+.ss-swatch { width: 22px; height: 22px; border-radius: 4px; flex-shrink: 0; box-shadow: inset 0 0 0 1px var(--ctl-stroke-2); }
+.ss-color { width: 34px; height: 32px; padding: 2px; flex-shrink: 0; border-radius: 4px; border: 1px solid var(--ctl-stroke); background: var(--ctl); }
+
+.ss-points { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 6px 8px; align-items: center; }
+.ss-time { padding: 0 8px; }
+.ss-time input:invalid { color: var(--bad); }
+
+.ss-rules { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.ss-rules dt, .ss-rules dd { margin: 0; }
+
+/* Settings | Result in the pane's header. */
+.ss-tabs { padding-left: 4px; gap: 2px; }
+.ss-tabs .tab { height: 35px; }
+
+/* ------------------------------------------------------------------ result */
+.ss-sum { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
+.ss-warnings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ss-warnings li { align-items: flex-start; gap: 8px; }
+.ss-warnings svg { font-size: 16px; margin-top: 1px; flex-shrink: 0; }
+.ss-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+
+/* ------------------------------------------------------------- files list */
+.ss-line2 { padding-left: 24px; min-width: 0; overflow: hidden; }
+.ss-line2 .combo { max-width: 100%; }
+.ss-status { display: flex; min-width: 0; }
+.ss-nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* The Tracks list's language and title: text, as the mockup shows them,
+   that becomes a box on hover and while it is edited. */
+.ss-cellbox { height: 28px; padding: 0 8px; margin-left: -9px; background: transparent; border-color: transparent; }
+.tbl .tr:hover .ss-cellbox, .ss-cellbox:focus-within { background: var(--inp); border-color: var(--ctl-stroke); border-bottom-color: var(--inp-line); }
+
+/* -------------------------------------------------------------------- cues */
+.ss-none { padding: 10px 16px; }
+.ss-cjk, .ss-cjk input { font-size: 14px; font-family: var(--font), "Yu Gothic UI", "Hiragino Sans", "Meiryo", sans-serif; }
+.ss-files .links { flex-wrap: nowrap; }
