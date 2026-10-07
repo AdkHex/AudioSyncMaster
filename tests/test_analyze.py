@@ -538,3 +538,37 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+def test_a_file_measured_against_itself_is_zero_when_its_audio_starts_late():
+    """The video and the dub as the same remux, whose audio starts 2 s after
+    its picture. Windows near the start read the dub from zero and the video
+    by seeking; before reads shared one clock that came out as a 2 s delay
+    (and, in a longer film, as a 2 s "cut" after the first minute)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    import numpy as np
+
+    from audiosync.media import ffmpeg_path
+
+    root = tempfile.mkdtemp(prefix="audiosync-late-")
+    try:
+        path = os.path.join(root, "remux.mkv")
+        subprocess.run(
+            [
+                ffmpeg_path(), "-v", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=s=160x90:r=25:d=43",
+                "-itsoffset", "2", "-f", "lavfi", "-i", "anoisesrc=d=40:r=16000:a=0.3:seed=5,volume='if(lt(mod(t,3),1),1,0.1)':eval=frame",
+                "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4", "-c:a", "flac", path,
+            ],
+            check=True,
+        )
+        result = analyze_pair(path, path, window_s=10.0, window_count=4, max_offset_ms=60000.0, timeline=False)
+        assert result.error is None, result.error
+        assert result.cut is None, f"a cut was found in a file measured against itself: {result.cut}"
+        assert result.delay_ms is not None and abs(result.delay_ms) < 5.0, f"measured {result.delay_ms} ms against itself"
+        assert np.isfinite(result.confidence) and result.confidence > 0.9
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

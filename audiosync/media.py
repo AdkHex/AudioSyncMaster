@@ -400,6 +400,44 @@ def _origins(path: str, track: int, size: int, mtime_ns: int, reader: str) -> Tu
     return (info.start_time if info.start_time is not None else 0.0), track_start
 
 
+@functools.lru_cache(maxsize=256)
+def _first_packet_s(path: str, track: int, size: int, mtime_ns: int, reader: str) -> Optional[float]:
+    # The stream's start_time is not enough: Matroska reports 0 for a track
+    # whose first block sits seconds into the file. Its first packet does not.
+    output = _run(
+        [
+            ffprobe_path(), "-v", "error",
+            "-select_streams", f"a:{max(0, track)}",
+            "-show_entries", "packet=pts_time",
+            "-read_intervals", "%+#1",
+            "-of", "csv=p=0",
+            path,
+        ],
+        PROBE_TIMEOUT_S,
+        None,
+        what=f"probe {os.path.basename(path)}",
+    )
+    return _parse_float(output.decode(errors="replace").strip().splitlines()[0]) if output.strip() else None
+
+
+def track_lead_s(path: str, track: int = 0) -> float:
+    """How far into the file's clock this audio track's first sample sits:
+    ``audio_lead_s`` for a file on disk, read from the first packet. Zero
+    when it starts with the file, or the file cannot be read here (the
+    decode that follows says why)."""
+    try:
+        stat = os.stat(path)
+        key = (path, int(track), stat.st_size, stat.st_mtime_ns, ffprobe_path())
+        file_start, _ = _origins(*key)
+        first = _first_packet_s(*key)
+    except (OSError, MediaError, IndexError):
+        return 0.0
+    if first is None:
+        return 0.0
+    lead = first - file_start
+    return lead if math.isfinite(lead) and lead > 0.0 else 0.0
+
+
 def kept_priming(path: str, track: int = 0) -> Tuple[float, float]:
     """Encoder priming this FFmpeg build decodes as sound, for a seek and for a
     decode from the top, in seconds.
@@ -686,6 +724,26 @@ def load_audio(
     if token:
         token.raise_if_cancelled()
 
+    # Every read is on the file's clock, whose zero is its earliest stream. A
+    # seek lands there; a read that does not seek starts at this track's own
+    # first sample instead. Where the audio starts after the picture -- 5 s on
+    # some remuxes -- those two disagree by that much, and a pair measured
+    # with both kinds of read (the dub read from zero near the start, the
+    # video sought to) found an offset of exactly that size in its first
+    # windows and reported a cut that was never there. Before the track has
+    # started there is nothing to decode: read from its first sample, which
+    # is a seek like every other, and put the gap back as silence.
+    requested = duration
+    silence_s = 0.0
+    lead = track_lead_s(path, track)
+    if lead > 0.0 and offset < lead:
+        silence_s = lead - offset
+        offset = lead
+        if duration is not None:
+            duration -= silence_s
+            if duration <= 0.0:
+                return np.zeros(int(round(requested * sr)), dtype=np.float32)
+
     # On a build that decodes encoder priming as sound, the file's zero is
     # that far into what it decodes (see ``kept_priming``). Every read here is
     # a seek -- one from zero included, once there is priming to pass -- and
@@ -742,6 +800,8 @@ def load_audio(
     samples = np.frombuffer(stdout, dtype=np.float32)
     if samples.size == 0:
         raise MediaError(f"No audio samples in {os.path.basename(path)}")
+    if silence_s > 0.0:
+        return np.concatenate([np.zeros(int(round(silence_s * sr)), dtype=np.float32), samples])
     # Copy off the read-only buffer so downstream code may write freely.
     return np.array(samples, dtype=np.float32)
 

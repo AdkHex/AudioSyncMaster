@@ -301,3 +301,48 @@ def test_encoder_priming_is_not_decoded_as_sound_on_any_build():
         for start in (0.0, 1.5):
             window = load_audio(encoded, SR, duration=4.0, offset=start)
             assert abs(lands(window, start)) < 1.0, f"sought to {start}s, the click is {lands(window, start):+.2f} ms off"
+
+
+def _late_audio_mkv(ws: Workspace, lead_s: float, seconds: float, click_at: float) -> str:
+    """An MKV whose audio starts `lead_s` into the file, after its picture --
+    as some remuxes do -- with a click `click_at` into the audio."""
+    signal = (np.random.default_rng(9).standard_normal(int(seconds * SR)) * 0.02).astype(np.float32)
+    signal[int(click_at * SR)] = 0.9
+    source = ws.path("late.wav")
+    sf.write(source, signal, SR)
+    path = ws.path("late.mkv")
+    subprocess.run(
+        [
+            ffmpeg_path(), "-v", "error", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=s=160x90:r=25:d={seconds + lead_s + 1}",
+            "-itsoffset", str(lead_s), "-i", source,
+            "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4", "-c:a", "flac", path,
+        ],
+        check=True,
+    )
+    return path
+
+
+def test_a_read_from_zero_shares_the_clock_of_every_seek():
+    """Where the audio starts after the picture, a read from the top used to
+    start at the track's first sample while a seek landed on the file's
+    clock: the same file read both ways was out by the gap, and a pair
+    measured with both kinds of read reported a cut of exactly that size.
+    Every read must put the click at the same time on the file's clock."""
+    with Workspace() as ws:
+        lead, click = 2.0, 6.0
+        path = _late_audio_mkv(ws, lead, 20.0, click)
+        on_file_clock = lead + click
+        for start in (0.0, 1.0, 3.0):
+            window = load_audio(path, SR, duration=10.0, offset=start)
+            found = start + int(np.argmax(np.abs(window))) / SR
+            assert abs(found - on_file_clock) < 0.002, f"read from {start}s, the click is at {found:.3f}s, not {on_file_clock:.3f}s"
+            assert len(window) == 10 * SR, f"read from {start}s returned {len(window) / SR:.3f}s, not 10s"
+
+
+def test_a_window_entirely_before_the_audio_is_silence_of_the_asked_length():
+    with Workspace() as ws:
+        path = _late_audio_mkv(ws, 2.0, 10.0, 4.0)
+        window = load_audio(path, SR, duration=1.5, offset=0.2)
+        assert len(window) == int(1.5 * SR)
+        assert not np.any(window)
