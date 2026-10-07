@@ -201,6 +201,7 @@ def test_a_dub_is_not_dragged_off_by_waveform_refinement():
 
     estimate = estimate_offset(original, dub, sr, max_offset_ms=2000.0)
     assert estimate.matched, "onsets align, so this must match"
+    assert not estimate.confirmed, "two different performances share no waveform to confirm"
     error = estimate.delay_ms - true_offset_ms
     assert abs(error) < 1.0, (
         f"dub measured {estimate.delay_ms:+.2f}ms, want {true_offset_ms:+.1f} "
@@ -247,3 +248,36 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+def test_waveforms_confirm_a_dub_that_shares_its_music_and_effects():
+    """A dub keeps the original's M&E under a different performance. The
+    phase transform lines the shared M&E up through the dialogue, so the
+    window is confirmed and placed to a small fraction of a millisecond."""
+    sr = 16000
+    seconds = 30
+    rng = np.random.default_rng(21)
+    n = seconds * sr
+    bed = np.zeros(n)
+    for _ in range(seconds * 3):
+        at = int(rng.uniform(0, seconds - 1) * sr)
+        length = int(rng.uniform(0.05, 0.4) * sr)
+        bed[at:at + length] += rng.standard_normal(length) * np.exp(-np.linspace(0, 6, length)) * 0.3
+    original = (bed + _speechlike(seconds, sr, seed=8)).astype(np.float32)
+    dub = (bed + _speechlike(seconds, sr, seed=9)).astype(np.float32)
+    shift = 4000  # samples: 250 ms
+    dub = np.concatenate([np.zeros(shift, dtype=np.float32), dub])[:n]
+
+    estimate = estimate_offset(original, dub, sr, max_offset_ms=2000.0)
+    assert estimate.matched and estimate.confirmed, estimate
+    assert abs(estimate.delay_ms - 250.0) < 0.1, f"measured {estimate.delay_ms:+.4f} ms, want +250"
+
+
+def test_a_search_range_keeps_the_answer_inside_it():
+    sr = 16000
+    signal = _speechlike(20.0, sr, seed=6)
+    shifted = np.concatenate([np.zeros(4000, dtype=np.float32), signal])  # 250 ms
+    inside = estimate_offset(signal, shifted, sr, search_ms=(200.0, 300.0))
+    assert inside.matched and abs(inside.delay_ms - 250.0) < 0.5, inside
+    outside = estimate_offset(signal, shifted, sr, search_ms=(1000.0, 3000.0))
+    assert not outside.matched or 1000.0 <= outside.delay_ms <= 3000.0, outside

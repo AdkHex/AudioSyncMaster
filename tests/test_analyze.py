@@ -572,3 +572,267 @@ def test_a_file_measured_against_itself_is_zero_when_its_audio_starts_late():
         assert np.isfinite(result.confidence) and result.confidence > 0.9
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _bed_and_dialogue(seconds: float, sr: int, seed: int):
+    """A music-and-effects bed spread across the stereo field, and a loud,
+    continuous, broadband centre "dialogue" of the given seed.
+
+    The dialogue never pauses and covers the whole band, so the full mix of
+    two such tracks shares nothing a correlation can use; only the bed under
+    it, which left minus right keeps and the dialogue cancels out of, can
+    place one against the other.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    bed_rng = np.random.default_rng(1234)
+    n = int(seconds * sr)
+    left = np.zeros(n)
+    right = np.zeros(n)
+    for _ in range(int(seconds * 3)):
+        at = int(bed_rng.uniform(0, seconds - 1) * sr)
+        length = int(bed_rng.uniform(0.05, 0.4) * sr)
+        burst = bed_rng.standard_normal(length) * np.exp(-np.linspace(0, 6, length)) * 0.05
+        pan = bed_rng.uniform(0.0, 1.0)
+        left[at:at + length] += burst * np.cos(pan * np.pi / 2)
+        right[at:at + length] += burst * np.sin(pan * np.pi / 2)
+    dialogue = np.random.default_rng(seed).standard_normal(n) * 0.3
+    return np.stack([left + dialogue, right + dialogue], axis=1).astype(np.float32)
+
+
+def test_a_dub_in_another_language_is_placed_by_the_music_and_effects_it_shares():
+    """English and Hindi dialogue share nothing; the M&E under them does.
+
+    The full mix of these two tracks is dominated by two different
+    performances, so it cannot place them; the dialogue-free mix (left minus
+    right) can, to a fraction of a millisecond, and every window after the
+    first is searched only around the offset the first one found.
+    """
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    from audiosync.analyze import NARROW_SEARCH_MS  # noqa: PLC0415
+
+    sr = 16000
+    shift = 1974  # samples: 123.375 ms
+    original = _bed_and_dialogue(90.0, sr, seed=1)
+    dub = _bed_and_dialogue(90.0, sr, seed=2)
+    dub = np.concatenate([np.zeros((shift, 2), dtype=np.float32), dub])[: len(original)]
+    root = tempfile.mkdtemp(prefix="audiosync-me-")
+    try:
+        primary, secondary = os.path.join(root, "english.wav"), os.path.join(root, "hindi.wav")
+        sf.write(primary, original, sr)
+        sf.write(secondary, dub, sr)
+        result = analyze_pair(primary, secondary, window_s=15.0, window_count=4, max_offset_ms=10000.0, timeline=False)
+        assert result.error is None, result.error
+        assert abs(result.delay_ms - 123.375) < 0.5, f"measured {result.delay_ms:+.3f} ms, want +123.375"
+        assert all(w.estimate.mix == "me" for w in result.windows), [w.estimate.mix for w in result.windows]
+        assert all(w.estimate.confirmed for w in result.windows), "the shared M&E should confirm every window"
+        assert result.search_ms == NARROW_SEARCH_MS, "windows after the first should search around its offset"
+        assert result.confidence > 0.95, result.confidence
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_dual_mono_dub_is_measured_on_the_full_mix():
+    """Left minus right of a dual-mono track is silence, so the M&E has
+    nothing to offer and the full mix answers, as it always did."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    shift = 800  # samples: 50 ms
+    mono = _speechlike(60.0, sr, seed=4)
+    original = np.stack([mono, mono * 0.5], axis=1)
+    dub = np.concatenate([np.zeros(shift, dtype=np.float32), mono])[: len(mono)]
+    root = tempfile.mkdtemp(prefix="audiosync-dualmono-")
+    try:
+        primary, secondary = os.path.join(root, "video.wav"), os.path.join(root, "dub.wav")
+        sf.write(primary, original, sr)
+        sf.write(secondary, np.stack([dub, dub], axis=1), sr)
+        result = analyze_pair(primary, secondary, window_s=10.0, window_count=4, max_offset_ms=10000.0, timeline=False)
+        assert result.error is None, result.error
+        assert abs(result.delay_ms - 50.0) < 0.5, f"measured {result.delay_ms:+.3f} ms, want +50"
+        assert all(w.estimate.mix == "full" for w in result.windows if w.usable)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_mix_the_waveforms_confirm_speaks_for_a_window():
+    from audiosync.analyze import DECISIVE_PEAK_RATIO, _choose_mix  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    def est(delay, ratio, confirmed=False, waveform=0.0, mix="full"):
+        return OffsetEstimate(delay, 0.8, ratio, confirmed=confirmed, waveform_ratio=waveform, mix=mix)
+
+    unmatched = OffsetEstimate(None, 0.2, 5.0, "no distinct correlation peak; tracks appear unrelated")
+    # A sharper envelope peak in the M&E is not enough on its own: that is
+    # what a lock onto a repeated cue looks like, and the waveforms decide.
+    assert _choose_mix(est(37.0, 33.0), est(-71.0, 72.0, mix="me")).delay_ms == 37.0
+    assert _choose_mix(est(37.0, 33.0), est(37.4, 72.0, True, 900.0, "me")).mix == "me"
+    assert _choose_mix(est(37.0, 33.0, True, 1000.0), est(-71.0, 72.0, mix="me")).delay_ms == 37.0
+    # Agreeing with the full mix, the sharper M&E reading is the same answer.
+    assert _choose_mix(est(37.0, 20.0), est(37.003, 40.0, mix="me")).mix == "me"
+    # Where the full mix found nothing, the M&E alone must be decisive.
+    assert _choose_mix(unmatched, est(12.0, DECISIVE_PEAK_RATIO - 1, mix="me")).delay_ms is None
+    assert _choose_mix(unmatched, est(12.0, DECISIVE_PEAK_RATIO + 1, mix="me")).delay_ms == 12.0
+
+
+def test_windows_that_agree_are_reported_as_sure():
+    """Six windows on one offset are not a coincidence, however soft each
+    peak was; two are not enough to say so."""
+    from audiosync.analyze import AGREEMENT_CONFIDENCE_CAP, NARROW_SEARCH_MS, _agreement_confidence  # noqa: PLC0415
+
+    assert _agreement_confidence(6, 6, NARROW_SEARCH_MS) == AGREEMENT_CONFIDENCE_CAP
+    assert 0.9 < _agreement_confidence(3, 6, NARROW_SEARCH_MS) < AGREEMENT_CONFIDENCE_CAP
+    assert _agreement_confidence(3, 6, 60000.0) == AGREEMENT_CONFIDENCE_CAP
+    assert _agreement_confidence(2, 6, 60000.0) == 0.0
+
+
+def test_a_step_of_about_a_frame_is_a_slip_and_a_bigger_one_a_cut():
+    from audiosync.analyze import PairResult  # noqa: PLC0415
+    from audiosync.segments import Step  # noqa: PLC0415
+
+    def pair(fps=23.976, cut=None, edits=(), gaps=()):
+        result = PairResult("video.mkv", "dub.ac3", primary_fps=fps, edits=list(edits), gaps=list(gaps))
+        if cut is not None:
+            result.cut = Step(before_ms=10.0, after_ms=10.0 + cut, split_position_s=600.0, earliest_s=590.0, latest_s=610.0)
+        return result
+
+    def edit(before, after, kind="missing", missing_s=0.0, extra_s=0.0):
+        return {"kind": kind, "jumpMs": after - before, "offsetBeforeMs": before, "offsetAfterMs": after,
+                "missingS": missing_s, "extraS": extra_s}
+
+    assert pair(cut=41.7).is_minor_slip, "one frame at 23.976 is a slip"
+    assert not pair(cut=100.0).is_minor_slip
+    assert not pair(fps=None, cut=50.0).is_minor_slip, "without a frame rate the limit is 45 ms"
+    assert pair(fps=60.0, cut=30.0).is_minor_slip, "at 60 fps the limit is still 45 ms, not 18"
+    assert pair(edits=[edit(10, 40, missing_s=0.03), edit(40, 10, kind="extra", extra_s=0.03)]).is_minor_slip, \
+        "slips that cancel stay slips"
+    assert not pair(edits=[edit(10, 40, missing_s=0.03), edit(40, 70, missing_s=0.03)]).is_minor_slip, \
+        "slips that add up are a cut"
+    assert not pair(edits=[edit(10, 35, kind="replaced", missing_s=30.0)]).is_minor_slip, \
+        "a scene the dub replaces is a cut however small the jump"
+    assert pair(edits=[edit(10, 40, missing_s=0.03)], gaps=[{"reason": "tail"}]).is_minor_slip, \
+        "a dub that ends early still only slips"
+    assert not pair(edits=[edit(10, 40, missing_s=0.03)], gaps=[{"reason": "unmatched"}]).is_minor_slip
+    assert not pair().is_minor_slip, "no step is no slip"
+
+
+def test_each_window_is_reported_on_the_results_terms():
+    """The window list carries the codec correction the result applied, so a
+    window and the delay it fed read the same."""
+    from audiosync.analyze import PairResult, WindowResult  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    result = PairResult("video.mkv", "dub.ac3", codec_delay_ms=5.333)
+    result.windows = [
+        WindowResult(10.0, OffsetEstimate(42.0, 0.97, 80.0, confirmed=True, waveform_ratio=900.0, mix="me"), agrees=True),
+        WindowResult(50.0, OffsetEstimate(None, 0.1, 3.0, "no distinct correlation peak; tracks appear unrelated")),
+    ]
+    details = result.to_dict()["windowDetails"]
+    assert abs(details[0]["delayMs"] - 36.667) < 1e-9
+    assert details[0]["mix"] == "me" and details[0]["confirmed"] and details[0]["agrees"]
+    assert details[1]["delayMs"] is None and details[1]["reason"] and details[1]["agrees"] is None
+
+
+def test_overlapping_windows_are_one_witness_not_several():
+    """On a short file the windows overlap, and one lock read again by the
+    next window over is the same evidence twice: six of those agreeing must
+    not be reported as six independent windows agreeing."""
+    from audiosync.analyze import PairResult, WindowResult, _reconcile  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    def surveyed(step_s):
+        result = PairResult("video.mkv", "dub.ac3", window_s=45.0, search_ms=2000.0)
+        result.windows = [WindowResult(i * step_s, OffsetEstimate(120.0 + i * 0.1, 0.55, 14.0)) for i in range(6)]
+        _reconcile(result, allow_step=False)
+        return result
+
+    overlapping = surveyed(step_s=5.0)
+    assert overlapping.agreeing_windows == 6
+    assert overlapping.confidence < 0.6, f"one stretch of audio read six times scored {overlapping.confidence:.2f}"
+    apart = surveyed(step_s=100.0)
+    assert apart.confidence > 0.95, f"six separate stretches agreeing scored {apart.confidence:.2f}"
+
+
+def test_a_speed_is_settled_by_the_full_mix_or_by_the_waveforms():
+    """The decisive bar was set on the full mix's envelope peak. An M&E
+    reading -- a second chance per trial -- settles a speed only when the
+    waveforms confirm it."""
+    from fractions import Fraction  # noqa: PLC0415
+
+    import audiosync.analyze as analyze  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    def trial(estimate):
+        original = analyze._measure_window
+        analyze._measure_window = lambda *args, **kwargs: estimate
+        try:
+            return analyze._search_speed("v.mkv", "d.ac3", 45.0, 60000.0, None, 0, 0, [Fraction(25, 24)], 16000, 3600.0)
+        finally:
+            analyze._measure_window = original
+
+    rate = int(round(16000 * 25 / 24))
+    assert trial(OffsetEstimate(80.0, 0.9, 35.0, mix="full")) == rate
+    assert trial(OffsetEstimate(80.0, 0.9, 35.0, mix="me")) is None, "an unconfirmed M&E peak is a second coincidence"
+    assert trial(OffsetEstimate(80.0, 0.9, 20.0, confirmed=True, waveform_ratio=900.0, mix="me")) == rate
+
+
+def test_a_narrowed_window_stays_inside_the_range_the_user_asked_for():
+    """An anchor near the edge of the search range must not carry the next
+    window past it: the dub is really 4.5 s late, the user searched 3 s."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    from audiosync.analyze import _measure_window  # noqa: PLC0415
+
+    sr = 16000
+    signal = _speechlike(60.0, sr, seed=12)
+    late = np.concatenate([np.zeros(int(4.5 * sr), dtype=np.float32), signal])[: len(signal)]
+    root = tempfile.mkdtemp(prefix="audiosync-narrow-")
+    try:
+        primary, secondary = os.path.join(root, "video.wav"), os.path.join(root, "dub.wav")
+        sf.write(primary, signal, sr)
+        sf.write(secondary, late, sr)
+        estimate = _measure_window(primary, secondary, 20.0, 15.0, 3000.0, None, expect_ms=2900.0)
+        assert not estimate.matched or estimate.delay_ms <= 3000.0 + 15.0, estimate
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_cut_bigger_than_the_narrowed_search_is_still_found():
+    """Narrowed windows search 2 s around the last offset; a 3 s cut lies
+    outside that, so the window after it must be measured in full."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    original = _bed_and_dialogue(120.0, sr, seed=1)
+    dub = _bed_and_dialogue(120.0, sr, seed=2)
+    cut_at, cut_s = int(60.0 * sr), int(3.0 * sr)
+    dub = np.concatenate([dub[:cut_at], dub[cut_at + cut_s:]])
+    root = tempfile.mkdtemp(prefix="audiosync-bigcut-")
+    try:
+        primary, secondary = os.path.join(root, "video.wav"), os.path.join(root, "dub.wav")
+        sf.write(primary, original, sr)
+        sf.write(secondary, dub, sr)
+        result = analyze_pair(primary, secondary, window_s=15.0, window_count=6, max_offset_ms=10000.0, timeline=False)
+        assert result.error is None, result.error
+        assert result.cut is not None, [w.estimate.delay_ms for w in result.windows]
+        assert abs(result.cut.magnitude_ms + 3000.0) < 5.0, result.cut.magnitude_ms
+        assert not result.is_minor_slip
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

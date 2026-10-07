@@ -20,8 +20,9 @@ median of the surviving windows does.
 
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Callable, List, Optional
 
@@ -29,7 +30,15 @@ import numpy as np
 
 from .codecdelay import describe as describe_codec_delay
 from .codecdelay import relative_codec_delay_ms
-from .correlate import NO_PEAK, SILENT_PRIMARY, SILENT_SECONDARY, OffsetEstimate, estimate_offset
+from .correlate import (
+    ENVELOPE_HOP,
+    NO_PEAK,
+    SILENT_PRIMARY,
+    SILENT_SECONDARY,
+    OffsetEstimate,
+    _refine_against_waveform,
+    estimate_offset,
+)
 from .framerate import (
     RateDiagnosis,
     conversion_guide,
@@ -90,6 +99,52 @@ FAST_CHECK_WINDOW_S = 45.0
 CLEAN_MIN_CONFIDENCE = 0.75
 CLEAN_MAX_SPREAD_MS = 20.0
 
+# How far either side of the offset the previous window found a survey window
+# searches once one has found it. Six windows each decoding the whole search
+# range around themselves re-read minutes of the dub per window -- 165 s of it
+# for a 45 s window at the default 60 s range -- to confirm an offset the first
+# window already placed. A cut smaller than this is still found where it is;
+# anything the narrowed window cannot settle is measured again in full (see
+# ``sweep`` in ``analyze_pair``), so narrowing never decides an answer alone.
+NARROW_SEARCH_MS = 2000.0
+
+# A narrowed window that lands within this of the offset it was centred on
+# agrees with the window before it, and is taken as measured. One that lands
+# anywhere else in its range is either a cut or a stray peak, which only the
+# waveforms (``OffsetEstimate.confirmed``) or the full search can tell apart.
+NARROW_AGREEMENT_MS = 20.0
+
+# The full mix and the dialogue-free mix found the same offset when they are
+# this close; then the sharper of the two speaks for the window.
+MIX_AGREEMENT_MS = 5.0
+
+# Windows that sit this close to what the whole file is doing agree with each
+# other (see ``_agreement_confidence``). Wide enough for the envelope's own
+# scatter, which is well under a millisecond, and far narrower than anything
+# a coincidence would land in.
+AGREEMENT_MS = 5.0
+
+# The most that windows agreeing may claim on their own. Agreement says the
+# offset is real; it cannot rule out that both files share a mistake.
+AGREEMENT_CONFIDENCE_CAP = 0.99
+
+# A step no larger than this many of the video's frames is a slip, not a
+# different cut: one frame, plus room for the measurement either side. Below
+# it the offset after the step is still inside what a viewer can notice
+# (ITU-R BT.1359 puts that at 45 ms for sound early, 125 ms late), so the
+# delay before it is worth applying; above it the two halves need their own.
+SLIP_MAX_FRAMES = 1.1
+
+# What a slip may always measure, and all it may when the video's frame rate
+# is unknown: the BT.1359 threshold for sound arriving early, the stricter of
+# its two.
+SLIP_FALLBACK_MS = 45.0
+
+# Spans the dub does not cover that leave a slip a slip: it starts late, ends
+# early, or is silent there. A span it covers with other material, or matched
+# nothing in, is a difference in the cut.
+SLIP_TOLERATED_GAPS = frozenset({"head", "tail", "silent"})
+
 # Where the survey's progress ends and the timeline's begins, when it may run.
 TIMELINE_PROGRESS_FROM = 60
 
@@ -123,10 +178,30 @@ class WindowResult:
 
     position_s: float
     estimate: OffsetEstimate
+    agrees: Optional[bool] = None
+    """Whether this window sits with the others (AGREEMENT_MS); None when it
+    found nothing to agree with."""
 
     @property
     def usable(self) -> bool:
         return self.estimate.matched
+
+    def to_dict(self, codec_delay_ms: float = 0.0) -> dict:
+        """The window as a details view shows it, on the result's terms: the
+        codec delay the result removed is removed here too."""
+        estimate = self.estimate
+        return {
+            "positionS": self.position_s,
+            "matched": estimate.matched,
+            "delayMs": estimate.delay_ms - codec_delay_ms if estimate.matched else None,
+            "confidence": estimate.confidence,
+            "peakRatio": estimate.peak_ratio,
+            "confirmed": estimate.confirmed,
+            "waveformRatio": estimate.waveform_ratio if estimate.confirmed else None,
+            "mix": estimate.mix,
+            "agrees": self.agrees,
+            "reason": estimate.reason,
+        }
 
 
 @dataclass
@@ -204,6 +279,50 @@ class PairResult:
     timeline_error: Optional[str] = None
     """Why the timeline route could not measure the pair, when it was tried
     and could not."""
+    search_ms: Optional[float] = None
+    """How far either side of its centre the narrowest window searched, which
+    is what a coincidence had to land inside (see ``_agreement_confidence``)."""
+    agreeing_windows: int = 0
+    """How many windows sit within AGREEMENT_MS of what the file is doing."""
+
+    @property
+    def slip_limit_ms(self) -> float:
+        """The largest step that is a slip rather than a cut: SLIP_MAX_FRAMES of
+        the video, or SLIP_FALLBACK_MS where that is more -- at 50 or 60 fps a
+        frame is under the smallest step a cut is looked for at all."""
+        if self.primary_fps and self.primary_fps > 0:
+            return max(1000.0 / self.primary_fps * SLIP_MAX_FRAMES, SLIP_FALLBACK_MS)
+        return SLIP_FALLBACK_MS
+
+    @property
+    def is_minor_slip(self) -> bool:
+        """Whether every step in the pair is a slip of about a frame or less.
+
+        Measured from the start, so slips that add up -- five 40 ms steps the
+        same way are 200 ms by the end -- are a cut, not five slips. A frame
+        rate mismatch is never a slip, and neither is any stretch of the
+        video the dub does not follow: a scene it replaces or misses inside an
+        edit, or a span it matched nothing in. Only the dub starting late or
+        ending early, or falling silent, leaves a slip a slip.
+        """
+        if not self.is_likely_cut or self.is_rate_mismatch:
+            return False
+        if any(gap.get("reason") not in SLIP_TOLERATED_GAPS for gap in self.gaps):
+            return False
+        limit = self.slip_limit_ms
+        if self.edits:
+            first = self.edits[0].get("offsetBeforeMs")
+            for edit in self.edits:
+                after = edit.get("offsetAfterMs")
+                if first is None or after is None or edit.get("kind") == "replaced":
+                    return False
+                lost_ms = 1000.0 * max(edit.get("missingS") or 0.0, edit.get("extraS") or 0.0)
+                if lost_ms > limit or abs(after - first) > limit:
+                    return False
+            return True
+        if self.cut is not None:
+            return abs(self.cut.magnitude_ms) <= limit
+        return False
 
     @property
     def is_likely_cut(self) -> bool:
@@ -253,6 +372,8 @@ class PairResult:
             "endDelayMs": self.end_delay_ms,
             "windowsUsed": sum(1 for w in self.windows if w.usable),
             "windowsTotal": len(self.windows),
+            "agreeingWindows": self.agreeing_windows,
+            "windowDetails": [w.to_dict(self.codec_delay_ms) for w in self.windows],
             "error": self.error,
             "elapsedMs": self.elapsed_ms,
             "primaryDurationS": self.primary_duration_s,
@@ -262,6 +383,8 @@ class PairResult:
             "primaryFps": self.primary_fps,
             "secondaryFps": self.secondary_fps,
             "isLikelyCut": self.is_likely_cut,
+            "isMinorSlip": self.is_minor_slip,
+            "slipLimitMs": self.slip_limit_ms,
             "cutPositionS": self.cut.position_s if self.cut else (self.edits[0]["videoS"] if self.edits else None),
             "cutUncertaintyS": self.cut.uncertainty_s if self.cut else (self.edits[0]["uncertaintyS"] if self.edits else None),
             "cutMagnitudeMs": self.cut.magnitude_ms if self.cut else (self.edits[0]["jumpMs"] if self.edits else None),
@@ -438,17 +561,38 @@ def analyze_pair(
             length = min(window_s, max(5.0, span / 3.0))
             spots = plan_windows(span, length, window_count)
             measured = []
+            # The offset the last window found, which the next one searches
+            # around. Only at the files' own speed: a stretched dub drifts by
+            # design, and its windows keep the full range.
+            anchor = None
             for index, position in enumerate(spots):
                 if token:
                     token.raise_if_cancelled()
-                measured.append(WindowResult(position, _measure_window(
-                    primary_path, secondary_path, position, length,
-                    max_offset_ms, token, primary_track, secondary_track, rate,
-                )))
+                estimate = None
+                if anchor is not None and rate == ANALYSIS_SR and max_offset_ms > NARROW_SEARCH_MS:
+                    narrow = _measure_window(
+                        primary_path, secondary_path, position, length,
+                        max_offset_ms, token, primary_track, secondary_track, rate,
+                        expect_ms=anchor,
+                    )
+                    if narrow.matched and (
+                        narrow.confirmed or abs(narrow.delay_ms - anchor) <= NARROW_AGREEMENT_MS
+                    ):
+                        estimate = narrow
+                        result.search_ms = NARROW_SEARCH_MS
+                if estimate is None:
+                    estimate = _measure_window(
+                        primary_path, secondary_path, position, length,
+                        max_offset_ms, token, primary_track, secondary_track, rate,
+                    )
+                if estimate.matched:
+                    anchor = estimate.delay_ms
+                measured.append(WindowResult(position, estimate))
                 report(5 + int(75 * (index + 1) / len(spots)))
             return length, measured
 
         report(5)
+        result.search_ms = max_offset_ms
         fast = None
         if prefer_fast:
             fast = _fast_pair(
@@ -835,12 +979,20 @@ def _measure_window(
     primary_track: int = 0,
     secondary_track: int = 0,
     secondary_rate: int = ANALYSIS_SR,
+    expect_ms: Optional[float] = None,
 ) -> OffsetEstimate:
     """Measure one window, padding the secondary so a shifted match still fits.
 
     The secondary is decoded with extra margin on both sides. Without it, a
     window near a genuine offset of several seconds would be comparing two
     non-overlapping spans of audio and would correctly find nothing.
+
+    Both tracks are measured twice from one stereo decode: as the full mix,
+    and as the music and effects alone (see ``_side``). A dub replaces the
+    dialogue and keeps the M&E, so the dialogue in the full mix is noise the
+    two tracks do not share -- English in a 5.1 centre against Hindi in a
+    2.0 phantom centre scored 92% where the M&E alone scored 99-100%, and
+    was up to 0.38 ms out where the M&E was within 0.09 ms.
 
     Args:
         secondary_rate: the rate to decode the secondary at. Asking ffmpeg for
@@ -849,9 +1001,14 @@ def _measure_window(
             rather than by interpolating afterwards. That is how a PAL-sped dub
             is brought onto the video's clock before being correlated; at
             ANALYSIS_SR it is an ordinary decode and changes nothing.
+        expect_ms: the offset to search around, NARROW_SEARCH_MS either
+            side, instead of the whole range around zero. Only at the files'
+            own speed.
     """
     # How much of the primary's clock one second of decoded secondary covers.
     speed = secondary_rate / ANALYSIS_SR
+    if expect_ms is not None and speed != 1.0:
+        expect_ms = None
 
     # The full head start the user asked for, with no cap of its own. Capping
     # the margin below max_offset_ms quietly made every offset beyond the cap
@@ -860,8 +1017,19 @@ def _measure_window(
     # max_offset_ms, so this is only ever as large as the user explicitly
     # asked to search.
     margin_s = max_offset_ms / 1000.0
-    secondary_start = max(0.0, position_s - margin_s)
-    secondary_window = window_s + margin_s + (position_s - secondary_start)
+    centre_s = 0.0
+    if expect_ms is not None:
+        margin_s = NARROW_SEARCH_MS / 1000.0
+        # On the onset envelope's frame grid, as the full search always is
+        # (it starts whole seconds before the window): a dub read from an
+        # arbitrary fraction of a frame is framed out of step with the video,
+        # which moved a drifting pair's windows by a millisecond or two.
+        frame_s = ENVELOPE_HOP / ANALYSIS_SR
+        centre_s = round(expect_ms / 1000.0 / frame_s) * frame_s
+    secondary_start = max(0.0, position_s + centre_s - margin_s)
+    secondary_window = position_s + centre_s + margin_s + window_s - secondary_start
+    if secondary_window <= 0.0:
+        return OffsetEstimate(None, 0.0, 0.0, "the expected position lies before the dub starts")
 
     try:
         primary = load_audio(
@@ -871,6 +1039,7 @@ def _measure_window(
             offset=position_s,
             token=token,
             track=primary_track,
+            channels=2,
         )
         # Both the seek and the length are in the secondary's own timeline, and
         # the span asked for is the one that becomes `secondary_window` long
@@ -882,6 +1051,7 @@ def _measure_window(
             offset=secondary_start / speed,
             token=token,
             track=secondary_track,
+            channels=2,
         )
     except MediaError as exc:
         return OffsetEstimate(None, 0.0, 0.0, str(exc))
@@ -895,9 +1065,35 @@ def _measure_window(
     # unrelated. One surviving window is also no window at all for drift, which
     # needs three.
     head_start_ms = (position_s - secondary_start) * 1000.0
-    estimate = estimate_offset(
-        primary, secondary, ANALYSIS_SR, max_offset_ms=max_offset_ms + head_start_ms
-    )
+    if expect_ms is None:
+        bounds = {"max_offset_ms": max_offset_ms + head_start_ms}
+    else:
+        # Around the expected offset, and never past the range the user asked
+        # to search: an anchor near its edge would otherwise carry the next
+        # window beyond it.
+        centre_ms = head_start_ms + expect_ms
+        lowest = max(centre_ms - NARROW_SEARCH_MS, head_start_ms - max_offset_ms)
+        highest = min(centre_ms + NARROW_SEARCH_MS, head_start_ms + max_offset_ms)
+        if highest <= lowest:
+            return OffsetEstimate(None, 0.0, 0.0, "the expected offset lies outside the search range")
+        bounds = {"search_ms": (lowest, highest)}
+    full = estimate_offset(_mix(primary), _mix(secondary), ANALYSIS_SR, **bounds)
+    if full.confirmed:
+        # The waveforms already agree through the dialogue, which places the
+        # window to a fraction of a sample; the M&E could only say the same.
+        estimate = full
+    else:
+        side_primary, side_secondary = _side(primary), _side(secondary)
+        me = replace(estimate_offset(side_primary, side_secondary, ANALYSIS_SR, **bounds), mix="me")
+        estimate = _choose_mix(full, me)
+        if estimate is me and full.matched and abs(me.delay_ms - full.delay_ms) > MIX_AGREEMENT_MS:
+            # Music that repeats sample for sample -- a loop, a reprised cue --
+            # confirms one period away as well as at the right offset. The
+            # dialogue does not repeat, so where the full mix points and the
+            # M&E confirms there too, that is the offset.
+            at_full = _refine_against_waveform(side_primary, side_secondary, ANALYSIS_SR, full.delay_ms)
+            if at_full is not None:
+                estimate = replace(me, delay_ms=at_full[0], waveform_ratio=at_full[1])
     if not estimate.matched:
         return estimate
 
@@ -917,11 +1113,51 @@ def _measure_window(
     if speed != 1.0:
         absolute = ((position_s + absolute / 1000.0) / speed - position_s) * 1000.0
 
-    return OffsetEstimate(
-        delay_ms=absolute,
-        confidence=estimate.confidence,
-        peak_ratio=estimate.peak_ratio,
-    )
+    return replace(estimate, delay_ms=absolute)
+
+
+def _mix(stereo: np.ndarray) -> np.ndarray:
+    """The full mix of a stereo decode: to the sample the mono decode FFmpeg
+    makes itself (its mono downmix is (L + R) / sqrt(2) of its stereo one)."""
+    return (stereo[:, 0] + stereo[:, 1]) * np.float32(1.0 / math.sqrt(2.0))
+
+
+def _side(stereo: np.ndarray) -> np.ndarray:
+    """The mix with everything panned dead centre cancelled out.
+
+    FFmpeg's stereo downmix puts the centre channel into both sides equally,
+    so left minus right removes it -- the dialogue of a 5.1 mix, and the
+    phantom-centre dialogue of a 2.0 one -- and keeps the music and effects,
+    which are spread across the stereo field and are what a dub shares with
+    the original. A mono or dual-mono track has nothing left, which
+    ``estimate_offset`` rejects as silence, so the full mix answers instead.
+    """
+    return (stereo[:, 0] - stereo[:, 1]) * np.float32(1.0 / math.sqrt(2.0))
+
+
+def _choose_mix(full: OffsetEstimate, me: OffsetEstimate) -> OffsetEstimate:
+    """Which of a window's two measurements speaks for it.
+
+    Whichever the waveforms confirm, first: GCC-PHAT agreement is evidence
+    noise cannot produce, while an envelope peak alone can -- the M&E's
+    envelope once locked 108 ms off with a sharper peak than the full mix's
+    correct one, and the waveforms rejected it. Without that, the full mix
+    stands, as it always has, unless the M&E agrees with it and is sharper,
+    or found the dub decisively where the full mix found nothing.
+    """
+    if me.confirmed and (not full.confirmed or me.waveform_ratio > full.waveform_ratio):
+        return me
+    if full.confirmed:
+        return full
+    if not full.matched:
+        return me if me.matched and me.peak_ratio >= DECISIVE_PEAK_RATIO else full
+    if (
+        me.matched
+        and abs(me.delay_ms - full.delay_ms) <= MIX_AGREEMENT_MS
+        and me.peak_ratio > full.peak_ratio
+    ):
+        return me
+    return full
 
 
 def _fast_pair(
@@ -1034,9 +1270,15 @@ def _search_speed(
         # measurement: at the ordinary threshold, trying speeds on two
         # unrelated releases eventually found one that "worked" and reported a
         # confident seven-second delay between films that share no audio.
-        if estimate.peak_ratio >= DECISIVE_PEAK_RATIO and (
-            best is None or estimate.peak_ratio > best[0]
-        ):
+        #
+        # The bar was set on the full mix's envelope peak, so it is applied to
+        # that and nothing else; a reading of the M&E alone -- a second chance
+        # per trial -- settles a speed only once the waveforms confirm it,
+        # which noise cannot do (see correlate.MIN_REFINE_PEAK_RATIO).
+        decisive = estimate.confirmed or (
+            estimate.mix == "full" and estimate.peak_ratio >= DECISIVE_PEAK_RATIO
+        )
+        if decisive and (best is None or estimate.peak_ratio > best[0]):
             best = (estimate.peak_ratio, rate)
             break
 
@@ -1187,7 +1429,9 @@ def _reconcile(
     spread = float(np.median(residual))
     tolerance = max(50.0, spread * 4.0)
     keep = residual <= tolerance
+    kept_windows = usable
     if keep.sum() >= 2 and not keep.all():
+        kept_windows = [w for w, kept in zip(usable, keep) if kept]
         offsets, positions = offsets[keep], positions[keep]
         confidences, after_cut = confidences[keep], after_cut[keep]
         # A segment can be trimmed out of existence, and a step with nothing on
@@ -1212,12 +1456,39 @@ def _reconcile(
     # model, so a clean two-level file is not punished for the gap between its
     # levels: that the offset changed is already reported as a cut, and how
     # well each window was measured is a separate question this answers.
+    penalty = 1.0
     if len(offsets) >= 2:
         disagreement = float(np.std(offsets - model))
         if disagreement > 500.0:
-            result.confidence *= 0.5
+            penalty = 0.5
         elif disagreement > 100.0:
-            result.confidence *= 0.8
+            penalty = 0.8
+
+    # Each window's own peak says how sharply it matched; windows landing on
+    # the same offset say far more, and the mean above never counted it. Six
+    # windows within a few milliseconds of each other, out of a search range
+    # of seconds, are not a coincidence however soft each peak was -- that
+    # is what a dub in a different language looks like, and it was reported
+    # at 63%.
+    agreeing = np.abs(offsets - model) <= AGREEMENT_MS
+    for window in result.windows:
+        window.agrees = None
+    for window in usable:
+        window.agrees = False
+    for window, agrees in zip(kept_windows, agreeing):
+        window.agrees = bool(agrees)
+    result.agreeing_windows = int(agreeing.sum())
+    # Only windows that heard different audio are independent witnesses: on
+    # a short file the windows overlap, and one lock read again by the next
+    # window over is the same evidence twice.
+    span = result.window_s or 0.0
+    independent = _independent(
+        [w.position_s for w, agrees in zip(kept_windows, agreeing) if agrees], span
+    )
+    result.confidence = penalty * max(
+        result.confidence,
+        _agreement_confidence(independent, _independent([w.position_s for w in result.windows], span), result.search_ms),
+    )
 
     result.start_delay_ms = float(offsets[0])
     result.end_delay_ms = float(offsets[-1])
@@ -1276,6 +1547,32 @@ def _reconcile(
         result.delay_at_start_ms = result.delay_ms
 
     return step
+
+
+def _independent(positions: List[float], window_s: float) -> int:
+    """How many of these windows can be counted without any two sharing
+    audio: the most that fit one after another without overlapping."""
+    count, free_from = 0, -math.inf
+    for position in sorted(positions):
+        if position >= free_from:
+            count += 1
+            free_from = position + window_s
+    return count
+
+
+def _agreement_confidence(agreeing: int, total: int, search_ms: Optional[float]) -> float:
+    """How sure ``agreeing`` of ``total`` windows make the offset.
+
+    One minus the chance of it happening by accident: windows that each
+    landed anywhere in their search range falling within AGREEMENT_MS of a
+    line two of them define. Two are spent on the line, since the file may
+    drift, and any set of that many windows could have been the one.
+    """
+    if agreeing < MIN_USABLE_WINDOWS or not search_ms or search_ms <= 0:
+        return 0.0
+    landing = min(1.0, AGREEMENT_MS / search_ms)
+    chance = math.comb(total, agreeing) * landing ** (agreeing - 2)
+    return float(min(AGREEMENT_CONFIDENCE_CAP, max(0.0, 1.0 - chance)))
 
 
 def _split_mask(positions: np.ndarray, step: Optional[Step]) -> np.ndarray:

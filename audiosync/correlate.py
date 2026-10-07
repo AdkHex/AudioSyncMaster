@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -48,17 +48,25 @@ NO_PEAK = "no distinct correlation peak; tracks appear unrelated"
 # 60ms let it relocate the answer entirely.
 REFINE_WINDOW_MS = 3.0 * ENVELOPE_HOP / 16000 * 1000.0
 
-# Prominence the raw-waveform peak must clear before it is trusted.
+# Prominence the waveform peak must clear before it is trusted, on the phase
+# transform (GCC-PHAT) the refinement correlates with.
 #
-# The two cases are separated by orders of magnitude, not by a close call.
-# Measured on matched material: the same audio through two codecs scores ~2600,
-# while two different performances of the same scene score ~27. Raw waveforms
-# either agree almost perfectly or not at all, so this sits far above the dub
-# case and far below the re-encode one.
+# PHAT whitens the cross-spectrum, so every frequency votes with its phase
+# alone: audio that is the same recording underneath -- a re-encode, or a dub
+# built on the same music and effects as the original -- lines up at one lag
+# across the whole band and forms a single spike, whatever EQ, level or
+# codec sits between the two; audio that is not leaves only noise. Measured
+# on 16 kHz windows: an English 5.1 master against a Hindi AC-3 dub on its
+# M&E scores 770-3350, with or without the dialogue in it; unrelated audio
+# scores a median of 5.6 and at most 20.8 over 180 windows. The bar sits well
+# clear of that tail and an order of magnitude below any real match.
 #
-# The previous bar was 2.0, which every dub cleared -- and clearing it meant
-# a correct answer got replaced by wherever the noise happened to peak.
-MIN_REFINE_PEAK_RATIO = 200.0
+# The plain correlation this replaced needed a bar of 200 for the same job,
+# which a dub never cleared: its dialogue swamps the shared M&E unless the
+# spectrum is whitened first. So a dub kept the envelope's answer, up to
+# half a millisecond out, where the M&E it shares could have placed it to a
+# few microseconds.
+MIN_REFINE_PEAK_RATIO = 50.0
 
 
 @dataclass
@@ -76,6 +84,19 @@ class OffsetEstimate:
 
     reason: Optional[str] = None
     """Why the estimate was rejected, when delay_ms is None."""
+
+    confirmed: bool = False
+    """The raw waveforms agree at this offset (GCC-PHAT, see
+    MIN_REFINE_PEAK_RATIO): the two tracks share actual audio here, not only
+    the timing of it, and delay_ms is placed to a fraction of a sample."""
+
+    waveform_ratio: float = 0.0
+    """The waveform peak's prominence, when the waveforms agreed."""
+
+    mix: str = "full"
+    """What was correlated: ``full``, the whole mix, or ``me``, the music and
+    effects with the centre-panned dialogue cancelled out (see
+    ``analyze._measure_window``)."""
 
     @property
     def matched(self) -> bool:
@@ -197,12 +218,27 @@ def _correlate(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
     return np.fft.irfft(spectrum, size)[:n]
 
 
+def _correlate_phat(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
+    """Cross-correlation with the phase transform (GCC-PHAT), full overlap.
+
+    Same lag layout as ``_correlate``. Every frequency bin is scaled to unit
+    magnitude before the inverse transform, so the peak reflects how
+    consistently the phases agree, not which band is loudest.
+    """
+    n = len(primary) + len(secondary) - 1
+    size = _fast_fft_size(n)
+    spectrum = np.fft.rfft(primary, size) * np.fft.rfft(secondary[::-1], size)
+    spectrum /= np.abs(spectrum) + 1e-12
+    return np.fft.irfft(spectrum, size)[:n]
+
+
 def estimate_offset(
     primary: np.ndarray,
     secondary: np.ndarray,
     sr: int,
     max_offset_ms: Optional[float] = None,
     min_peak_ratio: float = MIN_PEAK_RATIO,
+    search_ms: Optional[Tuple[float, float]] = None,
 ) -> OffsetEstimate:
     """Estimate how far the secondary track lags the primary.
 
@@ -213,6 +249,8 @@ def estimate_offset(
         max_offset_ms: reject alignments beyond this magnitude. Bounding the
             search suppresses distant spurious peaks; None searches everything.
         min_peak_ratio: prominence below which the match is rejected outright.
+        search_ms: (lowest, highest) delay to accept, for a search centred
+            somewhere other than zero. Applied on top of max_offset_ms.
 
     Returns:
         OffsetEstimate. delay_ms is positive when the secondary starts later.
@@ -252,6 +290,15 @@ def estimate_offset(
         if hi - lo >= 3:
             search = corr[lo:hi]
             search_base = lo
+    if search_ms is not None:
+        # delay = -(index - zero_lag) / env_sr, so the highest delay is the
+        # lowest index.
+        lo = max(search_base, zero_lag_index - int(math.ceil(search_ms[1] / 1000.0 * env_sr)) - 2)
+        hi = min(search_base + len(search), zero_lag_index - int(math.floor(search_ms[0] / 1000.0 * env_sr)) + 3)
+        if hi - lo < 3:
+            return OffsetEstimate(None, 0.0, 0.0, "search range lies outside the decoded audio")
+        search = corr[lo:hi]
+        search_base = lo
 
     local_peak = int(np.argmax(search))
     peak_index = search_base + local_peak
@@ -272,14 +319,21 @@ def estimate_offset(
     lag_frames = refined_index - zero_lag_index
     delay_ms = -(lag_frames / env_sr) * 1000.0
 
+    confidence = _ratio_to_confidence(ratio, min_peak_ratio)
     refined = _refine_against_waveform(primary, secondary, sr, delay_ms)
-    if refined is not None:
-        delay_ms = refined
+    if refined is None:
+        return OffsetEstimate(delay_ms=float(delay_ms), confidence=confidence, peak_ratio=float(ratio))
 
+    # The waveforms agreeing is the stronger evidence of the two: noise
+    # cannot produce it (see MIN_REFINE_PEAK_RATIO), so it decides how sure
+    # this window is when the envelope's peak was the weaker one.
+    refined_ms, waveform_ratio = refined
     return OffsetEstimate(
-        delay_ms=float(delay_ms),
-        confidence=_ratio_to_confidence(ratio, min_peak_ratio),
+        delay_ms=float(refined_ms),
+        confidence=max(confidence, _ratio_to_confidence(waveform_ratio, MIN_REFINE_PEAK_RATIO)),
         peak_ratio=float(ratio),
+        confirmed=True,
+        waveform_ratio=float(waveform_ratio),
     )
 
 
@@ -289,25 +343,28 @@ def _refine_against_waveform(
     sr: int,
     coarse_delay_ms: float,
     window_ms: float = REFINE_WINDOW_MS,
-) -> Optional[float]:
+) -> Optional[Tuple[float, float]]:
     """Sharpen a coarse envelope-derived estimate using the full-rate signal.
 
     The envelope search is decimated by ENVELOPE_HOP, so its resolution is
     coarse. Correlating the raw waveform across a narrow window around the
     coarse answer recovers sample-level precision.
 
-    Only valid when the two tracks are near-identical recordings. A dub is a
-    different performance -- different voices, different room -- whose raw
-    waveforms do not correlate at all, even though the onsets line up exactly.
-    Refining one of those means correlating noise against noise, so the peak it
-    finds is arbitrary within the search window.
+    Only valid where the two tracks share actual audio. A different
+    performance -- different voices, different room -- has raw waveforms
+    that do not correlate at all, even though the onsets line up exactly, and
+    refining one means correlating noise against noise. The plain correlation
+    this once used overwrote correct envelope answers that way. Two guards
+    keep it to audio that is shared: a search window narrow enough to only
+    correct envelope quantisation, and a prominence bar noise cannot clear.
 
-    That made it strictly harmful on the material this tool exists for: it
-    overwrote a correct envelope answer with a wrong one, silently, and the
-    error grew with how different the two performances were. Two guards keep it
-    to the case it was written for -- a search window narrow enough to only
-    correct envelope quantisation, and a prominence bar high enough that noise
-    cannot clear it.
+    The correlation is GCC-PHAT: the cross-spectrum is whitened before it is
+    transformed back, so a dub's shared music and effects line up across the
+    whole band even with its own dialogue, EQ and codec on top.
+
+    Returns:
+        (refined delay in ms, waveform peak prominence), or None when the
+        waveforms do not agree and the envelope's answer stands.
     """
     coarse_shift = int(round(-coarse_delay_ms / 1000.0 * sr))
     search_radius = int(window_ms / 1000.0 * sr)
@@ -328,7 +385,7 @@ def _refine_against_waveform(
     if a.std() < 1e-9 or b.std() < 1e-9:
         return None
 
-    corr = _correlate(a, b)
+    corr = _correlate_phat(a, b)
     zero_lag = len(b) - 1
     lo = max(0, zero_lag - search_radius)
     hi = min(len(corr), zero_lag + search_radius + 1)
@@ -338,7 +395,8 @@ def _refine_against_waveform(
     window = corr[lo:hi]
     local_peak = int(np.argmax(window))
     peak_index = lo + local_peak
-    if _peak_ratio(corr, peak_index, sr) < MIN_REFINE_PEAK_RATIO:
+    waveform_ratio = _peak_ratio(corr, peak_index, sr)
+    if waveform_ratio < MIN_REFINE_PEAK_RATIO:
         # No real waveform agreement: these are different recordings, and the
         # envelope's answer is the better one. Leaving it alone is the fix.
         return None
@@ -346,7 +404,7 @@ def _refine_against_waveform(
     refined_index = _parabolic_vertex(corr, peak_index)
     residual_frames = refined_index - zero_lag
     residual_ms = -(residual_frames / sr) * 1000.0
-    return coarse_delay_ms + residual_ms
+    return coarse_delay_ms + residual_ms, waveform_ratio
 
 
 def _ratio_to_confidence(ratio: float, threshold: float) -> float:

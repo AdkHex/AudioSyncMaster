@@ -346,3 +346,79 @@ def test_a_window_entirely_before_the_audio_is_silence_of_the_asked_length():
         window = load_audio(path, SR, duration=1.5, offset=0.2)
         assert len(window) == int(1.5 * SR)
         assert not np.any(window)
+
+
+def test_a_stereo_decode_holds_the_mono_mix_and_the_side_difference():
+    """(L + R) / sqrt(2) of the stereo decode is FFmpeg's own mono decode, so
+    measuring from it changes nothing about the full mix; L - R is the rest."""
+    with Workspace() as ws:
+        left, right = _tone(6.0, seed=1), _tone(6.0, seed=2)
+        path = ws.path("stereo.wav")
+        sf.write(path, np.stack([left, right], axis=1), SR)
+        stereo = load_audio(path, SR, duration=4.0, offset=1.0, channels=2)
+        mono = load_audio(path, SR, duration=4.0, offset=1.0)
+        assert stereo.shape == (len(mono), 2), stereo.shape
+        mid = (stereo[:, 0] + stereo[:, 1]) / np.sqrt(2.0)
+        assert np.max(np.abs(mid - mono)) < 1e-5
+        written, _ = sf.read(path, dtype="float32")  # as stored: 16-bit, clipped
+        side = stereo[:, 0] - stereo[:, 1]
+        assert np.max(np.abs(side - (written[:, 0] - written[:, 1])[SR:SR + len(side)])) < 1e-4
+
+
+def test_a_dts_track_is_read_from_its_core():
+    """A DTS-HD MA track's core sits sample for sample under the lossless
+    decode and is several times quicker to decode, so DTS is read that way."""
+    import audiosync.media as media  # noqa: PLC0415
+
+    with Workspace() as ws:
+        source = ws.path("source.wav")
+        sf.write(source, np.stack([_tone(4.0, seed=3), _tone(4.0, seed=4)], axis=1), SR)
+        path = ws.path("core.mkv")
+        made = subprocess.run(
+            [ffmpeg_path(), "-v", "error", "-y", "-i", source, "-ar", "48000", "-c:a", "dca", "-strict", "-2", path],
+            capture_output=True,
+        )
+        if made.returncode != 0:
+            print("        (skipped: this FFmpeg has no DTS encoder)")
+            return
+        commands = []
+        original = media._run
+
+        def recording(command, *args, **kwargs):
+            commands.append(list(command))
+            return original(command, *args, **kwargs)
+
+        media._run = recording
+        try:
+            core = load_audio(path, SR, duration=2.0, offset=1.0)
+        finally:
+            media._run = original
+        decodes = [c for c in commands if "f32le" in c]
+        assert decodes and "-core_only" in decodes[-1], decodes
+        assert core.size > 0
+
+
+def test_a_dts_track_without_a_core_is_decoded_in_full():
+    """DTS-HD MA can be lossless with no core at all, which a core-only
+    decode returns nothing for; the full decode is then the answer."""
+    import audiosync.media as media  # noqa: PLC0415
+
+    with Workspace() as ws:
+        path = ws.path("plain.wav")
+        sf.write(path, _tone(4.0, seed=5), SR)
+        tried = []
+        original_decode, original_is_dts = media._decode, media._is_dts
+
+        def no_core(*args, core_only=False, **kwargs):
+            tried.append(core_only)
+            if core_only:
+                raise MediaError("No audio decoded from plain.wav")
+            return original_decode(*args, core_only=core_only, **kwargs)
+
+        media._decode, media._is_dts = no_core, lambda path, track: True
+        try:
+            samples = load_audio(path, SR, duration=2.0, offset=1.0)
+        finally:
+            media._decode, media._is_dts = original_decode, original_is_dts
+        assert tried == [True, False], tried
+        assert len(samples) == 2 * SR
