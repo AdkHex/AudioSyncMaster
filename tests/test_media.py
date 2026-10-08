@@ -440,7 +440,11 @@ def test_a_sought_matroska_window_starts_on_the_sample():
     seek itself to the millisecond too: sought windows came back up to a
     millisecond out -- 0.5 ms on this file -- and a few samples long or short,
     where a read from the top is exact. Every sought window must now match
-    the read from the top sample for sample, and be exactly as long as asked."""
+    the read from the top sample for sample, and be exactly as long as asked.
+
+    The read from the top is the exact decode too: FFmpeg 6.1 plays AAC's
+    priming as sound, and the older read takes off the 21 ms the file says
+    rather than the 21.333 it is, so it starts 16 samples late."""
     rate = 48000
     with Workspace() as ws:
         source = ws.path("source.wav")
@@ -452,7 +456,7 @@ def test_a_sought_matroska_window_starts_on_the_sample():
             if made.returncode != 0:
                 print(f"        (skipped {codec[1]}: no encoder)")
                 continue
-            top = load_audio(path, rate)
+            top = load_audio(path, rate, duration=39.0)
             for offset in (3.3337, 11.0021, 23.98765):
                 window = load_audio(path, rate, duration=4.0, offset=offset)
                 start = int(round(offset * rate))

@@ -966,9 +966,10 @@ def _snap_filter(origin_s: float) -> str:
     snapped = f"({origin}+round(({start}-{origin})*SR/NB_SAMPLES)*NB_SAMPLES/SR)"
     unambiguous = f"gte(NB_SAMPLES/SR,{MIN_SNAP_FRAME_S})*lte(abs({snapped}-{start}),{TIMESTAMP_SLACK_S})"
     first = f"if({unambiguous},{snapped},{start})"
-    # st/ld hold the first frame's start across frames; +0.5 because asetpts
-    # truncates to a whole tick.
-    expression = f"st(0,if(eq(N,0),{first},ld(0)));(ld(0)+N/SR)/TB+0.5"
+    # st/ld hold the first frame's start across frames. Rounded here because
+    # asetpts truncates towards zero, which for a priming frame stamped before
+    # zero is a sample late.
+    expression = f"st(0,if(eq(N,0),{first},ld(0)));floor((ld(0)+N/SR)/TB+0.5)"
     return "asetpts=" + expression.replace(",", "\\,").replace(";", "\\;")
 
 
