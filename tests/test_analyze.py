@@ -836,3 +836,118 @@ def test_a_cut_bigger_than_the_narrowed_search_is_still_found():
         assert not result.is_minor_slip
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _recording_windows():
+    """Wrap ``_measure_window`` to record each call's ``expect_ms`` (None for
+    the full range); returns the record and a function that restores it."""
+    import audiosync.analyze as analyze  # noqa: PLC0415
+
+    calls = []
+    original = analyze._measure_window
+
+    def recording(*args, **kwargs):
+        calls.append(kwargs.get("expect_ms"))
+        return original(*args, **kwargs)
+
+    analyze._measure_window = recording
+
+    def restore():
+        analyze._measure_window = original
+
+    return calls, restore
+
+
+def test_a_pair_in_step_is_found_without_reading_the_full_range():
+    """Most pairs sit within a couple of seconds of zero. The first window is
+    searched there first, so a pair like that never reads the dub across the
+    whole range the user allowed -- two minutes of a 4K remux per pair."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    signal = _speechlike(90.0, sr, seed=21)
+    late = np.concatenate([np.zeros(int(0.120 * sr), dtype=np.float32), signal])[: len(signal)]
+    root = tempfile.mkdtemp(prefix="audiosync-nearzero-")
+    calls, restore = _recording_windows()
+    try:
+        primary, secondary = os.path.join(root, "video.wav"), os.path.join(root, "dub.wav")
+        sf.write(primary, signal, sr)
+        sf.write(secondary, late, sr)
+        result = analyze_pair(primary, secondary, window_s=15.0, window_count=4, max_offset_ms=10000.0, timeline=False)
+    finally:
+        restore()
+        shutil.rmtree(root, ignore_errors=True)
+    assert result.error is None, result.error
+    assert abs(result.delay_ms - 120.0) < 0.5, result.delay_ms
+    assert calls[0] == 0.0, calls
+    assert None not in calls, f"a window read the full range: {calls}"
+
+
+def test_an_offset_beyond_the_search_around_zero_is_given_the_full_range():
+    """A dub 5 s late is outside the search around zero; nothing there is
+    confirmed, so the first window is searched across the whole range, and
+    the rest around what it found."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    sr = 16000
+    signal = _speechlike(90.0, sr, seed=22)
+    late = np.concatenate([np.zeros(int(5.0 * sr), dtype=np.float32), signal])[: len(signal)]
+    root = tempfile.mkdtemp(prefix="audiosync-farzero-")
+    calls, restore = _recording_windows()
+    try:
+        primary, secondary = os.path.join(root, "video.wav"), os.path.join(root, "dub.wav")
+        sf.write(primary, signal, sr)
+        sf.write(secondary, late, sr)
+        result = analyze_pair(primary, secondary, window_s=15.0, window_count=4, max_offset_ms=10000.0, timeline=False)
+    finally:
+        restore()
+        shutil.rmtree(root, ignore_errors=True)
+    assert result.error is None, result.error
+    assert abs(result.delay_ms - 5000.0) < 0.5, result.delay_ms
+    assert calls[:2] == [0.0, None], calls
+    assert calls.count(0.0) == 1, f"searched around zero again after it failed: {calls}"
+
+
+def test_a_first_window_the_others_disagree_with_is_measured_again_in_full():
+    """A loop in the music can confirm near zero when the dub is really 3 s
+    late; the windows after it find it there, and the first is measured
+    again across the full range rather than standing as a cut."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    import audiosync.analyze as analyze  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    calls = []
+    original = analyze._measure_window
+
+    def scripted(*args, expect_ms=None, **kwargs):
+        calls.append(expect_ms)
+        if expect_ms == 0.0:
+            return OffsetEstimate(310.0, 0.99, 900.0, confirmed=True, waveform_ratio=400.0)
+        return OffsetEstimate(3000.0, 0.99, 900.0, confirmed=True, waveform_ratio=400.0)
+
+    root = tempfile.mkdtemp(prefix="audiosync-loop-")
+    analyze._measure_window = scripted
+    try:
+        path = os.path.join(root, "a.wav")
+        sf.write(path, np.zeros(90 * 16000, dtype=np.float32), 16000)
+        result = analyze_pair(path, os.path.join(root, "a.wav"), window_s=15.0, window_count=4,
+                              max_offset_ms=10000.0, timeline=False)
+    finally:
+        analyze._measure_window = original
+        shutil.rmtree(root, ignore_errors=True)
+    assert [w.estimate.delay_ms for w in result.windows] == [3000.0] * 4, [w.estimate.delay_ms for w in result.windows]
+    assert calls[-1] is None, calls
+    assert result.cut is None

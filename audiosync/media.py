@@ -31,6 +31,8 @@ from typing import Iterator, List, Optional, Tuple
 
 import numpy as np
 
+from . import prefetch
+
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".ts", ".wmv", ".flv"}
 # Every extension an external dub actually arrives as. Deliberately generous:
 # this only decides what a folder scan offers to pair up, and probing rejects
@@ -71,6 +73,35 @@ PROBE_TIMEOUT_S = 60
 # than any real container's packet interval, and short enough that the cost
 # does not depend on how far into the file the window sits.
 SEEK_PREROLL_S = 20.0
+
+# The exact decode (see ``_exact_command``) seeks this far ahead of a window:
+# long enough for a decoder that starts cold on the packet the seek lands on
+# -- half its first frame is overlap it never received -- to have settled well
+# before the window. The seek lands on a keyframe at or before this point, so
+# the real run-in is usually longer. Every second here is read from disk
+# twice per window, which on a 4K remux is ~7 MB a second.
+EXACT_PREROLL_S = 1.0
+
+# Codecs whose frames all hold the same number of samples, so a frame's true
+# start is the track's first sample plus a whole number of frames. Their
+# timestamps can be put back on that grid (see ``_snap_filter``).
+FIXED_FRAME_CODECS = frozenset({"ac3", "eac3", "dts", "aac", "mp2", "mp3", "opus", "flac"})
+
+# The furthest a container timestamp sits from the truth: Matroska's 1 ms
+# tick, which mkvmerge truncates rather than rounds -- a DTS frame that
+# starts at 32.000 ms is stored as 31.
+TIMESTAMP_SLACK_S = 0.00105
+
+# Frames shorter than this cannot be told apart once their start has been
+# truncated to the millisecond (TrueHD's are 0.83 ms), so they are not snapped.
+MIN_SNAP_FRAME_S = 0.004
+
+# Containers whose packets carry their own timestamps, which a seek leaves
+# intact. A bare elementary stream has none: after a seek FFmpeg restarts its
+# count at zero (raw TrueHD) or estimates it, so it is read the two-stage way,
+# which only needs to know where the seek landed -- and which a raw AC-3 or
+# DTS track's sample-counted timestamps already make exact.
+TIMESTAMPED_CONTAINERS = frozenset({"matroska", "mov", "mpegts"})
 
 
 class MediaError(RuntimeError):
@@ -438,7 +469,9 @@ def _first_packet_s(path: str, track: int, size: int, mtime_ns: int, reader: str
         None,
         what=f"probe {os.path.basename(path)}",
     )
-    return _parse_float(output.decode(errors="replace").strip().splitlines()[0]) if output.strip() else None
+    # Only the first field: a packet carrying side data (AAC's skip samples)
+    # is printed with a trailing comma, "-0.021000,", which is no number.
+    return _parse_float(output.decode(errors="replace").strip().splitlines()[0].split(",")[0]) if output.strip() else None
 
 
 def track_lead_s(path: str, track: int = 0) -> float:
@@ -811,7 +844,157 @@ def _decode(
     core_only: bool = False,
 ) -> np.ndarray:
     """One FFmpeg decode for ``load_audio``, with the offset already on the
-    file's clock and the silence in front of the track already measured."""
+    file's clock and the silence in front of the track already measured.
+
+    The exact decode is tried first. Should its seek land after the window --
+    which no indexed container does, but a damaged index could -- it comes back
+    short at the front, and the two-stage decode reads the window instead; so
+    it does if the exact decode fails outright, as it would on a build that
+    lacks a filter it uses. Either way the answer is never worse than before.
+    """
+    exact = _exact_command(path, sr, duration, offset, track, channels, core_only)
+    if exact is not None:
+        command, first_s, last_s = exact
+        prefetch.warm(path, first_s, last_s, token)
+        try:
+            samples = _pcm(_run_decode(command, path, track, token), channels, path)
+        except MediaError:
+            if token:
+                token.raise_if_cancelled()
+            samples = None
+        expected = int(round(duration * sr))
+        if samples is not None and (
+            len(samples) >= expected - max(2, sr // 1000) or _runs_out(path, offset + duration)
+        ):
+            return _with_silence(samples, silence_s, sr, channels)
+    return _with_silence(
+        _pcm(_run_decode(_two_stage_command(path, sr, duration, offset, track, channels, core_only), path, track, token), channels, path),
+        silence_s, sr, channels,
+    )
+
+
+def _exact_command(
+    path: str,
+    sr: int,
+    duration: Optional[float],
+    offset: float,
+    track: int,
+    channels: int,
+    core_only: bool,
+) -> Optional[Tuple[List[str], float, float]]:
+    """A decode cut on the file's own timestamps rather than on where a seek
+    happened to land, or None where the two-stage decode should be used.
+
+    FFmpeg's sought decode is only as exact as the container's timestamps,
+    and Matroska's are whole milliseconds. Its seek target is rounded to that
+    tick, and a frame whose true start falls between ticks is stamped with the
+    tick before it: a DTS frame every 10.667 ms comes out up to a millisecond
+    early. Measured against the source, a sought window of a DTS track in
+    MKV started up to 0.79 ms out and an AC-3 one 0.40 ms -- only a read from
+    the top, which counts samples, was exact.
+
+    Here the timestamps are kept as they are in the file (``-copyts``), the
+    first frame's is put back on its codec's frame grid (``_snap_filter``),
+    every later frame follows it sample for sample, and the window is cut at
+    its absolute time. Measured the same way, every window started exactly
+    where it was asked for, and the seek needs a second of run-in rather
+    than twenty.
+
+    Returns:
+        (command, first_s, last_s): the command, and the span of the file's
+        timeline it reads, for ``prefetch``.
+    """
+    if duration is None:
+        return None
+    try:
+        stat = os.stat(path)
+        reader = ffprobe_path()
+        info = _probed(path, stat.st_size, stat.st_mtime_ns, reader)
+        file_start, _ = _origins(path, int(track), stat.st_size, stat.st_mtime_ns, reader)
+        first_packet = _first_packet_s(path, int(track), stat.st_size, stat.st_mtime_ns, reader)
+    except (OSError, MediaError, IndexError):
+        return None
+    if not TIMESTAMPED_CONTAINERS.intersection((info.container_format or "").split(",")):
+        return None
+    stream = _stream_of(info, track)
+    codec = ((stream.codec if stream else info.audio_codec) or "").lower()
+
+    start_s = file_start + offset
+    command = [ffmpeg_path(), "-nostdin"]
+    if core_only:
+        command.extend(["-core_only", "1"])
+    command.append("-copyts")
+    first_s = file_start
+    coarse = offset - EXACT_PREROLL_S
+    if coarse > 0:
+        command.extend(["-noaccurate_seek", "-ss", f"{coarse:.6f}"])
+        first_s = file_start + coarse
+    command.extend(["-i", path])
+
+    filters = []
+    if codec in FIXED_FRAME_CODECS and first_packet is not None and math.isfinite(first_packet):
+        # Encoder priming stamped before zero puts the first real frame at
+        # zero exactly (FFmpeg writes AAC's 1024 samples at -21 ms, a rounded
+        # -21.333), so zero is on the grid where that stamp is not.
+        origin = 0.0 if -MAX_PRIMING_S <= first_packet < 0.0 else first_packet
+        filters.append(_snap_filter(origin))
+    filters.append(f"atrim=start={start_s:.6f}:end={start_s + duration:.6f}")
+    command.extend([
+        "-map", f"0:a:{max(0, track)}",
+        "-vn", "-sn", "-dn",
+        "-af", ",".join(filters),
+        "-f", "f32le", "-acodec", "pcm_f32le",
+        "-ar", str(sr), "-ac", str(channels), "-",
+    ])
+    return command, first_s, start_s + duration
+
+
+def _snap_filter(origin_s: float) -> str:
+    """An ``asetpts`` that puts the first decoded frame back on its codec's
+    frame grid and runs every later one on from it by sample count.
+
+    A fixed-size frame truly starts at ``origin_s`` plus a whole number of
+    frames, and its stored start is less than a frame away from that, so the
+    nearest grid point is the true one. The first frame is moved only when
+    that is unambiguous -- frames longer than MIN_SNAP_FRAME_S, and no further
+    than TIMESTAMP_SLACK_S -- and is otherwise left where the file puts it.
+    FFmpeg already runs later frames on from the first by sample count, so
+    only the first one's start was ever in question.
+    """
+    origin = f"{origin_s:.9f}"
+    start = "STARTPTS*TB"
+    snapped = f"({origin}+round(({start}-{origin})*SR/NB_SAMPLES)*NB_SAMPLES/SR)"
+    unambiguous = f"gte(NB_SAMPLES/SR,{MIN_SNAP_FRAME_S})*lte(abs({snapped}-{start}),{TIMESTAMP_SLACK_S})"
+    first = f"if({unambiguous},{snapped},{start})"
+    # st/ld hold the first frame's start across frames; +0.5 because asetpts
+    # truncates to a whole tick.
+    expression = f"st(0,if(eq(N,0),{first},ld(0)));(ld(0)+N/SR)/TB+0.5"
+    return "asetpts=" + expression.replace(",", "\\,").replace(";", "\\;")
+
+
+def _runs_out(path: str, end_s: float) -> bool:
+    """Whether a window reaching ``end_s`` on the file's clock runs past the
+    end of the file, where a decode that comes back short is simply complete."""
+    try:
+        stat = os.stat(path)
+        info = _probed(path, stat.st_size, stat.st_mtime_ns, ffprobe_path())
+    except (OSError, MediaError):
+        return True
+    return info.duration is None or end_s >= info.duration - 0.5
+
+
+def _two_stage_command(
+    path: str,
+    sr: int,
+    duration: Optional[float],
+    offset: float,
+    track: int,
+    channels: int,
+    core_only: bool,
+) -> List[str]:
+    """The decode used before the exact one, and still wherever it cannot be:
+    a fast seek to SEEK_PREROLL_S before the window, then FFmpeg's own
+    accurate seek through the rest."""
     command = [ffmpeg_path(), "-nostdin"]
     if core_only:
         command.extend(["-core_only", "1"])
@@ -847,7 +1030,10 @@ def _decode(
         "-f", "f32le", "-acodec", "pcm_f32le",
         "-ar", str(sr), "-ac", str(channels), "-",
     ])
+    return command
 
+
+def _run_decode(command: List[str], path: str, track: int, token: Optional[CancellationToken]) -> bytes:
     what = os.path.basename(path)
     if track:
         what = f"{what} (track {track + 1})"
@@ -859,12 +1045,19 @@ def _decode(
         raise MediaError(describe_failure(path, exc.detail, track), exc.detail) from exc
     if not stdout:
         raise MediaError(f"No audio decoded from {os.path.basename(path)}")
+    return stdout
 
+
+def _pcm(stdout: bytes, channels: int, path: str) -> np.ndarray:
     samples = np.frombuffer(stdout, dtype=np.float32)
     if samples.size == 0:
         raise MediaError(f"No audio samples in {os.path.basename(path)}")
     if channels > 1:
         samples = samples[: samples.size - samples.size % channels].reshape(-1, channels)
+    return samples
+
+
+def _with_silence(samples: np.ndarray, silence_s: float, sr: int, channels: int) -> np.ndarray:
     if silence_s > 0.0:
         return np.concatenate([_silence(int(round(silence_s * sr)), channels), samples])
     # Copy off the read-only buffer so downstream code may write freely.

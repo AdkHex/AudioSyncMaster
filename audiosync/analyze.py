@@ -565,11 +565,20 @@ def analyze_pair(
             # around. Only at the files' own speed: a stretched dub drifts by
             # design, and its windows keep the full range.
             anchor = None
+            narrowing = rate == ANALYSIS_SR and max_offset_ms > NARROW_SEARCH_MS
+            # Before any window has found the dub, the first is searched around
+            # zero, where most pairs sit, and given the full range only if that
+            # does not settle it. The full range reads the whole of it from the
+            # dub -- two minutes of a 4K remux, a fifth of what a pair read.
+            # Nothing short of the waveforms agreeing settles it, and one try
+            # that does not is enough to stop trying.
+            near_zero = narrowing
+            from_zero = None
             for index, position in enumerate(spots):
                 if token:
                     token.raise_if_cancelled()
                 estimate = None
-                if anchor is not None and rate == ANALYSIS_SR and max_offset_ms > NARROW_SEARCH_MS:
+                if anchor is not None and narrowing:
                     narrow = _measure_window(
                         primary_path, secondary_path, position, length,
                         max_offset_ms, token, primary_track, secondary_track, rate,
@@ -580,6 +589,18 @@ def analyze_pair(
                     ):
                         estimate = narrow
                         result.search_ms = NARROW_SEARCH_MS
+                elif anchor is None and near_zero:
+                    near = _measure_window(
+                        primary_path, secondary_path, position, length,
+                        max_offset_ms, token, primary_track, secondary_track, rate,
+                        expect_ms=0.0,
+                    )
+                    if near.matched and near.confirmed:
+                        estimate = near
+                        result.search_ms = NARROW_SEARCH_MS
+                        from_zero = index
+                    else:
+                        near_zero = False
                 if estimate is None:
                     estimate = _measure_window(
                         primary_path, secondary_path, position, length,
@@ -589,6 +610,21 @@ def analyze_pair(
                     anchor = estimate.delay_ms
                 measured.append(WindowResult(position, estimate))
                 report(5 + int(75 * (index + 1) / len(spots)))
+
+            # A loop in the music can confirm a period away from a true offset
+            # that lies outside the search around zero. The windows after it
+            # then find the dub elsewhere, and the first is given the full
+            # range after all, as it always had.
+            if from_zero is not None:
+                others = [
+                    w.estimate.delay_ms for i, w in enumerate(measured)
+                    if i != from_zero and w.estimate.matched
+                ]
+                if others and abs(float(np.median(others)) - measured[from_zero].estimate.delay_ms) > NARROW_AGREEMENT_MS:
+                    measured[from_zero] = WindowResult(spots[from_zero], _measure_window(
+                        primary_path, secondary_path, spots[from_zero], length,
+                        max_offset_ms, token, primary_track, secondary_track, rate,
+                    ))
             return length, measured
 
         report(5)
