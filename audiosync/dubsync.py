@@ -4386,6 +4386,21 @@ def _split_levels(aligner: _Aligner, blocks: List[Block]) -> List[Block]:
     return out
 
 
+def _reads_as_ramp(aligner: _Aligner, block: Block, apart_s: float) -> bool:
+    """Whether a stretch's own readings lie on a line that walks at least
+    half of ``apart_s`` across it, as closely as a drift's do (see
+    DRIFT_MAX_SCATTER_MS)."""
+    found = [f for f in aligner.readings(block) if f[4] >= READING_Z]
+    if len(found) < 6:
+        return False
+    x = np.array([f[0] for f in found], dtype=np.float64)
+    y = np.array([f[1] for f in found], dtype=np.float64) * 1000.0
+    slope, intercept = _theil_sen(x, y)
+    scatter = float(np.median(np.abs(y - (slope * x + intercept))))
+    walk = abs(slope) * float(np.ptp(x))
+    return scatter <= DRIFT_MAX_SCATTER_MS and walk >= 0.5 * apart_s * 1000.0
+
+
 def _split_block_levels(aligner: _Aligner, block: Block) -> Optional[List[Block]]:
     if block.follows_drift or block.length_s < SPLIT_MIN_S:
         return None
@@ -4404,6 +4419,13 @@ def _split_block_levels(aligner: _Aligner, block: Block) -> Optional[List[Block]
         return None
     rate = ENVELOPE_RATE
     levels = [float(offsets[0] + _parabolic(total, index) / rate) for index in (first, second)]
+    # A stretch whose offset walks is one drift, not two levels: across a
+    # ramp the whole span peaks twice, either side of its middle. Its own
+    # readings lie on a line, and the drift is followed later (see
+    # _follow_drift); split here, a dub 0.3 per mille slow was cut into
+    # alternating levels 73 ms apart, and two pieces kept them.
+    if _reads_as_ramp(aligner, block, abs(levels[1] - levels[0])):
+        return None
     # The stretch's own level first: a part the path cannot vouch for
     # keeps the offset the stretch was measured at, and that level keeps
     # its exact value when a peak is it to within a few milliseconds.

@@ -38,6 +38,7 @@ from audiosync.dubsync import (  # noqa: E402
     _measure,
     _nearest_peak,
     _peak_dominance,
+    _reads_as_ramp,
     _timeline_activity,
     best_path,
     build_envelope,
@@ -1270,3 +1271,29 @@ def test_two_effects_levels_a_fraction_of_a_frame_apart_are_both_kept():
     assert len(runs) == 2, runs
     kept, _ = _Aligner._effects_rule(Stub(), found, runs, offsets_ms)
     assert [round(level) for _a, _b, level in kept] == [-1840, -1946], kept
+
+
+def test_a_drift_is_told_from_two_levels_by_its_own_readings():
+    """A stretch whose whole span peaks twice is split into two levels only
+    when its readings sit on two levels. A dub 0.3 per mille slow walks
+    through both peaks in a line; split, it was cut into pieces alternating
+    73 ms apart and two of them kept the wrong level. A dub that steps
+    52.5 ms back and forth (a real TV dub) and one that steps once are
+    two levels."""
+
+    class Stub:
+        def __init__(self, offsets):
+            self.offsets = offsets
+
+        def readings(self, block):
+            return [(t, o, 0.9, "full", 12.0) for t, o in self.offsets]
+
+    times = np.arange(30.0, 850.0, 7.5)
+    jitter = np.random.default_rng(3).normal(0.0, 0.0008, len(times))
+    ramp = [(t, -0.0897 - 0.00029 * (t - 30.0) + e) for t, e in zip(times, jitter)]
+    back_and_forth = [(t, -1.0 - (0.0525 if int(t // 30) % 2 else 0.0) + e) for t, e in zip(times, jitter)]
+    one_step = [(t, -1.0 - (0.05 if t > 440.0 else 0.0) + e) for t, e in zip(times, jitter)]
+    block = Block(30.0, 850.0, -0.2)
+    assert _reads_as_ramp(Stub(ramp), block, 0.073)
+    assert not _reads_as_ramp(Stub(back_and_forth), block, 0.0525)
+    assert not _reads_as_ramp(Stub(one_step), block, 0.05)
