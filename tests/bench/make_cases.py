@@ -13,6 +13,11 @@ record is the ground truth ``score.py`` holds a plan against.
 SOURCE.mkv: video, original audio (audio track 0) and the in-sync dub
 (audio track 1). OTHER.mkv: anything else with a dub-language track 1, for
 material that does not belong to this video (recaps, other scenes).
+
+When the source also carries the dub's background alone (track 2) and its
+voices alone (track 3) -- ``make_source.py`` writes such sources -- the
+cases where a TV studio cut the voices with the picture and the music
+elsewhere are built as well, with the voices' own ground truth.
 """
 
 from __future__ import annotations
@@ -63,6 +68,14 @@ class Case:
     channels: int = 2
     audio_filter: str = ""
     kinds: List[str] = field(default_factory=list)
+    bed_mute: List[Tuple[float, float]] = field(default_factory=list)
+    """Spans of the source (its own time) where the dub keeps its voices
+    but has lost its background: a scene the music and effects cannot
+    place, which only its lines can."""
+    voice_ops: Optional[List[tuple]] = None
+    """When set, ``ops`` cut the dub's background and these its voices: a
+    studio that cut the voices with the picture and the music where the
+    music allowed. Both remove the same amount, so the two stay one track."""
 
 
 def decode(path: str, track: int, channels: int, sr: int = SR) -> np.ndarray:
@@ -181,7 +194,27 @@ def _inserts(rng, shots: List[float], duration: float, count: int, lo: float, hi
     return ops
 
 
-def scenarios(duration: float, shots: List[float], seed: int) -> List[Case]:
+def _apart_spans(rng, shots: List[float], count: int, duration: float) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+    """Picture cuts the voices follow and the music's own cuts of the same
+    lengths, ten seconds to a minute away (measured on a real TV dub: voices
+    0.16-4.7 s off their music for up to two minutes)."""
+    voices: List[Tuple[float, float]] = []
+    music: List[Tuple[float, float]] = []
+    for a, b in _pick_cuts(rng, shots, count * 3, 0.5, 5.0, duration, margin=80.0):
+        if len(voices) >= count:
+            break
+        away = float(rng.uniform(10.0, 60.0)) * (1 if rng.random() < 0.5 else -1)
+        m = (a + away, b + away)
+        spans = voices + music
+        if m[0] < 20.0 or m[1] > duration - 20.0 or any(not (max(b, m[1]) + 5.0 < x or min(a, m[0]) > y + 5.0) for x, y in spans):
+            continue
+        voices.append((a, b))
+        music.append(m)
+    order = sorted(range(len(voices)), key=lambda i: voices[i][0])
+    return [voices[i] for i in order], sorted(music)
+
+
+def scenarios(duration: float, shots: List[float], seed: int, voices: bool = False) -> List[Case]:
     rng = np.random.default_rng(seed)
     d = duration
     whole = [("src", 0.0, d)]
@@ -244,18 +277,51 @@ def scenarios(duration: float, shots: List[float], seed: int) -> List[Case]:
     ops = ops[:k] + [("foreign", 500.0, 531.0)] + ops[k:]
     add("combo", "24 vs 23.976 fps, 20 cuts, an insert, as MP3", ops, ["speed", "cuts", "inserts", "many"],
         speed=NTSC, codec="mp3")
+    if voices:
+        apart = np.random.default_rng(seed + 1000)
+        v, m = _apart_spans(apart, shots, 4, d)
+        add("voices_apart", "4 picture cuts the voices follow and the music makes elsewhere",
+            _ops_without(m, d), ["voices", "cuts"], voice_ops=_ops_without(v, d))
+        v, m = _apart_spans(apart, shots, 4, d)
+        add("voices_apart_ntsc", "the same at 23.976 against a 24 fps video, as AAC",
+            _ops_without(m, d), ["voices", "cuts", "speed"], voice_ops=_ops_without(v, d),
+            speed=NTSC_SLOW, codec="aac")
+        # Scenes the dub has only the voices of, each just after a cut, so
+        # neither neighbour's offset reaches them.
+        mute, cuts = [], []
+        for a, b in _pick_cuts(apart, shots, 12, 20.0, 40.0, d, margin=60.0):
+            if len(mute) >= 3:
+                break
+            length = float(apart.uniform(1.0, 4.0))
+            if any(abs(a - x) < 30.0 for x, _ in mute):
+                continue
+            cuts.append((a - length, a))
+            mute.append((a, b))
+        add("bedless", "3 scenes (20-40 s) with the dub's voices but not its background, each after a 1-4 s cut",
+            _ops_without(sorted(cuts), d), ["voices", "cuts", "bedless"], bed_mute=sorted(mute),
+            voice_ops=_ops_without(sorted(cuts), d))
     return out
 
 
 # -- building ----------------------------------------------------------------
 
 
-def build(case: Case, dub: np.ndarray, foreign: np.ndarray, video: str, out_dir: str, lag: float = 0.0) -> dict:
+def build(case: Case, dub: np.ndarray, foreign: np.ndarray, video: str, out_dir: str, lag: float = 0.0,
+          stems: Optional[Tuple[np.ndarray, np.ndarray]] = None, speech: Optional[List[List[float]]] = None) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     channels = case.channels
     parts: List[np.ndarray] = []
     truth: List[dict] = []
+    voice_truth: List[dict] = []
     position = 0.0  # seconds into the dub, before any speed change
+    if case.voice_ops is not None:
+        if stems is None:
+            raise SystemExit(f"{case.name} needs a source with the dub's background and voices (tracks 2 and 3)")
+        dub = stems[0]
+        if case.bed_mute:
+            dub = dub.copy()
+            for a, b in case.bed_mute:
+                dub[int(round(a * SR)):int(round(b * SR))] = 0.0
 
     def take(source: np.ndarray, a: float, b: float) -> np.ndarray:
         i, j = int(round(a * SR)), int(round(b * SR))
@@ -276,6 +342,20 @@ def build(case: Case, dub: np.ndarray, foreign: np.ndarray, video: str, out_dir:
         parts.append(piece)
         position += len(piece) / SR
     audio = np.concatenate(parts).astype(np.float32)
+    if case.voice_ops is not None:
+        voice_parts, at = [], 0.0
+        for op in case.voice_ops:
+            piece = take(stems[1], op[1], op[2])
+            voice_truth.append({"videoStart": op[1] - lag, "videoEnd": op[2] - lag, "dubStart": at})
+            voice_parts.append(piece)
+            at += len(piece) / SR
+        voice_audio = np.concatenate(voice_parts).astype(np.float32)
+        # The two remove the same seconds; their pieces round to samples
+        # at different places, so they may differ by a sample or two.
+        if abs(len(voice_audio) - len(audio)) > 4:
+            raise SystemExit(f"{case.name}: the voices ({len(voice_audio)}) and the music ({len(audio)}) differ in length")
+        voice_audio = np.concatenate([voice_audio, np.zeros((max(0, len(audio) - len(voice_audio)), voice_audio.shape[1]), np.float32)])
+        audio = audio + voice_audio[: len(audio)]
     if channels == 1:
         audio = audio.mean(axis=1, keepdims=True)
     raw = os.path.join(out_dir, "dub.f32")
@@ -309,8 +389,11 @@ def build(case: Case, dub: np.ndarray, foreign: np.ndarray, video: str, out_dir:
 
     # Where the written file really starts against what was meant: codec
     # priming, a resampler's latency. Measured, not assumed.
-    delay = _measured_delay(target, audio, speed)
-    for piece in truth:
+    if case.speed_mode == "tempo" and abs(speed - 1.0) > 1e-9:
+        delay = _measured_delay_envelope(target, video, speed, truth, lag)
+    else:
+        delay = _measured_delay(target, audio, speed)
+    for piece in truth + voice_truth:
         piece["dubStart"] = piece["dubStart"] / speed + delay
     info = {
         "name": case.name,
@@ -325,9 +408,44 @@ def build(case: Case, dub: np.ndarray, foreign: np.ndarray, video: str, out_dir:
         "sourceLagS": lag,
         "truth": truth,
     }
+    if case.voice_ops is not None:
+        info["voiceTruth"] = voice_truth
+        # Where the dub speaks, on the video's clock: the moments the
+        # voices are judged at.
+        info["speech"] = [[a - lag, b - lag] for a, b in (speech or [])]
     json.dump(info, open(os.path.join(out_dir, "case.json"), "w"), indent=1)
     return info
 
+
+
+def _measured_delay_envelope(path: str, source: str, speed: float, truth: List[dict], lag: float) -> float:
+    """``_measured_delay`` for a dub re-timed with its pitch kept, whose
+    waveform is rebuilt by the splicing and so cannot be held against the
+    source sample by sample: the bass band's onsets are, against the
+    source's own dub track, over the longest piece."""
+    from audiosync.dubsync import ENVELOPE_RATE, build_envelope
+    rate = ENVELOPE_RATE
+    written = build_envelope(path, 0).at_speed(speed).onsets("low").astype(np.float64)
+    own = build_envelope(source, 1).onsets("low").astype(np.float64)
+    piece = max(truth, key=lambda p: p["videoEnd"] - p["videoStart"])
+    base0 = piece["videoStart"] + lag  # where the piece starts on the source's own dub track
+    width, reach = int(30 * rate), int(0.5 * rate)
+    lags = []
+    for k in range(5):
+        b = base0 + 20.0 + k * 40.0
+        if b + 40.0 > piece["videoEnd"] + lag:
+            break
+        template = own[int(b * rate): int(b * rate) + width]
+        at = piece["dubStart"] + (b - base0)  # where the written dub should have source time b
+        span = written[int(at * rate) - reach: int(at * rate) + width + reach]
+        if len(template) < width or len(span) < width + 2 * reach:
+            continue
+        c = template - template.mean()
+        r = np.array([np.dot(c, span[j:j + width] - span[j:j + width].mean()) for j in range(2 * reach + 1)])
+        lags.append((int(np.argmax(r)) - reach) / rate)
+    if not lags:
+        raise SystemExit("could not measure where the re-timed dub starts")
+    return float(np.median(lags)) / speed
 
 
 def _measured_delay(path: str, meant: np.ndarray, speed: float) -> float:
@@ -369,14 +487,22 @@ def main() -> int:
     stereo = decode(args.source, 1, 2)
     foreign = decode(args.foreign, 1, 2)
     surround: Optional[np.ndarray] = None
-    for case in scenarios(duration, shots, args.seed):
+    tracks = sum(1 for t in probe(args.source).audio_tracks)
+    stems: Optional[Tuple[np.ndarray, np.ndarray]] = None
+    speech: List[List[float]] = []
+    if tracks >= 4:
+        stems = (decode(args.source, 2, 2), decode(args.source, 3, 2))
+        lines = os.path.splitext(args.source)[0] + ".lines.json"
+        if os.path.exists(lines):
+            speech = [[float(x["laid"]), float(x["hiEnd"])] for x in json.load(open(lines))]
+    for case in scenarios(duration, shots, args.seed, voices=stems is not None):
         if args.only and case.name not in args.only:
             continue
         source, other = stereo, foreign
         if case.channels > 2:
             surround = decode(args.source, 1, case.channels) if surround is None else surround
             source, other = surround, np.repeat(foreign[:, :1], case.channels, axis=1)
-        info = build(case, source, other, args.source, os.path.join(args.out, case.name), lag)
+        info = build(case, source, other, args.source, os.path.join(args.out, case.name), lag, stems, speech)
         print(f"{case.name:14s} {case.description}  (measured start {1000 * info['measuredDelayS']:+.2f} ms)", flush=True)
     return 0
 

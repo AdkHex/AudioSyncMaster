@@ -95,13 +95,90 @@ def score(case: dict, plan: dict, duration: Optional[float] = None) -> Dict[str,
     return result
 
 
+def voices_at(plan: dict, times: np.ndarray) -> np.ndarray:
+    """Dub file time of the voices the written track plays at each video
+    time, NaN where it plays none: the plan's stretch carries them unless a
+    voice piece (see ``voicefix``) took them elsewhere, and a piece plays
+    its own at its own level."""
+    out = plan_at(plan, times)
+    speed = float(plan.get("speed") or 1.0)
+    pieces = plan.get("voicePieces") or []
+    for piece in pieces:
+        decoded = out * speed
+        moved = (decoded >= piece["dubStartS"]) & (decoded < piece["dubEndS"])
+        out[moved] = np.nan
+    for piece in pieces:
+        inside = (times >= piece["videoStartS"]) & (times < piece["videoEndS"])
+        out[inside] = (times[inside] + piece["levelS"]) / speed
+    return out
+
+
+def score_voices(case: dict, plan: dict) -> Optional[Dict[str, float]]:
+    """Where the dub's lines play against where they belong, judged only
+    while the dub speaks: on the lips (within 45 ms), off them, or gone."""
+    if "voiceTruth" not in case:
+        return None
+    duration = float(plan.get("videoDurationS") or max(p["videoEnd"] for p in case["voiceTruth"]))
+    times = np.arange(0.0, duration, STEP_S)
+    voiced = {"truth": case["voiceTruth"], "speed": case.get("speed", 1.0)}
+    want = truth_at(voiced, times)
+    got = voices_at(plan, times)
+    speaking = np.zeros(len(times), dtype=bool)
+    for a, b in case.get("speech", []):
+        speaking |= (times >= a) & (times < b)
+    judged = speaking & ~np.isnan(want) & ~near_edges(voiced, times)
+    speed = float(case.get("speed", 1.0))
+    error_ms = np.abs(got - want) * speed * 1000.0
+    placed = judged & ~np.isnan(got)
+    result = {
+        "voiceS": float(judged.sum() * STEP_S),
+        "voiceOnLipsS": float(np.sum(placed & (error_ms <= CLOSE_MS)) * STEP_S),
+        "voiceOffS": float(np.sum(placed & (error_ms > CLOSE_MS)) * STEP_S),
+        "voiceGoneS": float(np.sum(judged & np.isnan(got)) * STEP_S),
+        "voicePieces": len(plan.get("voicePieces") or []),
+    }
+    result["voicePct"] = 100.0 * result["voiceOnLipsS"] / max(result["voiceS"], 1e-9)
+    return result
+
+
 def main() -> int:
     case = json.load(open(sys.argv[1]))
     plan = json.load(open(sys.argv[2]))
     for key, value in score(case, plan).items():
+        print(f"{key:12s} {value}")
+    for key, value in (score_voices(case, plan) or {}).items():
         print(f"{key:12s} {value}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def problems(case: dict, plan: dict, min_s: float = 0.3) -> List[str]:
+    """The runs of wrong, missed and false time, in words."""
+    duration = float(plan.get("videoDurationS") or max(p["videoEnd"] for p in case["truth"]))
+    times = np.arange(0.0, duration, STEP_S)
+    want, got = truth_at(case, times), plan_at(plan, times)
+    keep = ~near_edges(case, times)
+    speed = float(case.get("speed", 1.0))
+    err = (got - want) * speed * 1000.0
+    label = np.full(len(times), "", dtype=object)
+    both = ~np.isnan(want) & ~np.isnan(got)
+    label[both & (np.abs(err) > CLOSE_MS)] = "wrong"
+    label[~np.isnan(want) & np.isnan(got)] = "missed"
+    label[np.isnan(want) & ~np.isnan(got)] = "false"
+    label[~keep] = ""
+    out, i = [], 0
+    while i < len(times):
+        if not label[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(times) and label[j + 1] == label[i]:
+            j += 1
+        if (j - i + 1) * STEP_S >= min_s:
+            extra = f" by {np.nanmedian(err[i:j + 1]):+.0f} ms" if label[i] == "wrong" else ""
+            out.append(f"{label[i]:6s} {times[i]:8.2f}-{times[j] + STEP_S:8.2f} ({(j - i + 1) * STEP_S:5.1f}s){extra}")
+        i = j + 1
+    return out

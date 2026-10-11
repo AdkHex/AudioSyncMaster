@@ -21,25 +21,30 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from score import score  # noqa: E402
+from score import score, score_voices  # noqa: E402
 
 RUNNER = """
 import json, os, sys, time
-engine, video, vt, dub, dt, out = sys.argv[1:7]
+engine, video, vt, dub, dt, out, voices = sys.argv[1:8]
 sys.path.insert(0, engine)
 from audiosync.dubsync import plan_dubsync
 started = time.monotonic()
 lines = []
 plan = plan_dubsync(video, dub, video_track=int(vt), dub_track=int(dt), log=lines.append)
+if voices == "1" and not plan.error:
+    from audiosync.voicefix import check_voices
+    plan.voice_pieces = check_voices(plan, log=lines.append)
 data = plan.to_dict()
 data["_seconds"] = time.monotonic() - started
 data["_log"] = lines
-json.dump(data, open(out + ".part", "w"), indent=1)
+# An older engine's plan may hold numpy values its own JSON could not
+# write (fixed since); they are written here so its placement is scored.
+json.dump(data, open(out + ".part", "w"), indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
 os.replace(out + ".part", out)
 """
 
 
-def plan_case(engine: str, path: str, case: dict, out: str) -> str:
+def plan_case(engine: str, path: str, case: dict, out: str, voices: bool = False) -> str:
     if os.path.exists(out):
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -47,7 +52,7 @@ def plan_case(engine: str, path: str, case: dict, out: str) -> str:
     env.pop("PYTHONPATH", None)
     completed = subprocess.run(
         [sys.executable, "-c", RUNNER, path, case["video"], str(case.get("videoTrack", 0)),
-         case["dub"], str(case.get("dubTrack", 0)), out],
+         case["dub"], str(case.get("dubTrack", 0)), out, "1" if voices and "voiceTruth" in case else "0"],
         capture_output=True, text=True, env=env, timeout=4 * 3600,
     )
     if completed.returncode != 0:
@@ -62,6 +67,8 @@ def main() -> int:
     parser.add_argument("--engine", action="append", required=True, help="name=checkout")
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--only", nargs="*")
+    parser.add_argument("--voices", action="store_true",
+                        help="run the voice check on the cases that judge the voices (needs the voice tools)")
     args = parser.parse_args()
     engines = [tuple(e.split("=", 1)) for e in args.engine]
     cases = []
@@ -75,7 +82,8 @@ def main() -> int:
     work = [(name, os.path.abspath(path), case) for case in cases for name, path in engines]
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = {
-            pool.submit(plan_case, path, path, case, os.path.join(args.out, name, case["_id"].replace("/", "__") + ".json")): (name, case)
+            pool.submit(plan_case, path, path, case, os.path.join(args.out, name, case["_id"].replace("/", "__") + ".json"),
+                        args.voices): (name, case)
             for name, path, case in work
         }
         for future in futures:
@@ -99,11 +107,14 @@ def main() -> int:
                 totals[name]["missedS"] += sum(p["videoEnd"] - p["videoStart"] for p in case["truth"])
                 continue
             s = score(case, plan)
-            rows.append({"case": case["_id"], "engine": name, **s})
+            v = score_voices(case, plan)
+            rows.append({"case": case["_id"], "engine": name, **s, **(v or {})})
             for key in totals[name]:
                 totals[name][key] += s[key]
             line += (f" | {s['correctPct']:5.1f}% w{s['wrongS']:6.1f} m{s['missedS']:6.1f} "
                      f"f{s['falseS']:5.1f} {s['seconds']:5.0f}s")
+            if v is not None:
+                line += f" voices {v['voicePct']:5.1f}%"
         print(line, flush=True)
     print("-" * len(header))
     line = f"{'TOTAL':24s}"
