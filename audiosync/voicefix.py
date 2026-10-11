@@ -874,15 +874,23 @@ def check_voices(plan, token: Optional[CancellationToken] = None, progress: Opti
     if not voicetools.installed():
         say("voices: not checked -- the voice tools are not installed (Dub sync settings: Voice check)")
         return []
-    if abs(plan.speed - 1.0) > 1e-9:
-        say("voices: not checked -- the dub plays at a changed speed, which the voice check does not handle yet")
-        return []
     readers: Dict[Tuple[str, int], object] = {}
+    # The dub is read the way the render reads it: at the plan's speed, on
+    # the timeline the plan's offsets are on, from its own sample rate so a
+    # standard frame-rate conversion is exact (see dubrender._decode_plan).
+    # A speed of 1 is the plain read it always was.
+    from .media import probe
+    dub_info = probe(plan.dub_path, token)
+    dub_native = (dub_info.audio_tracks[plan.dub_track].sample_rate
+                  if plan.dub_track < len(dub_info.audio_tracks) else None) or dub_info.sample_rate
 
     def reader(path: str, track: int, rate: int, channels: int):
         key = (path, track, rate, channels)
         if key not in readers:
-            readers[key] = _TrackReader(path, track, rate, channels, 1.0, "resample", token)
+            if path == plan.dub_path and track == plan.dub_track:
+                readers[key] = _TrackReader(path, track, rate, channels, plan.speed, "resample", token, dub_native)
+            else:
+                readers[key] = _TrackReader(path, track, rate, channels, 1.0, "resample", token)
         return readers[key]
 
     def read_video(rate: int, start: int, count: int) -> np.ndarray:

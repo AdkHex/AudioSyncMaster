@@ -28,8 +28,10 @@ from audiosync.dubsync import (  # noqa: E402
     Block,
     _Aligner,
     DubSyncPlan,
+    _consistent_in_gap,
     _continuing_candidate,
     _follow_effects,
+    _join_overlapping,
     _level_runs,
     _measure,
     _nearest_peak,
@@ -1105,3 +1107,77 @@ def test_an_effects_stretch_sits_where_its_own_lines_do():
     ]
     _follow_effects(aligner, blocks)
     assert blocks[0].offset_s == -130.166 and blocks[0].effects is True
+
+
+def test_stretches_at_one_measured_offset_that_overlap_are_joined():
+    kept = Block(0.0, 100.0, -22.037)
+    found = Block(95.0, 110.0, -22.0372)
+    after = Block(130.0, 200.0, -40.98)
+    joined = _join_overlapping([kept, found, after])
+    assert len(joined) == 2 and joined[0].end_s == 110.0
+
+
+def test_a_trim_of_a_frame_is_never_joined_over():
+    first = Block(0.0, 100.0, -1.5501)
+    second = Block(100.02, 200.0, -1.566)
+    assert len(_join_overlapping([first, second])) == 2
+
+
+def test_a_gap_keeps_far_pieces_only_where_they_play_dub_nobody_else_does():
+    """The gap search reaches past its neighbours' offsets for the dub they
+    left unplayed -- a cut and an insert in one gap, a TV edit's usual. A
+    piece found out there is kept in the dub's own order; one that would
+    play dub a neighbour already plays (a recurring cue) is dropped."""
+    before = Block(0.0, 100.0, 0.0)            # dub 0-100
+    after = Block(160.0, 300.0, 60.0)          # dub 220-360: 60 s inserted
+    in_order = Block(100.0, 110.0, 100.0, support=9.0)   # dub 200-210, unplayed
+    replayed = Block(120.0, 130.0, -100.0, support=12.0)  # dub 20-30, played by ``before``
+    near = Block(150.0, 158.0, 62.0, support=7.0)           # dub 212-220
+    kept = _consistent_in_gap([in_order, replayed, near], (-3.0, 63.0), [before, after])
+    assert [b.offset_s for b in kept] == [100.0, 62.0], kept
+    # Without neighbours either side, nothing narrows the search: all stand.
+    assert len(_consistent_in_gap([in_order, replayed], None, [before])) == 2
+
+
+def _stereo_pair(ws, total_s, replaced=None, bed_kept=True):
+    """org.wav and dub.wav in stereo: each side of the bed its own, the
+    dialogue in the centre, as a film's mix is. ``replaced`` = (a, b): the
+    dub has another scene there, of the same length -- another bed, other
+    lines -- so the offsets either side are the same."""
+    bed = np.stack([_bed(total_s, 11), _bed(total_s, 12)], axis=1)
+    floor = 1e-3
+    noise = lambda seed: floor * np.random.default_rng(seed).standard_normal((len(bed), 2))  # noqa: E731
+    org = 0.6 * bed + 0.8 * _dialogue(total_s, seed=22)[:, None] + noise(5)
+    dub = 0.48 * bed + 0.8 * _dialogue(total_s, seed=33)[:, None] + noise(6)
+    if replaced:
+        a, b = int(replaced[0] * SR), int(replaced[1] * SR)
+        other = np.stack([_bed(replaced[1] - replaced[0], 77), _bed(replaced[1] - replaced[0], 78)], axis=1)
+        lines = 0.8 * _dialogue(replaced[1] - replaced[0], seed=44)[:, None]
+        dub[a:b] = (0.48 * other if not bed_kept else 0.48 * bed[a:b]) + lines + noise(7)[a:b]
+    sf.write(ws.path("org.wav"), org.astype(np.float32), SR)
+    sf.write(ws.path("dub.wav"), dub.astype(np.float32), SR)
+
+
+def test_a_scene_replaced_at_the_same_offset_is_filled_not_bridged():
+    """A dub that carries another scene where the video has this one --
+    another cue, other lines, the same length -- meets the video at the
+    same offset on both sides of it. Bridging that would play the wrong
+    scene over the picture; the original plays there, and the plan says
+    why."""
+    with Workspace() as ws:
+        _stereo_pair(ws, 400, replaced=(150.0, 200.0), bed_kept=False)
+        plan = _plan(ws)
+        filled = sum(min(f.end_s, 200.0) - max(f.start_s, 150.0) for f in plan.fill_segments
+                     if f.end_s > 150.0 and f.start_s < 200.0)
+        assert filled >= 40.0, plan.describe()
+        assert any("the dub has something else there" in n for n in plan.notes), plan.notes
+
+
+def test_a_scene_with_other_lines_over_the_same_bed_is_kept():
+    """The same span with the video's own bed under other lines is the
+    dub's scene, however weakly the full mix agrees: nothing is filled."""
+    with Workspace() as ws:
+        _stereo_pair(ws, 400, replaced=(150.0, 200.0), bed_kept=True)
+        plan = _plan(ws)
+        assert not [f for f in plan.fill_segments if f.length_s > 1.0], plan.describe()
+        assert not any("something else there" in n for n in plan.notes), plan.notes

@@ -44,6 +44,7 @@ carry over to windows of a different length.
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import threading
@@ -113,6 +114,57 @@ EFFECTS_VOTE_SLACK_S = 0.012
 SPEECH_ARBITER_S = 0.08
 SPEECH_PREFER_Z = 2.5
 SPEECH_PREFER_MARGIN = 1.0
+
+# The last look at every cut: the sound around it, VERIFY_CUT_REACH_S either
+# way, may say the switch from one offset to the next lies elsewhere --
+# where an early, coarse bracket or a picture cut chosen without the sound
+# left it. Moved only when, across the span between the two, the offset
+# that should play there agrees better than the one that does with a
+# t-statistic of VERIFY_CUT_Z, and at least VERIFY_CUT_MIN_MOVE_S away.
+VERIFY_CUT_REACH_S = 6.0
+VERIFY_CUT_SIDE_S = 4.0
+VERIFY_CUT_Z = 3.0
+VERIFY_CUT_MIN_MOVE_S = 0.2
+VERIFY_CUT_MIN_STEP_S = 0.02
+VERIFY_CUT_SNAP_S = 0.06
+# A step this small is between two levels of one scene -- a trim of a few
+# frames, or a dub whose background holds two copies of itself a tenth of a
+# second apart -- where the music agrees at both and the effects decide
+# (see BANDS): the cut is judged on the effects band alone.
+VERIFY_CUT_SMALL_STEP_S = 0.3
+
+# A span where the dub has something other than the video -- a replaced
+# scene, an insert laid into a gap -- is told from a quiet one the offsets
+# simply did not reach: there both tracks carry music and effects (the
+# bass and the stereo difference, where centred dialogue does not reach),
+# and they agree nowhere near the offset, in every band, for at least
+# FOREIGN_MIN_S. What "agree" means is read off the pair itself: half the
+# level a quarter of its own placed windows fall below -- a quartile, so a
+# replaced scene inside the stretches sampled cannot drag it down -- held
+# between FOREIGN_LIMIT_FLOOR and FOREIGN_LIMIT_CEIL, since a TV dub off
+# another master agrees far less than two tracks of one Blu-ray.
+FOREIGN_MIN_S = 10.0
+FOREIGN_WINDOW_S = 4.0
+FOREIGN_HOP_S = 2.0
+FOREIGN_REACH_S = 0.25
+FOREIGN_BANDS = ("full", "low", "side")
+FOREIGN_ACTIVE = 0.5
+FOREIGN_LIMIT_PERCENTILE = 25.0
+FOREIGN_LIMIT_SHARE = 0.5
+FOREIGN_LIMIT_FLOOR = 0.10
+FOREIGN_LIMIT_CEIL = 0.35
+FOREIGN_CALIBRATION_MIN = 30
+# The dub's lines following the video's this clearly at the offset say the
+# scene is the same after all (its music replaced, say), and it is kept.
+FOREIGN_SPEECH_Z = 4.0
+# Windows can each agree too little and the span still be the video's --
+# a passage whose effects were mixed differently. Over the whole span, the
+# agreement at the offset (every band, half a second at a time) must show
+# nothing: a t-statistic under FOREIGN_MAX_T. Measured: a replaced scene
+# reads -2.2 to +0.5, a weakly agreeing passage of the right scene 4.5, a
+# plain one 14 to 20.
+FOREIGN_MAX_T = 2.0
+FOREIGN_T_BLOCK_S = 0.5
 # A reading whose peak is not this far above its own row found nothing:
 # the tallest of a few hundred chance offsets reaches three, of a
 # thousand three and a half.
@@ -253,6 +305,14 @@ GAP_POOL = 1
 # gap with only one neighbour, how far beyond the gap's own length, up to
 # a cap that keeps the head and tail searches bounded.
 RECOVER_SLACK_S = 3.0
+# How far past its neighbours' offsets a gap is searched for dub nobody
+# has played yet (see ``_recover_from_gaps``).
+GAP_UNUSED_MAX_S = 180.0
+# A stretch found in a gap at its neighbour's measured offset, and
+# overlapping it by more than this, is the neighbour reaching further.
+# Only an overlap: pieces that merely meet were kept apart for a reason,
+# and joined, a faint scene's offset was measured 12 ms out.
+RECOVER_JOIN_OVERLAP_S = 0.01
 GAP_ONE_SIDED_MAX_S = 120.0
 # The path costs inside a gap. A few hundred offsets, not a quarter of a
 # million, so the largest coincidence is under four noise units, a jump
@@ -400,7 +460,12 @@ EDGE_KEEP_MAX_S = 30.0
 # where a wrongly placed step would misplace no more than
 # BRIDGE_EXPOSURE_S of dub. Beyond both, the original fills it.
 BRIDGE_STEP_S = 2.0
-BRIDGE_EXPOSURE_S = 5.0
+# A step larger than BRIDGE_STEP_S that nothing placed puts whatever lands
+# on the wrong side of it seconds away -- another moment of the film, not
+# a lip a little out -- so only a second of it is risked; past that the
+# original fills the gap. At five seconds a 22 s step was guessed across a
+# gap and 4.6 s of an insert played over the picture.
+BRIDGE_EXPOSURE_S = 1.0
 # A step the sound placed, with no shot change to confirm it, keeps the dub
 # across a gap only while a misplaced step could misplace at most this much
 # of it; a step on a picture cut, however long the gap.
@@ -2072,6 +2137,11 @@ class _Aligner:
         saying what the sync rests on (see ``_evidence_note``)."""
         self._standardized: dict = {}
         self._pooled: dict = {}
+        self.foreign: List[Tuple[float, float]] = []
+        """Spans of the video the dub has something else for (see
+        ``_split_foreign``): never bridged by the assembly."""
+        self.foreign_limits: Optional[Dict[str, float]] = None
+        self._activity: dict = {}
 
     @property
     def shared_bands(self) -> List[str]:
@@ -3342,6 +3412,7 @@ def plan_dubsync(
             blocks, primary.duration_s, secondary.duration_s, primary, secondary,
             keep_unmatched_dub, plan.warnings, plan.notes, aligner, doubt,
         )
+        _verify_cuts(aligner, plan.segments, plan.notes)
         plan.doubt_s = sum(hi - lo for lo, hi in doubt)
         for lo, hi in sorted(doubt, key=lambda span: span[0] - span[1])[:REVIEW_DOUBT_MAX]:
             plan.warnings.append(
@@ -3708,31 +3779,48 @@ def _try_speeds(
         return None
     usable = primary.duration_s - window_s
     picks = [int(round((usable * (i + 1)) / (SPEED_TRIAL_WINDOWS + 1) * rate)) for i in range(SPEED_TRIAL_WINDOWS)]
-    primary_pooled = _pool(primary.onset, pool)
 
-    def trial_peak(envelope: TrackEnvelope) -> float:
+    def trial_peak(envelope: TrackEnvelope, bands: Sequence[str] = ("full",)) -> float:
+        """The trial windows' typical peak. With several bands, each window
+        counts its strongest band: a dub re-timed with its pitch kept (a
+        PAL transfer done the modern way) has its transients smeared by the
+        splicing, so the full mix barely correlates, while the bass keeps
+        its shape."""
         lo_s = -(max(0.0, primary.duration_s - envelope.duration_s) + search_s)
         hi_s = max(0.0, envelope.duration_s - primary.duration_s) + search_s
-        scores = score_windows(
-            primary_pooled, _pool(envelope.onset, pool), rate, picks, window,
-            int(round(lo_s * rate)), int(round(hi_s * rate)), aligner.token,
-        ).scores
-        return float(np.median(scores.max(axis=1)))
+        best_per_window: Optional[np.ndarray] = None
+        for band in bands:
+            if band != "full" and (band not in primary.band_onset or band not in envelope.band_onset):
+                continue
+            scores = score_windows(
+                _pool(primary.onsets(band), pool), _pool(envelope.onsets(band), pool), rate, picks, window,
+                int(round(lo_s * rate)), int(round(hi_s * rate)), aligner.token,
+            ).scores.max(axis=1)
+            best_per_window = scores if best_per_window is None else np.maximum(best_per_window, scores)
+        return float(np.median(best_per_window)) if best_per_window is not None else 0.0
 
-    baseline = trial_peak(aligner.secondary)
-    say(f"  at the files' own speed the trial windows peak at {baseline:.1f} noise units")
-    if trials is not None:
-        trials[aligner.secondary.speed] = baseline
-
-    best: Optional[Tuple[float, TrackEnvelope]] = None
-    for candidate, _mastering_rate in candidates:
-        trial = secondary_native.at_speed(candidate)
-        peak = trial_peak(trial)
-        say(f"  trying {candidate:.6f}x: peak {peak:.1f} noise units")
+    def ask(bands: Sequence[str]) -> Optional[Tuple[float, TrackEnvelope]]:
+        baseline = trial_peak(aligner.secondary, bands)
+        say(f"  at the files' own speed the trial windows peak at {baseline:.1f} noise units")
         if trials is not None:
-            trials[candidate] = peak
-        if peak >= max(SPEED_MIN_Z, SPEED_GAIN * baseline) and (best is None or peak > best[0]):
-            best = (peak, trial)
+            trials[aligner.secondary.speed] = max(baseline, trials.get(aligner.secondary.speed, 0.0))
+        best: Optional[Tuple[float, TrackEnvelope]] = None
+        for candidate, _mastering_rate in candidates:
+            trial = secondary_native.at_speed(candidate)
+            peak = trial_peak(trial, bands)
+            say(f"  trying {candidate:.6f}x: peak {peak:.1f} noise units")
+            if trials is not None:
+                trials[candidate] = max(peak, trials.get(candidate, 0.0))
+            if peak >= max(SPEED_MIN_Z, SPEED_GAIN * baseline) and (best is None or peak > best[0]):
+                best = (peak, trial)
+        return best
+
+    best = ask(("full",))
+    if best is None:
+        others = [b for b in aligner.detect_bands if b != "full"]
+        if others:
+            say(f"  the full mix does not settle the speed; asking the {' and the '.join(others)} band as well")
+            best = ask(["full"] + others)
     if best is not None:
         say(f"dub runs at {best[1].speed:.6f}x the video's speed")
         return best[1]
@@ -3776,6 +3864,7 @@ def _refine(
         blocks = _credible(
             _measure_and_split(aligner, sorted(blocks + recovered, key=lambda b: b.start_s)), aligner
         )
+        blocks = _join_overlapping(blocks)
         _place_all_edges(aligner, blocks, primary_s, secondary_s)
         show(blocks)
 
@@ -3818,6 +3907,10 @@ def _refine(
     # A gap the dub has the material for, between two offsets, is followed
     # through second by second.
     blocks = _trace_gaps(aligner, blocks, secondary_s, notes, warnings)
+    # Where the dub carries another scene inside a stretch -- replaced, or
+    # an insert the offsets either side happen to meet across -- the
+    # original plays, and the assembly does not bridge it again.
+    blocks = _split_foreign(aligner, blocks, notes)
     show(blocks)
     return blocks
 
@@ -5105,6 +5198,113 @@ def _sharpen(
                 before.end_lo, before.end_hi = after.start_lo - gap, after.start_hi - gap
 
 
+def _verify_cuts(aligner: "_Aligner", segments: List[Segment], notes: Optional[List[str]]) -> None:
+    """The last look at every cut of the assembled plan (see
+    VERIFY_CUT_REACH_S): where the sound on either side clearly puts the
+    switch from one stretch's offset to the next's elsewhere, the cut
+    moves there -- with the frames the dub lacks still filled between
+    the two -- and onto a shot change when one is that close."""
+    rate = ENVELOPE_RATE
+    side = int(VERIFY_CUT_SIDE_S * rate)
+    reach = VERIFY_CUT_REACH_S
+    index = 0
+    while index < len(segments) - 1:
+        first = segments[index]
+        between: Optional[Segment] = None
+        second = segments[index + 1]
+        if second.kind != "dub" and index + 2 < len(segments):
+            between, second = second, segments[index + 2]
+        index += 1
+        if first.kind != "dub" or second.kind != "dub" or first.offset_s is None or second.offset_s is None:
+            continue
+        step = first.offset_s - second.offset_s
+        if abs(step) < VERIFY_CUT_MIN_STEP_S:
+            continue
+        hole = max(step, 0.0)
+        gap = second.start_s - first.end_s
+        if abs(gap - hole) > 0.05:
+            continue  # a fill of another kind sits between: not a plain cut
+        bands = (["high"] if abs(step) < VERIFY_CUT_SMALL_STEP_S and "high" in aligner.shared_bands else None)
+        cut = first.end_s
+        lo = max(first.start_s + VERIFY_CUT_SIDE_S, cut - reach)
+        hi = min(second.end_s - VERIFY_CUT_SIDE_S - hole, cut + reach)
+        if hi - lo < 2 * VERIFY_CUT_MIN_MOVE_S:
+            continue
+        before = aligner.agreement(first.offset_s, lo - VERIFY_CUT_SIDE_S, hi, bands)
+        after = aligner.agreement(second.offset_s, lo + hole, hi + hole + VERIFY_CUT_SIDE_S, bands)
+        if len(before) < side + 2 or len(after) < side + 2:
+            continue
+        cb = np.concatenate([[0.0], np.cumsum(before)])
+        ca = np.concatenate([[0.0], np.cumsum(after)])
+        count = min(len(before) - side, len(after) - side)
+        idx = np.arange(0, count, max(1, int(0.01 * rate)))
+        score = (cb[idx + side] - cb[idx]) + (ca[idx + side] - ca[idx])
+        moved = float(lo + idx[int(np.argmax(score))] / rate)
+        if abs(moved - cut) < VERIFY_CUT_MIN_MOVE_S:
+            continue
+        # Only the span between where the cut is and where the sound would
+        # put it is in dispute: across it, the offset that should play
+        # there must agree clearly better than the one that does, block by
+        # block -- a t-statistic over quarter seconds, which a loud passage
+        # elsewhere in the reach cannot sway.
+        a, b = sorted((cut, moved))
+        keep = aligner.agreement(first.offset_s, a, b, bands)
+        other = aligner.agreement(second.offset_s, a + hole, b + hole, bands)
+        n = min(len(keep), len(other))
+        gain = (keep[:n] - other[:n]) if moved > cut else (other[:n] - keep[:n])
+        block = max(1, int(0.25 * rate))
+        means = np.array([gain[i:i + block].mean() for i in range(0, n - block + 1, block)])
+        if len(means) < 3:
+            continue
+        t_stat = float(means.mean()) / (float(means.std(ddof=1)) / np.sqrt(len(means)) + 1e-9)
+        if t_stat < VERIFY_CUT_Z:
+            continue
+        if aligner.picture is not None:
+            shots = aligner.picture.within(moved - VERIFY_CUT_SNAP_S, moved + VERIFY_CUT_SNAP_S)
+            if shots:
+                moved = min(shots, key=lambda c: abs(c - moved))
+        if notes is not None:
+            notes.append(
+                f"the cut at {_clock(cut)} moved to {_clock(moved)}: the sound on either side puts the switch "
+                f"from {first.offset_s:+.3f}s to {second.offset_s:+.3f}s there"
+            )
+        # What lies between moves with the cut as it is: a fill of the
+        # frames the dub lacks, or nothing when the assembly let the two
+        # pieces meet. Setting the gap to the step instead opened a hole of
+        # 40 ms where they had met, and every sample after it was written
+        # 40 ms early.
+        first.end_s = moved
+        if between is not None:
+            between.start_s, between.end_s = moved, moved + gap
+            between.source_start_s = moved
+        second.start_s = moved + gap
+        second.source_start_s = second.start_s + second.offset_s
+
+
+def _join_overlapping(blocks: List[Block]) -> List[Block]:
+    """Stretches that overlap at one measured offset are one stretch: a piece found in a gap that reaches back over its
+    neighbour is that neighbour reaching further than its first edge
+    said. Joined, the edge is placed again on what the stretch really
+    covers; left apart, each got an edge of its own, the two crossed, and
+    the found piece was dropped as noise, with the cut left seconds early
+    where the coarse pass had put it. Offsets are compared as measured, to
+    SAME_OFFSET_S, so a trim of a frame is never joined over."""
+    out: List[Block] = []
+    for block in sorted(blocks, key=lambda b: b.start_s):
+        if out:
+            last = out[-1]
+            if (abs(block.offset_s - last.offset_s) <= SAME_OFFSET_S
+                    and block.start_s < last.end_s - RECOVER_JOIN_OVERLAP_S
+                    and not (last.follows_drift or block.follows_drift)):
+                if block.end_s > last.end_s:
+                    last.end_s = block.end_s
+                    last.end_lo, last.end_hi = block.end_lo, block.end_hi
+                    last.end_cut = block.end_cut
+                continue
+        out.append(block)
+    return out
+
+
 def _recover_from_gaps(
     aligner: _Aligner, blocks: List[Block], primary_s: float, secondary_s: float
 ) -> List[Block]:
@@ -5144,9 +5344,21 @@ def _recover_from_gaps(
         # length either way, since that is the most the dub could lack or
         # have extra here.
         offsets = [b.offset_s for b in (before, after) if b is not None]
+        narrow: Optional[Tuple[float, float]] = None
         if len(offsets) == 2:
             lo_s = min(offsets) - RECOVER_SLACK_S
             hi_s = max(offsets) + RECOVER_SLACK_S
+            narrow = (lo_s, hi_s)
+            # Unless the gap holds both at once -- a cut and an insert, a
+            # TV edit's usual -- when its pieces sit anywhere the dub not
+            # yet played between the two neighbours can reach: from the
+            # dub where the stretch before ends to where the one after
+            # begins, laid anywhere in the gap.
+            dub_lo = before.end_s + before.offset_s
+            dub_hi = after.start_s + after.offset_s
+            if dub_hi - dub_lo > RECOVER_SLACK_S:
+                lo_s = max(min(lo_s, dub_lo - gap_hi - RECOVER_SLACK_S), min(offsets) - GAP_UNUSED_MAX_S)
+                hi_s = min(max(hi_s, dub_hi - gap_lo + RECOVER_SLACK_S), max(offsets) + GAP_UNUSED_MAX_S)
         else:
             reach = min(gap_s, GAP_ONE_SIDED_MAX_S) + RECOVER_SLACK_S
             lo_s = offsets[0] - reach
@@ -5160,6 +5372,7 @@ def _recover_from_gaps(
         # finer ones left, so a loud scene's cuts are placed by the short
         # windows and a quiet scene is still found by the long ones.
         uncovered: List[Tuple[float, float]] = [(gap_lo, gap_hi)]
+        in_gap: List[Block] = []
         for window_s in GAP_WINDOWS_S:
             remaining: List[Tuple[float, float]] = []
             for sub_lo, sub_hi in uncovered:
@@ -5169,7 +5382,7 @@ def _recover_from_gaps(
                     aligner, pool, rate, sub_lo, sub_hi, lo_s, hi_s,
                     min(window_s, sub_hi - sub_lo), secondary_s,
                 )
-                found.extend(pieces)
+                in_gap.extend(pieces)
                 cursor = sub_lo
                 for piece in sorted(pieces, key=lambda b: b.start_s):
                     if piece.start_s - cursor >= RECOVER_MIN_S:
@@ -5180,7 +5393,41 @@ def _recover_from_gaps(
             uncovered = remaining
             if not uncovered:
                 break
+        found.extend(_consistent_in_gap(in_gap, narrow, [b for b in (before, after) if b is not None]))
     return found
+
+
+def _consistent_in_gap(pieces: List[Block], narrow: Optional[Tuple[float, float]],
+                       neighbours: List[Block]) -> List[Block]:
+    """The pieces found in one gap that can stand together. One found at an
+    offset near its neighbours' is kept as found; one the wider search
+    found further out (see ``_recover_from_gaps``) only where it plays dub
+    nothing else claims, in the dub's own order against the neighbours and
+    the near pieces. A film repeats its music: on a real episode the wider
+    search matched a scene the dub lacks to a cue the dub plays a minute
+    later, and that piece then took its dub from the true stretch."""
+    if narrow is None:
+        return pieces
+    near = [p for p in pieces if narrow[0] <= p.offset_s <= narrow[1]]
+    anchors = neighbours + near
+    kept = list(near)
+    for piece in sorted((p for p in pieces if not narrow[0] <= p.offset_s <= narrow[1]), key=lambda p: -p.support):
+        d0, d1 = piece.start_s + piece.offset_s, piece.end_s + piece.offset_s
+        fits = True
+        for other in anchors:
+            a0, a1 = other.start_s + other.offset_s, other.end_s + other.offset_s
+            if min(d1, a1) - max(d0, a0) > RECOVER_SLACK_S:
+                fits = False  # the same dub twice
+            elif other.end_s <= piece.start_s + 1e-6 and a1 > d0 + RECOVER_SLACK_S:
+                fits = False  # before it in the video, after it in the dub
+            elif other.start_s >= piece.end_s - 1e-6 and a0 < d1 - RECOVER_SLACK_S:
+                fits = False  # after it in the video, before it in the dub
+            if not fits:
+                break
+        if fits:
+            kept.append(piece)
+            anchors.append(piece)
+    return sorted(kept, key=lambda p: p.start_s)
 
 
 def _gap_candidates(grid: ScoreGrid, floor: float, window_s: float) -> List[Block]:
@@ -5726,6 +5973,293 @@ def _step_words(step_s: float) -> str:
     return f"{step_s:+.3f} s" if abs(step_s) >= 1.0 else f"{step_s * 1000.0:+.0f} ms"
 
 
+# ---------------------------------------------------------------------------
+# Something else in the dub: a replaced scene, an insert laid into a gap
+# ---------------------------------------------------------------------------
+
+
+def _foreign_bands(aligner: "_Aligner") -> List[str]:
+    return [b for b in FOREIGN_BANDS if b == "full" or b in aligner.shared_bands]
+
+
+def _typical_activity(aligner: "_Aligner", which: str, band: str) -> float:
+    """The median spread of a track's onsets over FOREIGN_WINDOW_S windows:
+    what "something is happening in this band" looks like for this track."""
+    key = (which, band)
+    if key not in aligner._activity:
+        x = aligner.onsets(which, band).astype(np.float64)
+        w, h = int(FOREIGN_WINDOW_S * ENVELOPE_RATE), int(FOREIGN_HOP_S * ENVELOPE_RATE)
+        if len(x) < w:
+            aligner._activity[key] = 0.0
+        else:
+            ones = np.concatenate([[0.0], np.cumsum(x)])
+            squares = np.concatenate([[0.0], np.cumsum(x * x)])
+            starts = np.arange(0, len(x) - w + 1, h)
+            mean = (ones[starts + w] - ones[starts]) / w
+            var = np.maximum((squares[starts + w] - squares[starts]) / w - mean * mean, 0.0)
+            aligner._activity[key] = float(np.median(np.sqrt(var)))
+    return aligner._activity[key]
+
+
+def _active(aligner: "_Aligner", which: str, band: str, start: int, width: int) -> bool:
+    x = aligner.onsets(which, band)[max(0, start):max(0, start) + width]
+    typical = _typical_activity(aligner, which, band)
+    return len(x) == width and typical > 0.0 and float(np.std(x)) >= FOREIGN_ACTIVE * typical
+
+
+def _window_agreement(aligner: "_Aligner", band: str, t: float, lo_off: float, hi_off: float) -> Optional[float]:
+    """The best agreement of one FOREIGN_WINDOW_S window of the video, at
+    ``t``, with the dub anywhere from ``lo_off`` to ``hi_off`` (and
+    FOREIGN_REACH_S either side); None where the dub has no such span."""
+    rate = ENVELOPE_RATE
+    w, reach = int(FOREIGN_WINDOW_S * rate), int(FOREIGN_REACH_S * rate)
+    a, b = aligner.onsets("primary", band), aligner.onsets("secondary", band)
+    s = int(round(t * rate))
+    first = int(round((t + lo_off) * rate)) - reach
+    last = int(round((t + hi_off) * rate)) + w + reach
+    if s < 0 or s + w > len(a) or first < 0 or last > len(b):
+        return None
+    row = ncc_lags(a[s:s + w], b[first:last])
+    return float(row.max()) if row.size else None
+
+
+def _calibrate_foreign(aligner: "_Aligner", blocks: List[Block]) -> Optional[Dict[str, float]]:
+    """Per band, the agreement below which this pair is not itself (see
+    FOREIGN_LIMIT_PERCENTILE); None when too little is placed to say."""
+    samples: Dict[str, List[float]] = {b: [] for b in _foreign_bands(aligner)}
+    w = int(FOREIGN_WINDOW_S * ENVELOPE_RATE)
+    for block in blocks:
+        t = block.start_s + 1.0
+        while t + FOREIGN_WINDOW_S <= block.end_s - 1.0:
+            s = int(round(t * ENVELOPE_RATE))
+            for band in samples:
+                if band != "full" and not (_active(aligner, "primary", band, s, w) and _active(
+                        aligner, "secondary", band, s + int(round(block.offset_s * ENVELOPE_RATE)), w)):
+                    continue
+                value = _window_agreement(aligner, band, t, block.offset_s, block.offset_s)
+                if value is not None:
+                    samples[band].append(value)
+            t += 3 * FOREIGN_HOP_S
+    limits = {}
+    for band, values in samples.items():
+        if len(values) < FOREIGN_CALIBRATION_MIN:
+            continue
+        level = FOREIGN_LIMIT_SHARE * float(np.percentile(values, FOREIGN_LIMIT_PERCENTILE))
+        limits[band] = min(FOREIGN_LIMIT_CEIL, max(FOREIGN_LIMIT_FLOOR, level))
+    if "full" not in limits or len(limits) < 2:
+        return None
+    return limits
+
+
+def _foreign_runs(aligner: "_Aligner", lo_s: float, hi_s: float, lo_off: float, hi_off: float,
+                  min_s: float = FOREIGN_MIN_S) -> List[Tuple[float, float]]:
+    """Spans of at least ``min_s`` inside [lo_s, hi_s) where the dub,
+    anywhere between the two offsets, is not the video: both carry music
+    and effects there and every band agrees less than this pair ever does
+    where it is placed."""
+    limits = aligner.foreign_limits
+    if not limits or "side" not in limits:
+        return []
+    rate = ENVELOPE_RATE
+    w = int(FOREIGN_WINDOW_S * rate)
+    mid = (lo_off + hi_off) / 2.0
+    flags: List[Tuple[float, bool]] = []
+    t = lo_s
+    while t + FOREIGN_WINDOW_S <= hi_s + 1e-9:
+        s = int(round(t * rate))
+        d = int(round((t + mid) * rate))
+        side = _active(aligner, "primary", "side", s, w) and _active(aligner, "secondary", "side", d, w)
+        busy = side or (_active(aligner, "primary", "low", s, w) and _active(aligner, "secondary", "low", d, w))
+        foreign = busy
+        if busy:
+            for band, limit in limits.items():
+                value = _window_agreement(aligner, band, t, lo_off, hi_off)
+                if value is None or value >= limit:
+                    foreign = False
+                    break
+        flags.append((t, foreign, side))
+        t += FOREIGN_HOP_S
+    # A run must rest on music and effects: the stereo difference, where
+    # centred dialogue does not reach, busy in both tracks across at least
+    # half of it. A mono pair (or dual mono) has none, and its bass carries
+    # the voices as well -- a dub that lost its bed there and kept its lines
+    # reads just like another scene -- so there nothing is called foreign.
+    runs: List[Tuple[float, float]] = []
+    start: Optional[int] = None
+    for index, (t, foreign, _side) in enumerate(flags + [(float("inf"), False, False)]):
+        if foreign and start is None:
+            start = index
+        elif not foreign and start is not None:
+            lo_t = flags[start][0]
+            end = flags[index - 1][0] + FOREIGN_WINDOW_S
+            sided = sum(1 for f in flags[start:index] if f[2])
+            if end - lo_t >= min_s - 1e-9 and sided >= 0.5 * (index - start):
+                runs.append((lo_t, min(end, hi_s)))
+            start = None
+    return runs
+
+
+def _agreement_t(aligner: "_Aligner", offset_s: float, lo_s: float, hi_s: float) -> float:
+    """How clearly the dub agrees with the video across [lo_s, hi_s) at one
+    offset: the t-statistic of the agreement's FOREIGN_T_BLOCK_S means."""
+    curve = aligner.agreement(offset_s, lo_s, hi_s)
+    block = max(1, int(FOREIGN_T_BLOCK_S * ENVELOPE_RATE))
+    means = np.array([curve[i:i + block].mean() for i in range(0, len(curve) - block + 1, block)])
+    if len(means) < 4:
+        return float("inf")
+    return float(means.mean()) / (float(means.std(ddof=1)) / np.sqrt(len(means)) + 1e-9)
+
+
+def _speech_agrees(aligner: "_Aligner", lo_s: float, hi_s: float, offset_s: float) -> Optional[bool]:
+    """Whether the dub's lines follow the video's across [lo_s, hi_s) at
+    ``offset_s``: True, False, or None when there is too little speech to
+    say. Read on the centre of each mix (see ``speech.centre_activity``),
+    at any speed."""
+    primary, secondary = aligner.primary, aligner.secondary
+    if not getattr(primary, "path", None) or not getattr(secondary, "path", None) or hi_s - lo_s < 5.0:
+        return None
+    from .speech import SPEECH_RATE, centre_activity
+    speed = secondary.speed or 1.0
+    pad, reach = 1.5, 0.3
+    try:
+        video = centre_activity(primary.path, primary.track, lo_s, hi_s, aligner.token)
+        dub_lo = (lo_s + offset_s - pad) / speed
+        dub_hi = (hi_s + offset_s + pad) / speed
+        dub = centre_activity(secondary.path, secondary.track, dub_lo, dub_hi, aligner.token)
+    except MediaError:
+        return None
+    if float(np.mean(video > 0.3)) < 0.1:
+        return None
+    if abs(speed - 1.0) > 1e-9:
+        own = (dub_lo + np.arange(len(dub)) / SPEECH_RATE) * speed
+        grid = (lo_s + offset_s - pad) + np.arange(int(round((hi_s - lo_s + 2 * pad) * SPEECH_RATE))) / SPEECH_RATE
+        dub = np.interp(grid, own, dub, left=0.0, right=0.0)
+    row = ncc_lags(video, dub)
+    if row.size < 3:
+        return None
+    lags = np.arange(len(row)) / SPEECH_RATE - pad
+    near = np.abs(lags) <= reach
+    away = np.abs(lags) > 2 * reach
+    if near.sum() == 0 or away.sum() < 10:
+        return None
+    z = (float(row[near].max()) - float(np.median(row[away]))) / (float(np.std(row[away])) + 1e-9)
+    return z >= FOREIGN_SPEECH_Z
+
+
+def _split_foreign(aligner: "_Aligner", blocks: List[Block], notes: Optional[List[str]]) -> List[Block]:
+    """Take out of every stretch the spans where the dub has something else
+    (see ``_foreign_runs``), unless the agreement over the span or the
+    lines say the scene is the same. The spans are remembered on the
+    aligner, so the assembly fills them from the original rather than
+    bridging them."""
+    aligner.foreign_limits = _calibrate_foreign(aligner, blocks)
+    if not aligner.foreign_limits:
+        return blocks
+    out: List[Block] = []
+    for block in blocks:
+        spans: List[Tuple[float, float]] = []
+        for lo, hi in _foreign_runs(aligner, block.start_s, block.end_s, block.offset_s, block.offset_s):
+            if _agreement_t(aligner, block.offset_s, lo, hi) >= FOREIGN_MAX_T:
+                continue
+            if _speech_agrees(aligner, lo, hi, block.offset_s):
+                continue
+            lo, hi = _foreign_edges(aligner, block.offset_s, lo, hi, block.start_s, block.end_s)
+            if spans and (lo <= spans[-1][1] + FOREIGN_WINDOW_S or (
+                    lo <= spans[-1][1] + 2 * FOREIGN_WINDOW_S
+                    and _agreement_t(aligner, block.offset_s, spans[-1][1], lo) < FOREIGN_MAX_T)):
+                # Close, and nothing between agrees either: one span, not
+                # two with a few seconds of the wrong scene kept between.
+                spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+            else:
+                spans.append((lo, hi))
+        pieces = [block]
+        for lo, hi in spans:
+            aligner.foreign.append((lo, hi))
+            if notes is not None:
+                notes.append(
+                    f"the dub has something else at {_clock(lo)} - {_clock(hi)}: its music and effects agree with "
+                    f"the video's nowhere near the offset there, and its lines do not follow the video's; "
+                    f"the original plays"
+                )
+            current = pieces.pop()
+            if lo - current.start_s >= MIN_BLOCK_S:
+                before = copy.deepcopy(current)
+                before.end_s = before.end_lo = before.end_hi = lo
+                before.end_cut = None
+                pieces.append(before)
+            if current.end_s - hi >= MIN_BLOCK_S:
+                after = copy.deepcopy(current)
+                after.start_s = after.start_lo = after.start_hi = hi
+                after.start_cut = None
+                pieces.append(after)
+            else:
+                break
+        out.extend(pieces)
+    return out
+
+
+def _foreign_edges(aligner: "_Aligner", offset_s: float, lo_s: float, hi_s: float,
+                   floor_s: float, ceiling_s: float) -> Tuple[float, float]:
+    """Where agreement at the offset gives way to none, near each end of a
+    foreign span found on FOREIGN_HOP_S windows: the point with the most
+    agreement before it and the least after (and the mirror at the end)."""
+    base = max(floor_s, lo_s - FOREIGN_WINDOW_S)
+    curve = aligner.agreement(offset_s, base, min(ceiling_s, hi_s + FOREIGN_WINDOW_S))
+    rate = ENVELOPE_RATE
+    side = int(1.5 * rate)
+    cumulative = np.concatenate([[0.0], np.cumsum(curve)])
+
+    def mean(a: int, b: int) -> float:
+        a, b = max(0, a), min(len(curve), b)
+        return (cumulative[b] - cumulative[a]) / max(1, b - a)
+
+    def best(lo_t: float, hi_t: float, falling: bool) -> float:
+        top, where = -np.inf, (lo_t + hi_t) / 2.0
+        first = max(side, int((lo_t - base) * rate))
+        last = min(len(curve) - side, int((hi_t - base) * rate))
+        for i in range(first, last, max(1, int(0.05 * rate))):
+            gain = mean(i - side, i) - mean(i, i + side) if falling else mean(i, i + side) - mean(i - side, i)
+            if gain > top:
+                top, where = gain, base + i / rate
+        return where
+
+    start = best(lo_s - FOREIGN_HOP_S, lo_s + FOREIGN_WINDOW_S, True)
+    end = best(hi_s - FOREIGN_WINDOW_S, hi_s + FOREIGN_HOP_S, False)
+    if end - start < FOREIGN_MIN_S / 2.0:
+        return lo_s, hi_s
+    return start, end
+
+
+def _gap_is_foreign(aligner: "_Aligner", last: Block, block: Block) -> bool:
+    """Whether the dub has something else for the gap between two
+    stretches: a span already found so, or one where it agrees with the
+    video at neither offset nor anywhere between (see ``_foreign_runs``)
+    and its lines follow the video's at neither."""
+    lo, hi = last.end_s, block.start_s
+    if any(a < hi and b > lo for a, b in aligner.foreign):
+        return True
+    if hi - lo < FOREIGN_WINDOW_S or not aligner.foreign_limits:
+        return False
+    low, high = sorted((last.offset_s, block.offset_s))
+    runs = _foreign_runs(aligner, lo, hi, low, high, max(FOREIGN_WINDOW_S, min(FOREIGN_MIN_S, 0.5 * (hi - lo))))
+    # A gap is partly what the dub lacks -- as much as the offset falls
+    # across it -- and that agrees with nothing as surely as another scene
+    # does. Only what reads as something else beyond that, and plenty of
+    # it, is: else the step is placed and the dub kept either side of it.
+    missing = max(last.offset_s - block.offset_s, 0.0)
+    unexplained = sum(b - a for a, b in runs) - missing
+    if unexplained < max(FOREIGN_WINDOW_S, 0.5 * (hi - lo - missing)):
+        return False
+    offsets = (last.offset_s, block.offset_s)
+    # Judged on the spans that read as something else, not the whole gap:
+    # its ends hold a little of the neighbours' own material, which the
+    # edges left there, and would lift the whole gap over the bar.
+    for run_lo, run_hi in runs:
+        if any(_agreement_t(aligner, offset, run_lo, run_hi) >= FOREIGN_MAX_T for offset in offsets):
+            return False  # the dub is there at one side's offset: the usual bridging decides
+    return not any(_speech_agrees(aligner, lo, hi, offset) for offset in offsets)
+
+
 def _assemble(
     blocks: List[Block],
     primary_s: float,
@@ -5807,8 +6341,15 @@ def _assemble(
         step = last.offset_s - block.offset_s   # > 0: the video has this much the dub lacks
         exposure = (gap - max(step, 0.0)) / 2.0  # dub a wrongly placed step would misplace
         placed: Optional[Tuple[float, str]] = None
+        foreign = gap > MIN_FILL_S and _gap_is_foreign(aligner, last, block)
+        if foreign:
+            unmatched.add(id(block))
+            notes.append(
+                f"the original plays across {_clock(last.end_s)} - {_clock(block.start_s)}: the dub has something "
+                f"else there -- its music and effects agree with the video's at neither side's offset"
+            )
         if (
-            gap > MIN_FILL_S and NEAR_OFFSET_S < abs(step)
+            not foreign and gap > MIN_FILL_S and NEAR_OFFSET_S < abs(step)
             and gap - max(step, 0.0) >= 0.0
             and keep_unmatched_dub and dub_audible(last.end_s, block.start_s, last.offset_s)
         ):
@@ -5850,7 +6391,7 @@ def _assemble(
             block.start_s = block.start_lo = block.start_hi = cut + max(step, 0.0)
             kept.append(block)
             continue
-        if gap > MIN_FILL_S and abs(block.offset_s - last.offset_s) <= NEAR_OFFSET_S:
+        if not foreign and gap > MIN_FILL_S and abs(block.offset_s - last.offset_s) <= NEAR_OFFSET_S:
             if dub_audible(last.end_s, block.start_s, last.offset_s):
                 if keep_unmatched_dub:
                     step_ms = abs(block.offset_s - last.offset_s) * 1000.0
