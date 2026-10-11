@@ -165,6 +165,28 @@ FOREIGN_SPEECH_Z = 4.0
 # plain one 14 to 20.
 FOREIGN_MAX_T = 2.0
 FOREIGN_T_BLOCK_S = 0.5
+# A level too short for the readings: two trims a few seconds apart read as
+# one step, because readings of POLISH_WINDOW_S every POLISH_SPACING_S see a
+# level four seconds long once at most. Between two stretches whose offsets
+# differ by SHORT_LEVEL_MIN_STEP_S to SHORT_LEVEL_MAX_STEP_S, every offset
+# in between (on a SHORT_LEVEL_GRID_S grid, SHORT_LEVEL_APART_S clear of
+# both) is asked over SHORT_LEVEL_REACH_S either side, in blocks of
+# SHORT_LEVEL_BLOCK_S. One that agrees better than both neighbours across
+# at least SHORT_LEVEL_MIN_S -- by a t-statistic of SHORT_LEVEL_Z over its
+# blocks, and in at least SHORT_LEVEL_BANDS bands -- is a stretch of its
+# own. Measured on the bench: trims 4.7 s apart, where every band preferred
+# the level between them in every two-second window by 0.6-1.1.
+SHORT_LEVEL_MIN_STEP_S = 0.04
+SHORT_LEVEL_MAX_STEP_S = 0.5
+SHORT_LEVEL_REACH_S = 10.0
+SHORT_LEVEL_BLOCK_S = 0.5
+SHORT_LEVEL_MIN_S = 1.5
+SHORT_LEVEL_Z = 3.0
+SHORT_LEVEL_BANDS = 2
+SHORT_LEVEL_APART_S = 0.012
+SHORT_LEVEL_GRID_S = 0.002
+# The bracket each new edge is placed in, either side of the block edge.
+SHORT_LEVEL_BRACKET_S = 0.75
 # A reading whose peak is not this far above its own row found nothing:
 # the tallest of a few hundred chance offsets reaches three, of a
 # thousand three and a half.
@@ -3917,6 +3939,9 @@ def _refine(
     # an insert the offsets either side happen to meet across -- the
     # original plays, and the assembly does not bridge it again.
     blocks = _split_foreign(aligner, blocks, notes)
+    # Two trims a few seconds apart, read as one step: the level between
+    # them is put in on its own.
+    blocks = _split_short_levels(aligner, blocks, primary_s, secondary_s, notes)
     show(blocks)
     return blocks
 
@@ -5224,6 +5249,116 @@ def _sharpen(
             else:
                 before.end_s = min(after.start_s - gap, secondary_s - before.offset_s, primary_s)
                 before.end_lo, before.end_hi = after.start_lo - gap, after.start_hi - gap
+
+
+def _short_level(
+    aligner: _Aligner, lo_s: float, hi_s: float, first_s: float, last_s: float,
+) -> Optional[Tuple[float, float, float]]:
+    """(start, end, offset) of a level between ``first_s`` and ``last_s``
+    that agrees better than both across part of [lo_s, hi_s), or None (see
+    SHORT_LEVEL_MIN_STEP_S)."""
+    size = int(round(SHORT_LEVEL_BLOCK_S * ENVELOPE_RATE))
+    bands = aligner.shared_bands
+
+    def per_band(offset_s: float) -> np.ndarray:
+        rows = []
+        for band in bands:
+            x = aligner.agreement(offset_s, lo_s, hi_s, [band])
+            count = len(x) // size
+            rows.append(x[: count * size].reshape(count, size).mean(axis=1) if count else np.zeros(0))
+        count = min(len(row) for row in rows) if rows else 0
+        return np.array([row[:count] for row in rows]) if rows else np.zeros((0, 0))
+
+    first_bands, last_bands = per_band(first_s), per_band(last_s)
+    count = min(first_bands.shape[1], last_bands.shape[1]) if first_bands.size and last_bands.size else 0
+    least = int(round(SHORT_LEVEL_MIN_S / SHORT_LEVEL_BLOCK_S))
+    if count < 3 * least:
+        return None
+    first_bands, last_bands = first_bands[:, :count], last_bands[:, :count]
+    a, c = first_bands.sum(axis=0), last_bands.sum(axis=0)
+    ca = np.concatenate([[0.0], np.cumsum(a)])
+    cc = np.concatenate([[0.0], np.cumsum(c)])
+    one_step = float(np.max(ca + (cc[count] - cc)))
+    low, high = min(first_s, last_s), max(first_s, last_s)
+    best: Optional[Tuple[float, int, int, float, np.ndarray]] = None
+    for level in np.arange(low + SHORT_LEVEL_APART_S, high - SHORT_LEVEL_APART_S + 1e-9, SHORT_LEVEL_GRID_S):
+        level_bands = per_band(float(level))
+        if level_bands.shape[1] < count:
+            continue
+        level_bands = level_bands[:, :count]
+        cb = np.concatenate([[0.0], np.cumsum(level_bands.sum(axis=0))])
+        # The best path first -> level -> last, the level held at least
+        # ``least`` blocks: before i the first level, from j the last.
+        left = np.maximum.accumulate(ca - cb)
+        ends = np.arange(least, count + 1)
+        totals = left[ends - least] + cb[ends] + cc[count] - cc[ends]
+        k = int(np.argmax(totals))
+        gain = float(totals[k]) - one_step
+        if best is None or gain > best[0]:
+            j = int(ends[k])
+            i = int(np.argmax((ca - cb)[: j - least + 1]))
+            best = (gain, i, j, float(level), level_bands)
+    if best is None or best[0] <= 0.0:
+        return None
+    _gain, i, j, level, level_bands = best
+    rival = np.maximum(a[i:j], c[i:j])
+    margin = level_bands.sum(axis=0)[i:j] - rival
+    if len(margin) < 3:
+        return None
+    t_stat = float(margin.mean()) / (float(margin.std(ddof=1)) / np.sqrt(len(margin)) + 1e-9)
+    if t_stat < SHORT_LEVEL_Z:
+        return None
+    agreeing = sum(
+        1 for k in range(len(bands))
+        if float(np.mean(level_bands[k, i:j] - np.maximum(first_bands[k, i:j], last_bands[k, i:j]))) > 0.0
+    )
+    if agreeing < min(SHORT_LEVEL_BANDS, len(bands)):
+        return None
+    return lo_s + i * SHORT_LEVEL_BLOCK_S, lo_s + j * SHORT_LEVEL_BLOCK_S, level
+
+
+def _split_short_levels(
+    aligner: _Aligner, blocks: List[Block], primary_s: float, secondary_s: float, notes: Optional[List[str]] = None,
+) -> List[Block]:
+    """Put a level too short for the readings, between two stretches, in as
+    a stretch of its own, its edges placed like every other (see
+    SHORT_LEVEL_MIN_STEP_S)."""
+    out = sorted(blocks, key=lambda b: b.start_s)
+    index = 0
+    while index + 1 < len(out):
+        first, last = out[index], out[index + 1]
+        index += 1
+        step = abs(last.offset_s - first.offset_s)
+        if not SHORT_LEVEL_MIN_STEP_S <= step <= SHORT_LEVEL_MAX_STEP_S or first.follows_drift or last.follows_drift:
+            continue
+        lo_s = max(first.start_s, first.end_s - SHORT_LEVEL_REACH_S)
+        hi_s = min(last.end_s, last.start_s + SHORT_LEVEL_REACH_S)
+        found = _short_level(aligner, lo_s, hi_s, first.offset_s, last.offset_s)
+        if found is None:
+            continue
+        start, end, level = found
+        if start - first.start_s < SHORT_LEVEL_MIN_S or last.end_s - end < SHORT_LEVEL_MIN_S:
+            continue
+        bracket = SHORT_LEVEL_BRACKET_S
+        middle = Block(start, end, level, start_lo=start - bracket, start_hi=start + bracket,
+                       end_lo=end - bracket, end_hi=end + bracket)
+        middle.match = aligner.sharp_match(middle)
+        first.end_s = min(first.end_s, start)
+        first.end_lo, first.end_hi = start - bracket, start + bracket
+        last.start_s = max(last.start_s, end)
+        last.start_lo, last.start_hi = end - bracket, end + bracket
+        _place_edge(aligner, first, middle, primary_s, secondary_s)
+        _place_edge(aligner, middle, last, primary_s, secondary_s)
+        if middle.length_s <= 0.0:
+            continue
+        out.insert(index, middle)
+        index += 1
+        if notes is not None:
+            notes.append(
+                f"a level of {level:+.3f}s found between {first.offset_s:+.3f}s and {last.offset_s:+.3f}s across "
+                f"{_clock(middle.start_s)} - {_clock(middle.end_s)}: two trims too close together for the readings"
+            )
+    return out
 
 
 def _verify_cuts(aligner: "_Aligner", segments: List[Segment], notes: Optional[List[str]]) -> None:

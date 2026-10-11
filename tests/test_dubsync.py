@@ -1273,6 +1273,17 @@ def test_two_effects_levels_a_fraction_of_a_frame_apart_are_both_kept():
     assert [round(level) for _a, _b, level in kept] == [-1840, -1946], kept
 
 
+def test_two_trims_a_few_seconds_apart_are_two_steps_not_one():
+    """Two trims 4.4 s apart -- 60 ms, then 120 ms -- read as one 180 ms step:
+    readings ten seconds long see the level between them once at most. It
+    is found on its own, between the two, and played at its own offset."""
+    with Workspace() as ws:
+        expected = build_pair(ws, 300, [("org", 0, 120), ("org", 120.06, 124.5), ("org", 124.62, 300)])
+        plan = _plan(ws)
+        _check(plan, expected, edge_tolerance_s=0.1, offset_tolerance_s=0.003)
+
+
+
 def test_a_drift_is_told_from_two_levels_by_its_own_readings():
     """A stretch whose whole span peaks twice is split into two levels only
     when its readings sit on two levels. A dub 0.3 per mille slow walks
