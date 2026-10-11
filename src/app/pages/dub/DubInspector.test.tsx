@@ -44,6 +44,17 @@ describe("DoneBox", () => {
     expect(html).toContain(">Report<");
   });
 
+  it("says so plainly when the dub needs nothing but a delay", () => {
+    const html = done({ plan: { ...plan, delayOnlyMs: 4370 } });
+    expect(html).toContain("Nothing is cut: the dub only needs a delay of +4370 ms");
+    expect(html).toContain('aria-label="Delay only"');
+  });
+
+  it("says nothing about a delay when the dub is cut", () => {
+    expect(done({ plan: { ...plan, delayOnlyMs: null } })).not.toContain("only needs a delay");
+    expect(done()).not.toContain("only needs a delay");
+  });
+
   it("names the written track and what it is", () => {
     const html = done();
     expect(html).toContain("dub.dubsynced.ac3");

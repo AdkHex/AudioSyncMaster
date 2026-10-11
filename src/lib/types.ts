@@ -400,6 +400,12 @@ export interface DubSyncPlan {
    *  back on their own. Absent from plans made before the voice check, or
    *  when the check was skipped (fixVoices: false) or found nothing to move. */
   voicePieces?: VoicePiece[];
+  /** Set when the plan is nothing but a delay: one unbroken stretch of dub
+   *  at one offset, cut nowhere. In the app's sign convention -- positive:
+   *  the dub plays late and is moved earlier. The track is then written as
+   *  that delay, and a mux carries the dub itself, not re-encoded. Null or
+   *  absent otherwise, and in plans made before it was added. */
+  delayOnlyMs?: number | null;
 }
 
 export interface DubSpotCheck {

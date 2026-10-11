@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  delayOnlyText,
   describePlan,
   dubQueueReducer,
   initialDubQueueState,
@@ -321,5 +322,21 @@ describe("reportText", () => {
     const text = reportText(job);
     expect(text).toContain("voices moved:");
     expect(text).toContain("  - Voices moved 240 ms later from 0:00:12.5 to 0:00:18.2 to match the lips.");
+  });
+});
+
+describe("a dub that needs nothing but a delay", () => {
+  it("says the delay in the app's sign convention, and which way it moves", () => {
+    expect(delayOnlyText(4370)).toBe(
+      "Nothing is cut: the dub only needs a delay of +4370 ms (it plays 4370 ms late, so it is moved earlier)",
+    );
+    expect(delayOnlyText(-7132)).toBe(
+      "Nothing is cut: the dub only needs a delay of −7132 ms (it plays 7132 ms early, so it is moved later)",
+    );
+  });
+
+  it("names a frame-rate speed when there is one, and an in-sync dub as such", () => {
+    expect(delayOnlyText(2500, 1.001)).toContain(", played at 1.001000× for the frame rate");
+    expect(delayOnlyText(0.2)).toBe("Nothing is cut and nothing needs moving: the dub is already in sync");
   });
 });

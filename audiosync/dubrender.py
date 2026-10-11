@@ -33,7 +33,7 @@ from typing import Callable, Iterator, List, Optional, Tuple
 import numpy as np
 
 from .codecdelay import codec_delay_ms
-from .dubsync import DubSyncPlan, Segment
+from .dubsync import DubSyncPlan, Segment, delay_only_text
 from .voicefix import VoicePiece
 from .media import (
     SEEK_PREROLL_S,
@@ -101,6 +101,10 @@ class RenderOptions:
     is taken out of the mix again only when it is cut from exactly the
     samples written, so a preview (which seeks) plays the plan without
     them."""
+    plain_delay: bool = True
+    """When the plan is nothing but a delay (``DubSyncPlan.delay_only_s``),
+    write the dub as it is, shifted by that delay: one piece, silence
+    where it has nothing, no fills from the original and no seams."""
 
 
 @dataclass
@@ -508,6 +512,71 @@ def on_file_clock(plan: DubSyncPlan, token: Optional[CancellationToken] = None) 
     return moved
 
 
+SILENCE = "silence"
+
+
+def _without_holes(plan: DubSyncPlan, say: Callable[[str], None]) -> DubSyncPlan:
+    """The plan with every piece meeting the next. The track is written
+    piece after piece, so a gap between two would move everything after it
+    earlier by the gap's length, and an overlap later: a gap is filled from
+    the original (it is the video's own time), an overlap trimmed off the
+    later piece. Said when either is found -- a plan should have neither."""
+    segments = sorted(plan.segments, key=lambda s: s.start_s)
+    fixed: List[Segment] = []
+    holes = 0
+    for segment in segments:
+        if fixed:
+            last_end = fixed[-1].end_s
+            if segment.start_s > last_end + 1e-6:
+                fixed.append(Segment("fill", last_end, segment.start_s, last_end, note="between two pieces"))
+                holes += 1
+            elif segment.start_s < last_end - 1e-6:
+                cut = last_end - segment.start_s
+                segment = copy.deepcopy(segment)
+                segment.start_s = last_end
+                segment.source_start_s += cut
+                holes += 1
+                if segment.end_s <= segment.start_s:
+                    continue
+        fixed.append(segment)
+    if not holes:
+        return plan
+    say(f"  {holes} gap(s) or overlap(s) between the plan's pieces were closed so the track stays on the video's clock")
+    mended = copy.deepcopy(plan)
+    mended.segments = fixed
+    return mended
+
+
+def as_plain_delay(plan: DubSyncPlan) -> DubSyncPlan:
+    """A delay-only plan as the delay itself: the whole dub at its one
+    offset, and silence before its first moment and after its last --
+    what shifting the dub in a player or a muxer does. The original does
+    not fill anything: a dub that is only late or early has nothing
+    missing, and where it starts after the picture or ends before it,
+    a plain delay leaves that quiet."""
+    offset = plan.delay_only_s
+    if offset is None:
+        return plan
+    shifted = copy.deepcopy(plan)
+    end = max(s.end_s for s in plan.segments)
+    dub = next(s for s in plan.segments if s.kind == "dub")
+    # Where the dub is read for a moment of the output, taken from the
+    # plan's own piece rather than from the offset: a clipped plan (an
+    # excerpt, a preview) counts its time from where it was clipped.
+    reads_at = dub.source_start_s - dub.start_s
+    first = min(max(0.0, -reads_at), end)
+    last = max(first, min(end, plan.dub_duration_s * plan.speed - reads_at))
+    segments: List[Segment] = []
+    if first > 1e-6:
+        segments.append(Segment(SILENCE, 0.0, first, 0.0, note="before the dub starts"))
+    segments.append(Segment("dub", first, last, first + reads_at, offset_s=offset, match=dub.match,
+                            note="the whole dub at one offset"))
+    if end - last > 1e-6:
+        segments.append(Segment(SILENCE, last, end, 0.0, note="after the dub ends"))
+    shifted.segments = segments
+    return shifted
+
+
 def render(
     plan: DubSyncPlan,
     output_path: str,
@@ -520,6 +589,10 @@ def render(
     options = options or RenderOptions()
     say = log or (lambda _m: None)
     plan = on_file_clock(plan, token) if plan.segments else plan
+    if options.plain_delay and plan.segments and plan.delay_only_s is not None:
+        plan = as_plain_delay(plan)
+        say(delay_only_text(plan.delay_only_s or 0.0, plan.speed) + ": written as a plain delay")
+    plan = _without_holes(plan, say)
     if options.codec not in CODECS and options.codec != "wav16":
         raise MediaError(f"Unknown codec {options.codec!r}; choose from {', '.join(CODECS)}")
     if not plan.segments:
@@ -573,6 +646,7 @@ def render(
     staging = f"{stem}.part{ext}"
     encoder = _Encoder(staging, rate, channels, options.codec, options.bitrate, token)
     clipped = 0
+    clipped_fill = 0
     written = 0
     to_skip = skip
 
@@ -626,7 +700,9 @@ def render(
                 if progress:
                     progress(int(100 * min(base + read, total) / max(1, total)), stage)
 
-            if segment.kind == "dub":
+            if segment.kind == SILENCE:
+                audio = np.zeros((length, channels), dtype=np.float32)
+            elif segment.kind == "dub":
                 if dub_reader is not None:
                     audio = dub_reader.read(source, length, on_chunk)
                 else:
@@ -641,7 +717,7 @@ def render(
                     plan.video_path, plan.video_track, rate, channels, source, length,
                     1.0, "resample", token, on_chunk,
                 )
-            if segment.kind != "dub" and abs(plan.fill_gain_db) > 1e-6:
+            if segment.kind == "fill" and abs(plan.fill_gain_db) > 1e-6:
                 audio *= fill_gain
 
             if lead:
@@ -662,6 +738,8 @@ def render(
             over = np.abs(body) > 1.0
             if over.any():
                 clipped += int(over.sum())
+                if segment.kind == "fill":
+                    clipped_fill += int(over.sum())
                 np.clip(body, -1.0, 1.0, out=body)
             written += len(body)
             emit(body)
@@ -702,10 +780,15 @@ def render(
         output_path, rate, channels, written / rate, clipped,
         " ".join(shlex.quote(part) for part in encoder.command),
     )
-    if clipped:
+    if clipped_fill:
         result.warnings.append(
-            f"{clipped} samples clipped; the fills are {plan.fill_gain_db:+.1f} dB and the original "
+            f"{clipped_fill} samples clipped in the fills; they are {plan.fill_gain_db:+.1f} dB and the original "
             f"peaks close to full scale -- rerun with a lower --fill-gain if it is audible"
+        )
+    if clipped - clipped_fill:
+        result.warnings.append(
+            f"{clipped - clipped_fill} samples of the dub itself are above full scale and were clipped: "
+            f"the dub was delivered that loud"
         )
     result.warnings.extend(voice_warnings)
     return result
@@ -748,6 +831,13 @@ def _voice_patch(plan: DubSyncPlan, rate: int, channels: int, dub_track, options
         video_reader.close()
 
 
+# A copy of the dub delayed in the container must land this close to the
+# written track to be muxed in its place.
+LOSSLESS_TOLERANCE_S = 0.002
+# Where the lossless copy is checked against the written track.
+LOSSLESS_CHECK_WINDOW_S = 20.0
+
+
 def mux(
     plan: DubSyncPlan,
     audio_path: str,
@@ -756,8 +846,18 @@ def mux(
     title: Optional[str] = None,
     token: Optional[CancellationToken] = None,
     overwrite: bool = False,
+    lossless_delay: bool = True,
+    log: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Add the synced track to a copy of the video, every original stream kept."""
+    """Add the synced track to a copy of the video, every original stream kept.
+
+    A dub that needs nothing but a delay (``DubSyncPlan.delay_only_s``) at
+    the video's own speed is muxed as it is -- its own stream, copied, not
+    re-encoded -- with the delay set in the container; ``audio_path``, the
+    written track, is what it is checked against and what goes in instead
+    if the copy does not land on it.
+    """
+    say = log or (lambda _m: None)
     if output_path is None:
         stem, _ext = os.path.splitext(os.path.basename(plan.video_path))
         output_path = os.path.join(os.path.dirname(os.path.abspath(plan.video_path)), f"{stem}.dubsynced.mkv")
@@ -767,10 +867,28 @@ def mux(
         raise MediaError(f"Output already exists: {os.path.basename(output_path)}")
     info = probe(plan.video_path, token)
     new_index = len(info.audio_tracks)
-    command = [
-        ffmpeg_path(), "-nostdin", "-v", "error", "-y",
-        "-i", plan.video_path, "-i", audio_path,
-        "-map", "0", "-map", "1:a:0", "-c", "copy",
+    offset = plan.delay_only_s
+    if lossless_delay and offset is not None and abs(plan.speed - 1.0) < 1e-9:
+        try:
+            _mux_to(plan.video_path, output_path, _delayed_input(plan, offset, token),
+                    f"1:a:{plan.dub_track}", new_index, language, title, token)
+            error = _landing_error(output_path, new_index, audio_path, token)
+            if error is not None and abs(error) <= LOSSLESS_TOLERANCE_S:
+                say(f"muxed the dub's own stream, not re-encoded, delayed {1000.0 * offset:+.1f} ms in the "
+                    f"container (it lands {1000.0 * abs(error):.2f} ms from the written track)")
+                return output_path
+            say("the dub's own stream, delayed in the container, did not land on the written track"
+                + ("" if error is None else f" ({1000.0 * error:+.1f} ms)") + "; muxing the written track")
+        except MediaError as exc:
+            say(f"could not mux the dub's own stream ({exc}); muxing the written track")
+    _mux_to(plan.video_path, output_path, ["-i", audio_path], "1:a:0", new_index, language, title, token)
+    return output_path
+
+
+def _mux_to(video_path: str, output_path: str, dub_input: List[str], dub_map: str, new_index: int,
+            language: Optional[str], title: Optional[str], token: Optional[CancellationToken]) -> None:
+    command = [ffmpeg_path(), "-nostdin", "-v", "error", "-y", "-i", video_path] + dub_input + [
+        "-map", "0", "-map", dub_map, "-c", "copy",
     ]
     if language:
         command.extend([f"-metadata:s:a:{new_index}", f"language={language}"])
@@ -791,7 +909,99 @@ def mux(
         _discard(staging)
         raise MediaError(f"ffmpeg produced no output for {output_path}")
     os.replace(staging, output_path)
-    return output_path
+
+
+def _delayed_input(plan: DubSyncPlan, offset: float, token: Optional[CancellationToken]) -> List[str]:
+    """ffmpeg input options that put the dub's moment ``t + offset`` at the
+    video's ``t`` without decoding it: a later start is a container offset;
+    an earlier one drops whole frames up to the first that starts at or
+    after ``offset`` and offsets the rest by what that overshot."""
+    if offset <= 0.0:
+        return ["-itsoffset", f"{-offset:.6f}", "-i", plan.dub_path]
+    start = _first_packet_from(plan.dub_path, plan.dub_track, offset, token)
+    return ["-ss", f"{start:.6f}", "-itsoffset", f"{start - offset:.6f}", "-i", plan.dub_path]
+
+
+def _packet_times(path: str, track: int, interval: str, token: Optional[CancellationToken]) -> List[float]:
+    from .media import _run, ffprobe_path  # noqa: WPS433
+    out = _run([
+        ffprobe_path(), "-v", "error", "-select_streams", f"a:{track}", "-show_entries", "packet=pts_time",
+        "-read_intervals", interval, "-of", "csv=p=0", path,
+    ], 120, token, what="read the frames' times").decode("utf-8", errors="replace")
+    times = []
+    for line in out.split():
+        try:
+            times.append(float(line.strip().strip(",")))
+        except ValueError:
+            continue
+    return times
+
+
+def _first_packet_from(path: str, track: int, at_s: float, token: Optional[CancellationToken]) -> float:
+    later = [t for t in _packet_times(path, track, f"{max(0.0, at_s - 2.0):.3f}%{at_s + 2.0:.3f}", token)
+             if t >= at_s - 1e-6]
+    if not later:
+        raise MediaError("no frame of the dub starts where the delay needs one")
+    return min(later)
+
+
+def _first_packet_time(path: str, track: int, token: Optional[CancellationToken]) -> float:
+    times = _packet_times(path, track, "%+#1", token)
+    if not times:
+        raise MediaError(f"no frame found in audio track {track} of {os.path.basename(path)}")
+    return times[0]
+
+
+def _landing_error(muxed: str, index: int, written: str, token: Optional[CancellationToken]) -> Optional[float]:
+    """How far the muxed copy's track sits from the written track (seconds,
+    positive: later), read the way a player reads both; None when the two
+    cannot be compared."""
+    rate = 16000
+    info = probe(muxed, token)
+    length = float(info.duration or 0.0)
+    if length < 3 * LOSSLESS_CHECK_WINDOW_S:
+        points = [max(0.0, length / 2.0 - LOSSLESS_CHECK_WINDOW_S / 2.0)]
+    else:
+        points = [length * f - LOSSLESS_CHECK_WINDOW_S / 2.0 for f in (0.25, 0.5, 0.75)]
+    upto = max(points) + LOSSLESS_CHECK_WINDOW_S + 1.0
+
+    def read(path: str, track: int) -> np.ndarray:
+        # Where the track's first frame sits, as a player places it: its
+        # own timestamp. A stream's start time as probed is no good here --
+        # ffprobe works it out from the first seconds of the file only, and
+        # a dub delayed past them reads as starting at zero.
+        lead = max(0.0, _first_packet_time(path, track, token) - float(probe(path, token).start_time or 0.0))
+        parts, got = [], 0
+        for block in stream_audio(path, rate, track=track, channels=1, token=token, block_s=30.0, lead_s=lead):
+            parts.append(block)
+            got += len(block)
+            if got >= upto * rate:
+                break
+        return np.concatenate(parts).astype(np.float64) if parts else np.zeros(0)
+
+    a, b = read(written, 0), read(muxed, index)
+    reach = int(0.25 * rate)
+    lags = []
+    for at in points:
+        i, n = int(at * rate), int(LOSSLESS_CHECK_WINDOW_S * rate)
+        template = a[i:i + n]
+        span = b[max(0, i - reach): i + n + reach]
+        if len(template) < n or len(span) < n + 2 * reach or template.std() < 1e-5:
+            continue
+        c = template - template.mean()
+        size = 1 << int(np.ceil(np.log2(len(span) + n)))
+        num = np.fft.irfft(np.fft.rfft(span, size) * np.conj(np.fft.rfft(c, size)), size)[: 2 * reach + 1]
+        o = np.concatenate([[0.0], np.cumsum(span)])
+        q = np.concatenate([[0.0], np.cumsum(span * span)])
+        m = 2 * reach + 1
+        var = np.maximum((q[n:n + m] - q[:m]) - (o[n:n + m] - o[:m]) ** 2 / n, 1e-12)
+        r = num / (np.sqrt(var) * np.sqrt((c * c).sum()) + 1e-12)
+        k = int(np.argmax(r))
+        if r[k] >= 0.8:
+            lags.append((k - reach) / rate)
+    if len(lags) < max(1, len(points) - 1):
+        return None
+    return float(np.median(lags))
 
 
 # ---------------------------------------------------------------------------

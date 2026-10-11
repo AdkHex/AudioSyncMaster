@@ -661,7 +661,7 @@ def handle_dubsync(request: dict) -> None:
             muxed = mux_dub(
                 plan, output, request.get("muxPath"),
                 language=request.get("language"), title=request.get("title"),
-                token=token, overwrite=bool(request.get("overwrite")),
+                token=token, overwrite=bool(request.get("overwrite")), log=emit_log,
             )
         emit({
             "type": "dubsyncDone",
@@ -784,7 +784,7 @@ def _run_dub_job(index: int, job: dict, options: dict, token: CancellationToken)
             muxed = mux_dub(
                 plan, output, job.get("muxPath"),
                 language=options.get("language"), title=options.get("title"),
-                token=token, overwrite=bool(options.get("overwrite")),
+                token=token, overwrite=bool(options.get("overwrite")), log=log,
             )
         return outcome(
             plan=plan.to_dict(),

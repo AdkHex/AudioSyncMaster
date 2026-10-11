@@ -35,6 +35,7 @@ MODULES = [
     "test_editor",
     "test_lipsync",
     "test_voicefix",
+    "test_delayonly",
     "test_subs_formats",
     "test_subs_tracks",
     "test_subs_retime",

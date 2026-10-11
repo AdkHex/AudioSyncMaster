@@ -1462,6 +1462,28 @@ class Segment:
         )
 
 
+# Stretches of dub this close in offset are one offset: a delay.
+DELAY_ONLY_TOLERANCE_S = 0.001
+
+
+def delay_only_text(offset_s: float, speed: float = 1.0) -> str:
+    """A delay-only verdict in words, in the app's sign convention: a
+    positive delay is a dub that plays late and is moved earlier."""
+    ms = 1000.0 * offset_s
+    if abs(ms) < 0.5:
+        verdict = "Nothing is cut and nothing needs moving: the dub is already in sync"
+    else:
+        size = f"{abs(ms):.1f}" if abs(ms) < 10 else f"{abs(ms):.0f}"
+        verdict = (
+            f"Nothing is cut: the dub only needs a delay of {'+' if ms > 0 else '-'}{size} ms "
+            f"(it plays {size} ms {'late' if ms > 0 else 'early'}, so it is moved "
+            f"{'earlier' if ms > 0 else 'later'})"
+        )
+    if abs(speed - 1.0) > 1e-9:
+        verdict += f", played at {speed:.6f}x for the frame rate"
+    return verdict
+
+
 @dataclass
 class DubSyncPlan:
     """Everything needed to write the synced track, and why it looks so."""
@@ -1524,6 +1546,31 @@ class DubSyncPlan:
     @property
     def filled_s(self) -> float:
         return sum(s.length_s for s in self.fill_segments)
+
+    @property
+    def delay_only_s(self) -> Optional[float]:
+        """The dub's offset, when that is all the plan is: one unbroken
+        stretch of dub at one offset, with the original only before the
+        dub's first moment and after its last. Such a dub is not cut
+        anywhere and needs nothing but a delay (and, where the rates
+        differ, a speed); None when anything is cut, inserted, replaced
+        or moved.
+
+        Two stretches either side of a fill at the same offset do not
+        make a delay: the dub has something else there -- a replaced
+        scene, a dropout -- and the original plays for a reason.
+        """
+        dubs = self.dub_segments
+        if not dubs or self.voice_pieces or any(s.offset_s is None for s in dubs):
+            return None
+        offsets = [float(s.offset_s) for s in dubs]
+        if max(offsets) - min(offsets) > DELAY_ONLY_TOLERANCE_S:
+            return None
+        first, last = dubs[0].start_s, dubs[-1].end_s
+        for segment in self.fill_segments:
+            if segment.end_s > first + 1e-6 and segment.start_s < last - 1e-6:
+                return None
+        return float(np.median(offsets))
 
     def summary(self) -> dict:
         """How much of the dub is used, and why the original plays where it
@@ -1699,6 +1746,7 @@ class DubSyncPlan:
             "edits": edits,
             "gaps": gaps,
             "rateGuide": self.rate_guide(),
+            "delayOnlyMs": None if self.delay_only_s is None else round(1000.0 * self.delay_only_s, 3),
         }
 
     @classmethod
@@ -1728,6 +1776,9 @@ class DubSyncPlan:
         """The plan as a table, one line per piece of the output."""
         lines = []
         dubs, fills = self.dub_segments, self.fill_segments
+        delay = self.delay_only_s
+        if delay is not None:
+            lines.append(delay_only_text(delay, self.speed))
         head = (
             f"{len(dubs)} stretch{'es' if len(dubs) != 1 else ''} of dub, "
             f"{len(fills)} fill{'s' if len(fills) != 1 else ''} from the original "

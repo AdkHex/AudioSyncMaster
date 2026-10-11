@@ -261,6 +261,18 @@ export function dubQueueReducer(state: DubQueueState, action: DubQueueAction): D
   }
 }
 
+/** A delay-only verdict in words (see ``DubSyncPlan.delayOnlyMs``); the
+ *  engine says it the same way. */
+export function delayOnlyText(delayMs: number, speed = 1): string {
+  let text =
+    Math.abs(delayMs) < 0.5
+      ? "Nothing is cut and nothing needs moving: the dub is already in sync"
+      : `Nothing is cut: the dub only needs a delay of ${delayMs >= 0 ? "+" : "−"}${formatMs(Math.abs(delayMs))} ms ` +
+        `(it plays ${formatMs(Math.abs(delayMs))} ms ${delayMs > 0 ? "late" : "early"}, so it is moved ${delayMs > 0 ? "earlier" : "later"})`;
+  if (Math.abs(speed - 1) > 1e-9) text += `, played at ${speed.toFixed(6)}× for the frame rate`;
+  return text;
+}
+
 /** One line on what a plan will do, for a job card's summary. */
 export function describePlan(plan: DubSyncPlan): string {
   const dubs = plan.segments.filter((s) => s.kind === "dub").length;
@@ -313,6 +325,9 @@ export function reportText(job: DubQueueJob): string {
   const plan = job.plan;
   if (job.error) lines.push(`error: ${job.error}`);
   if (plan) {
+    if (plan.delayOnlyMs !== null && plan.delayOnlyMs !== undefined) {
+      lines.push("", delayOnlyText(plan.delayOnlyMs, plan.speed));
+    }
     lines.push("", describePlan(plan));
     if (plan.summary) {
       const fills = Object.entries(plan.summary.fillS)

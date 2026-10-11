@@ -27,7 +27,7 @@ import {
 } from "@fluentui/react-icons";
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 
-import type { DubQueueJob } from "@/lib/dubQueueReducer";
+import { delayOnlyText, type DubQueueJob } from "@/lib/dubQueueReducer";
 import { HAND_NOTE } from "@/lib/dubPlanEdit";
 import {
   AUDIBLE_MS,
@@ -218,6 +218,11 @@ export function DoneBox({
         )}
       </Links>
       <div className="col dub-notes">
+        {plan && plan.delayOnlyMs !== null && plan.delayOnlyMs !== undefined && (
+          <section className="col" style={{ gap: 4 }} aria-label="Delay only">
+            <Remark tone="info">{delayOnlyText(plan.delayOnlyMs, plan.speed)}</Remark>
+          </section>
+        )}
         {job.output && <OutputLine job={job} />}
         {v && <Verification verification={v} />}
         <Remarks warnings={[...(plan?.warnings ?? []), ...(job.output?.warnings ?? [])]} notes={plan?.notes ?? []} />

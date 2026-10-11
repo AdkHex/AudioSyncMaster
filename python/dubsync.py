@@ -239,7 +239,7 @@ def main(argv=None) -> int:
         if args.mux:
             target = args.mux if isinstance(args.mux, str) else None
             print("--- muxing ---")
-            written = mux(plan, output, target, language=args.lang, title=args.title, overwrite=args.overwrite)
+            written = mux(plan, output, target, language=args.lang, title=args.title, overwrite=args.overwrite, log=say)
             print(f"  wrote {written}")
         print(f"--- done in {time.monotonic() - started:.0f}s ---")
         return 0
