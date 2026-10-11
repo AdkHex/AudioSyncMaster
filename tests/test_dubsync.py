@@ -28,6 +28,7 @@ from audiosync.dubsync import (  # noqa: E402
     Block,
     _Aligner,
     DubSyncPlan,
+    Segment,
     TrackEnvelope,
     _consistent_in_gap,
     _continuing_candidate,
@@ -1232,3 +1233,19 @@ def test_a_dubs_lines_are_read_where_they_play_at_another_speed():
         assert abs(lag_ms(_timeline_activity(dub, lo - pad, hi + pad))) <= 10.0
         # As the file has them, the lines are late by the frames it gained.
         assert lag_ms(centre_activity(ws.path("dub.wav"), 0, lo - pad, hi + pad)) >= 120.0
+
+
+def test_a_plan_with_an_edit_beside_a_short_stretch_is_written_as_json():
+    """An edit resting on a stretch under half a minute is marked to check.
+    The stretches' times are numpy numbers as measured, which made that mark
+    a numpy bool: JSON could not write it, and the whole plan failed to
+    reach the app or the plan file."""
+    t = np.float64
+    plan = DubSyncPlan("v.mkv", "d.ac3", video_duration_s=100.0, dub_duration_s=95.0)
+    plan.segments = [
+        Segment("dub", t(0.0), t(20.0), t(0.0), offset_s=t(0.0), match=0.9),
+        Segment("fill", t(20.0), t(25.0), t(20.0), note="dub is cut here"),
+        Segment("dub", t(25.0), t(100.0), t(20.0), offset_s=t(-5.0), match=0.9),
+    ]
+    data = json.loads(json.dumps(plan.to_dict()))
+    assert data["edits"][0]["check"] is True, data["edits"]

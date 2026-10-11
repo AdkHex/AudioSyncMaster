@@ -1750,7 +1750,9 @@ class DubSyncPlan:
         # say -- and a match score cannot tell them apart, since a repeated
         # cue matches itself perfectly. So it is listed, and marked to check.
         shortest = min(before.length_s, after.length_s)
-        check = shortest < SHORT_STRETCH_S
+        # A plain bool: the stretches' times are often numpy numbers, and a
+        # numpy bool stops the whole plan being written as JSON.
+        check = bool(shortest < SHORT_STRETCH_S)
         if check:
             drift += (
                 f"; it rests on a {shortest:.1f} s stretch of dub, too short to rule out a repeated "
