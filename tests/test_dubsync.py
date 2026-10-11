@@ -1249,3 +1249,24 @@ def test_a_plan_with_an_edit_beside_a_short_stretch_is_written_as_json():
     ]
     data = json.loads(json.dumps(plan.to_dict()))
     assert data["edits"][0]["check"] is True, data["edits"]
+
+
+def test_two_effects_levels_a_fraction_of_a_frame_apart_are_both_kept():
+    """Every band read -1.840 s up to a picture trim and -1.946 s after it,
+    2.54 frames apart. A rule that only whole frames can be trims folded the
+    first level into the second and played 15 s at the wrong level; a real
+    TV dub stepped 1.26 frames back and forth in every band. Two levels one
+    after the other, each backed by the effects, both stand."""
+
+    class Stub:
+        frame_s = 1.0 / 24.0
+        log = staticmethod(lambda _m: None)
+
+    first = [(t, -1.840, 0.9, "high", 20.0) for t in (380.0, 387.5, 395.0, 402.5, 410.0)]
+    second = [(t, -1.946, 0.9, "high", 20.0) for t in (417.5, 425.0, 432.5, 440.0)]
+    found = first + second
+    offsets_ms = [f[1] * 1000.0 for f in found]
+    runs = _level_runs([f[0] for f in found], offsets_ms)
+    assert len(runs) == 2, runs
+    kept, _ = _Aligner._effects_rule(Stub(), found, runs, offsets_ms)
+    assert [round(level) for _a, _b, level in kept] == [-1840, -1946], kept

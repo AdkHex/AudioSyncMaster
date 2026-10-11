@@ -81,9 +81,9 @@ ENVELOPE_RATE = ANALYSIS_SR // ENVELOPE_HOP  # 500 Hz: one value per 2 ms
 # frames from the effects. The dialogue, recorded to the picture, goes with
 # the effects: the ambience steps exactly at the shot changes at the
 # effects' offset and not at the music's. So wherever the high band is
-# confident it decides, and a music-only level that is not a whole number
-# of frames from the effects level is an artefact (a cue laid twice, a
-# beat alias), never a cut.
+# confident it decides, and a music-only level the effects do not share is
+# folded into theirs (a cue laid twice, a beat alias, music run across a
+# trim), never a cut.
 BANDS: Dict[str, Tuple[float, float]] = {"low": (30.0, 250.0), "high": (4000.0, 8000.0)}
 BAND_WINDOW = 384
 """STFT window for the band envelopes, in samples at ANALYSIS_SR: 24 ms,
@@ -169,11 +169,6 @@ FOREIGN_T_BLOCK_S = 0.5
 # the tallest of a few hundred chance offsets reaches three, of a
 # thousand three and a half.
 READING_Z = 4.5
-# How far from a whole number of frames two effects levels may sit and
-# still both be picture trims. Readings resolve 2 ms; a doubled music cue
-# sits at any distance (104, 270, 20 ms were measured) and a beat alias
-# at its period.
-FRAME_TOLERANCE_MS = 12.0
 # How far apart, in offset and in time, a music-placed stretch and an
 # effects-placed neighbour may be for the effects to be asked about it.
 FOLLOW_EFFECTS_STEP_S = 0.5
@@ -2628,12 +2623,14 @@ class _Aligner:
         Where any run of readings is backed by the high band (see BANDS),
         a run that is not is the music's level, and the music is not the
         picture's timing: its readings are moved to the nearest
-        effects-backed level. Two effects-backed levels that are not a
-        whole number of frames apart cannot both be picture trims, so the
-        one with less behind it moves to the other. Runs that end up at one
-        level are joined. Returns the runs and the readings' offsets as
-        relabelled, so the single-step test that follows sees the same
-        picture.
+        effects-backed level. Two effects-backed levels one after the other
+        are both kept, whatever their distance: a step is not always a whole
+        number of the video's frames (a real TV dub stepped 52.5 ms back and
+        forth, 1.26 frames, in every band), and folding one into the other
+        played a scene a quarter of a minute at the wrong level. Runs that
+        end up at one level are joined. Returns the runs and the readings'
+        offsets as relabelled, so the single-step test that follows sees
+        the same picture.
         """
         if len(runs) < 2:
             return runs, offsets_ms
@@ -2730,21 +2727,6 @@ class _Aligner:
             )
             levels[index] = levels[target]
             moved = True
-        if self.frame_s:
-            frame_ms = 1000.0 * self.frame_s
-            for index in strong:
-                for other in strong:
-                    if other <= index or levels[index] == levels[other]:
-                        continue
-                    gap = abs(levels[index] - levels[other])
-                    if abs(gap / frame_ms - round(gap / frame_ms)) * frame_ms > FRAME_TOLERANCE_MS:
-                        weak, keep = (index, other) if backing[index] < backing[other] else (other, index)
-                        self.log(
-                            f"  the effects read {levels[weak] / 1000.0:+.3f}s around {_clock(runs[weak][0])}, "
-                            f"{gap / frame_ms:.2f} frames from {levels[keep] / 1000.0:+.3f}s: not a trim, folded"
-                        )
-                        levels[weak] = levels[keep]
-                        moved = True
         if not moved and len(set(levels)) == len(levels):
             return runs, offsets_ms
         relabelled = list(offsets_ms)
