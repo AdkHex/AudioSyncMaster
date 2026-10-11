@@ -2110,6 +2110,28 @@ def _level_runs(positions: Sequence[float], offsets_ms: Sequence[float]) -> List
     ]
 
 
+def _timeline_activity(track: TrackEnvelope, lo_s: float, hi_s: float,
+                       token: Optional[CancellationToken] = None) -> np.ndarray:
+    """Speech activity of a track's centre across [lo_s, hi_s) of the
+    timeline its envelope is on, SPEECH_RATE values a second (see
+    ``speech.centre_activity``). A dub played at another speed -- 23.976
+    against 24, a PAL transfer -- is read across the part of its file that
+    lands there (file time t plays at t * speed) and laid on the timeline,
+    so its lines are compared where they will be heard: read as it is, a
+    23.976 dub's lines drift a frame from the original's every 42 seconds."""
+    from .speech import SPEECH_RATE, centre_activity
+    speed = track.speed
+    if abs(speed - 1.0) < 1e-12:
+        return centre_activity(track.path, track.track, lo_s, hi_s, token)
+    native = centre_activity(track.path, track.track, lo_s / speed, hi_s / speed, token)
+    want = int(round((hi_s - lo_s) * SPEECH_RATE))
+    if native.size == 0:
+        return np.zeros(want)
+    # Timeline value j sits at lo_s + j / R, which is file time
+    # (lo_s + j / R) / speed: index j / speed of the native curve.
+    return np.interp(np.arange(want) / speed, np.arange(native.size), native, right=0.0)
+
+
 class _Aligner:
     """The analysis, held together so its stages can share the envelopes."""
 
@@ -2739,7 +2761,7 @@ class _Aligner:
         """Which of two offsets the dub's lines follow across [lo_s, hi_s),
         or None when the speech does not say (see SPEECH_ARBITER_S)."""
         primary, secondary = self.primary, self.secondary
-        if primary.speed != 1.0 or secondary.speed != 1.0 or hi_s - lo_s < 5.0:
+        if primary.speed != 1.0 or hi_s - lo_s < 5.0:
             return None
         if not getattr(primary, "path", None) or not getattr(secondary, "path", None):
             return None
@@ -2747,7 +2769,7 @@ class _Aligner:
         low, high, pad = min(first_s, second_s), max(first_s, second_s), 1.5
         try:
             video = centre_activity(primary.path, primary.track, lo_s, hi_s, self.token)
-            dub = centre_activity(secondary.path, secondary.track, lo_s + low - pad, hi_s + high + pad, self.token)
+            dub = _timeline_activity(secondary, lo_s + low - pad, hi_s + high + pad, self.token)
         except MediaError:
             return None
         row = ncc_lags(video, dub)
@@ -4590,7 +4612,7 @@ class _TraceScores:
         self.parts: List[Tuple[str, float]] = [(band, EFFECTS_DISCOUNT if band == "high" else 1.0) for band in aligner.shared_bands]
         self.speech: Optional[Tuple[np.ndarray, np.ndarray, float]] = None
         primary, secondary = aligner.primary, aligner.secondary
-        if primary.speed == 1.0 and secondary.speed == 1.0:
+        if primary.speed == 1.0:
             # The voices themselves, where the music and effects are too
             # quiet to say anything: a dub is performed to the lips, so its
             # lines start and stop about where the original's do.
@@ -4599,7 +4621,7 @@ class _TraceScores:
                 reach = TRACE_NOISE_SPAN_S + 1.0
                 video = centre_activity(primary.path, primary.track, lo_s, hi_s, aligner.token)
                 dub_lo = lo_s + low - reach
-                dub = centre_activity(secondary.path, secondary.track, dub_lo, hi_s + high + reach, aligner.token)
+                dub = _timeline_activity(secondary, dub_lo, hi_s + high + reach, aligner.token)
                 span = int(LOCAL_STATS_S * SPEECH_RATE)
                 self.speech = (_local_standardize(video, span), _local_standardize(dub, span), dub_lo)
                 self.parts.append(("speech", 1.0))
@@ -5732,14 +5754,14 @@ def _speech_step(
     primary, secondary = getattr(aligner, "primary", None), getattr(aligner, "secondary", None)
     if primary is None or secondary is None or not getattr(primary, "path", None) or not getattr(secondary, "path", None):
         return None
-    if primary.speed != 1.0 or secondary.speed != 1.0 or hi_s - lo_s <= drop_s + 1.0:
+    if primary.speed != 1.0 or hi_s - lo_s <= drop_s + 1.0:
         return None
     from .speech import SPEECH_RATE, centre_activity
     reach = max(abs(shift) for shift in SPEECH_STEP_NULLS_S) + 0.1
     try:
         video = centre_activity(primary.path, primary.track, lo_s, hi_s, aligner.token)
-        dub_a = centre_activity(secondary.path, secondary.track, lo_s + before_s - reach, hi_s + before_s + reach, aligner.token)
-        dub_b = centre_activity(secondary.path, secondary.track, lo_s + after_s - reach, hi_s + after_s + reach, aligner.token)
+        dub_a = _timeline_activity(secondary, lo_s + before_s - reach, hi_s + before_s + reach, aligner.token)
+        dub_b = _timeline_activity(secondary, lo_s + after_s - reach, hi_s + after_s + reach, aligner.token)
     except MediaError:
         return None
     span = int(LOCAL_STATS_S * SPEECH_RATE)

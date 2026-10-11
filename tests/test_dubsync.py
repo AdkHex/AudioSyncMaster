@@ -28,6 +28,7 @@ from audiosync.dubsync import (  # noqa: E402
     Block,
     _Aligner,
     DubSyncPlan,
+    TrackEnvelope,
     _consistent_in_gap,
     _continuing_candidate,
     _follow_effects,
@@ -36,12 +37,14 @@ from audiosync.dubsync import (  # noqa: E402
     _measure,
     _nearest_peak,
     _peak_dominance,
+    _timeline_activity,
     best_path,
     build_envelope,
     ncc_lags,
     plan_dubsync,
     verify_output,
 )
+from audiosync.speech import centre_activity  # noqa: E402
 from make_fixtures import _resample_linear, _speechlike  # noqa: E402
 
 SR = 16000
@@ -1181,3 +1184,51 @@ def test_a_scene_with_other_lines_over_the_same_bed_is_kept():
         plan = _plan(ws)
         assert not [f for f in plan.fill_segments if f.length_s > 1.0], plan.describe()
         assert not any("something else there" in n for n in plan.notes), plan.notes
+
+
+def _voiced_lines(seconds: float, seed: int) -> np.ndarray:
+    """Lines a speech detector hears as speech: voiced (a harmonic tone
+    whose pitch glides between 110 and 220 Hz), in syllables, a second or
+    three long with pauses between -- the on and off a dub follows."""
+    rng = np.random.default_rng(seed)
+    n = int(seconds * SR)
+    out = np.zeros(n)
+    t = 0.5
+    while t < seconds - 3.0:
+        length = float(rng.uniform(0.8, 3.0))
+        i, j = int(t * SR), int(min(seconds, t + length) * SR)
+        k = np.arange(j - i) / SR
+        f0 = float(rng.uniform(110.0, 220.0)) * (1.0 + 0.1 * np.sin(2 * np.pi * 0.7 * k))
+        phase = 2 * np.pi * np.cumsum(f0) / SR
+        tone = sum(np.sin(h * phase) / h for h in range(1, 12))
+        syllables = 0.5 * (1.0 - np.cos(2 * np.pi * k * float(rng.uniform(3.0, 5.0))))
+        out[i:j] = tone * syllables * np.hanning(j - i) ** 0.2
+        t += length + float(rng.uniform(0.3, 2.0))
+    return (0.3 * out / np.max(np.abs(out))).astype(np.float32)
+
+
+def test_a_dubs_lines_are_read_where_they_play_at_another_speed():
+    """A dub mastered at 23.976 runs a frame long every 42 seconds against a
+    24 fps video. Its lines must be read where they will play: read where
+    the file has them, the same lines sit 150 ms late by the 150th second,
+    and the speech that decides between two offsets, traces a quiet gap
+    and finds a step the music cannot was switched off at any speed for
+    that reason."""
+    with Workspace() as ws:
+        lines = _voiced_lines(200.0, 4) + 1e-3 * np.random.default_rng(9).standard_normal(int(200 * SR)).astype(np.float32)
+        sf.write(ws.path("org.wav"), lines, SR)
+        sf.write(ws.path("dub.wav"), _resample_linear(lines, 1001.0 / 1000.0), SR)
+        empty = np.zeros(1, np.float32), np.zeros(0, np.float32)
+        video = TrackEnvelope(ws.path("org.wav"), 0, *empty)
+        dub = TrackEnvelope(ws.path("dub.wav"), 0, *empty, speed=1000.0 / 1001.0)
+        lo, hi, pad = 150.0, 180.0, 1.0
+        heard = _timeline_activity(video, lo, hi)
+        assert heard.max() > 0.5, "the fixture's lines are not heard as speech"
+
+        def lag_ms(curve):
+            row = ncc_lags(heard, curve)
+            return (int(np.argmax(row)) - int(pad * 100)) * 10.0
+
+        assert abs(lag_ms(_timeline_activity(dub, lo - pad, hi + pad))) <= 10.0
+        # As the file has them, the lines are late by the frames it gained.
+        assert lag_ms(centre_activity(ws.path("dub.wav"), 0, lo - pad, hi + pad)) >= 120.0
