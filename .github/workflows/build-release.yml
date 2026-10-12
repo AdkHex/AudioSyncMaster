@@ -262,6 +262,7 @@ jobs:
             --hidden-import audiosync.media \
             --hidden-import audiosync.mux \
             --hidden-import audiosync.dubsync \
+            --collect-submodules audiosync.dubplan \
             --hidden-import audiosync.dubrender \
             --hidden-import audiosync.voicefix \
             --hidden-import audiosync.voicetools \

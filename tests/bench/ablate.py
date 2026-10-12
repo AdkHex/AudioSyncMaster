@@ -26,30 +26,33 @@ sys.path.insert(0, HERE)
 
 from score import score, score_voices  # noqa: E402
 
-# How to switch each rule off, as code run against ``d`` (the planner's
-# module) before planning. Each leaves the rest of the planner as it is.
+# How to switch each rule off, as code run before planning. ``off(name,
+# value)`` rebinds the name in every module of the planner that holds it --
+# each part imports what it uses, so a name has a binding in each -- and
+# ``d`` is the planner's module, for its classes. Each leaves the rest of
+# the planner as it is.
 RULES = {
-    "foreign_scenes": "d._split_foreign = lambda aligner, blocks, notes=None: blocks\n"
-                      "d._gap_is_foreign = lambda *a, **k: False",
-    "verify_cuts": "d._verify_cuts = lambda *a, **k: None",
-    "join_overlapping": "d._join_overlapping = lambda blocks: blocks",
-    "gap_unused_dub": "d.GAP_UNUSED_MAX_S = 0.0\nd._consistent_in_gap = lambda pieces, narrow, neighbours: pieces",
-    "recover_from_gaps": "d._recover_from_gaps = lambda *a, **k: []",
-    "wide_pass": "d._wide_blocks = lambda *a, **k: []",
-    "follow_drift": "d._follow_drift = lambda aligner, blocks, notes=None: blocks",
-    "resolve_reuse": "d._resolve_reuse = lambda aligner, blocks, p, s: blocks",
-    "follow_effects": "d._follow_effects = lambda aligner, blocks: None",
-    "split_levels": "d._split_levels = lambda aligner, blocks: blocks",
-    "trace_gaps": "d._trace_gaps = lambda aligner, blocks, s, notes, warnings: blocks",
-    "settle": "d._settle = lambda aligner, block: False",
-    "sharpen": "d._sharpen = lambda *a, **k: None",
-    "snap_to_picture": "d._snap_to_picture = lambda *a, **k: None",
-    "speech": "d._Aligner.speech_choice = lambda self, *a, **k: None\nd._speech_step = lambda *a, **k: None",
-    "split_silences": "d._split_silences = lambda blocks, primary, secondary, warnings: blocks",
-    "trim_uncertain_edges": "d._trim_uncertain_edges = lambda blocks, trims=None: blocks",
-    "bridge_exposure_5s": "d.BRIDGE_EXPOSURE_S = 5.0",
-    "short_levels": "d._split_short_levels = lambda aligner, blocks, p, s, notes=None: blocks",
-    "ramp_guard": "d._reads_as_ramp = lambda *a, **k: False",
+    "foreign_scenes": "off('_split_foreign', lambda aligner, blocks, notes=None: blocks)\n"
+                      "off('_gap_is_foreign', lambda *a, **k: False)",
+    "verify_cuts": "off('_verify_cuts', lambda *a, **k: None)",
+    "join_overlapping": "off('_join_overlapping', lambda blocks: blocks)",
+    "gap_unused_dub": "off('GAP_UNUSED_MAX_S', 0.0)\noff('_consistent_in_gap', lambda pieces, narrow, neighbours: pieces)",
+    "recover_from_gaps": "off('_recover_from_gaps', lambda *a, **k: [])",
+    "wide_pass": "off('_wide_blocks', lambda *a, **k: [])",
+    "follow_drift": "off('_follow_drift', lambda aligner, blocks, notes=None: blocks)",
+    "resolve_reuse": "off('_resolve_reuse', lambda aligner, blocks, p, s: blocks)",
+    "follow_effects": "off('_follow_effects', lambda aligner, blocks: None)",
+    "split_levels": "off('_split_levels', lambda aligner, blocks: blocks)",
+    "trace_gaps": "off('_trace_gaps', lambda aligner, blocks, s, notes, warnings: blocks)",
+    "settle": "off('_settle', lambda aligner, block: False)",
+    "sharpen": "off('_sharpen', lambda *a, **k: None)",
+    "snap_to_picture": "off('_snap_to_picture', lambda *a, **k: None)",
+    "speech": "d._Aligner.speech_choice = lambda self, *a, **k: None\noff('_speech_step', lambda *a, **k: None)",
+    "split_silences": "off('_split_silences', lambda blocks, primary, secondary, warnings: blocks)",
+    "trim_uncertain_edges": "off('_trim_uncertain_edges', lambda blocks, trims=None: blocks)",
+    "bridge_exposure_5s": "off('BRIDGE_EXPOSURE_S', 5.0)",
+    "short_levels": "off('_split_short_levels', lambda aligner, blocks, p, s, notes=None: blocks)",
+    "ramp_guard": "off('_reads_as_ramp', lambda *a, **k: False)",
     "effects_rule": "d._Aligner._effects_rule = lambda self, found, runs, offsets_ms: (runs, offsets_ms)",
 }
 
@@ -57,8 +60,19 @@ RUNNER = """
 import json, os, sys, time
 engine, video, vt, dub, dt, out, patch = sys.argv[1:8]
 sys.path.insert(0, engine)
+import importlib, pkgutil
 import audiosync.dubsync as d
-exec(patch, {"d": d})
+modules = [d]
+try:
+    import audiosync.dubplan as parts
+    modules += [importlib.import_module(f"audiosync.dubplan.{m.name}") for m in pkgutil.iter_modules(parts.__path__)]
+except ImportError:
+    pass
+def off(name, value):
+    for module in modules:
+        if hasattr(module, name):
+            setattr(module, name, value)
+exec(patch, {"d": d, "off": off})
 started = time.monotonic()
 lines = []
 plan = d.plan_dubsync(video, dub, video_track=int(vt), dub_track=int(dt), log=lines.append)

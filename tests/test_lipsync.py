@@ -348,12 +348,14 @@ def test_dub_that_is_another_scene_is_not_followed():
         # Offered only the neighbours' two offsets, each run would carry its
         # neighbour's evidence into the gap and pass on that alone; it is
         # refused because nothing agrees next to where its step would be.
-        saved = dubsync._trace_levels
-        dubsync._trace_levels = lambda _aligner, _lo, _hi, before, after: [before, after]
+        # Patched where _trace_gap looks it up.
+        from audiosync.dubplan import trace
+        saved = trace._trace_levels
+        trace._trace_levels = lambda _aligner, _lo, _hi, before, after: [before, after]
         try:
             assert _trace_gap(aligner, left, right, dub_s, [], []) is None
         finally:
-            dubsync._trace_levels = saved
+            trace._trace_levels = saved
 
 
 # --- drift inside one scene -------------------------------------------------
@@ -446,12 +448,14 @@ def test_no_part_of_the_dub_plays_twice():
     before = dubsync.Block(2586.0, 2656.215, -133.4192)
     after = dubsync.Block(2680.596, 2741.839, -179.4302)
     placed = []
-    original = dubsync._place_edge
-    dubsync._place_edge = lambda aligner, a, b, p, s: placed.append((a, b))
+    # Patched where _resolve_reuse looks it up.
+    from audiosync.dubplan import levels
+    original = levels._place_edge
+    levels._place_edge = lambda aligner, a, b, p, s: placed.append((a, b))
     try:
         kept = dubsync._resolve_reuse(Stub(), [before, after], 5505.8, 5266.1)
     finally:
-        dubsync._place_edge = original
+        levels._place_edge = original
     assert len(kept) == 2 and placed
     overlap = (2656.215 - 133.4192) - (2680.596 - 179.4302)
     assert abs(before.end_s - (2656.215 - overlap)) < 1e-6
