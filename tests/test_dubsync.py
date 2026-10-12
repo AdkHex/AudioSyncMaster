@@ -1308,3 +1308,61 @@ def test_a_drift_is_told_from_two_levels_by_its_own_readings():
     assert _reads_as_ramp(Stub(ramp), block, 0.073)
     assert not _reads_as_ramp(Stub(back_and_forth), block, 0.0525)
     assert not _reads_as_ramp(Stub(one_step), block, 0.05)
+
+
+class _EffectsStub:
+    """Just enough of an aligner for ``_effects_rule``: whether the effects
+    prefer one level to another, and what the dialogue says (nothing)."""
+
+    frame_s = 1.0 / 24.0
+
+    def __init__(self, effects_prefer: bool):
+        self.effects_prefer = effects_prefer
+        self.logs = []
+
+    def log(self, message):
+        self.logs.append(message)
+
+    def _effects_prefer(self, positions, level_ms, other_ms):
+        return self.effects_prefer
+
+    def speech_choice(self, *args):
+        return None
+
+
+def _effects_readings(*runs):
+    """Readings every 7.5 s: (first, last, offset_s, band, z) per run."""
+    found = []
+    for first, last, offset_s, band, z in runs:
+        found += [(t, offset_s, 0.9, band, z) for t in np.arange(first, last + 1e-9, 7.5)]
+    return found, [f[1] * 1000.0 for f in found]
+
+
+def test_music_run_across_a_trim_follows_the_effects():
+    """At a picture trim of two frames the dub's effects and dialogue follow
+    the picture while its music runs on (Here Now: music 83 ms off the
+    effects for half a minute). Where the effects, asked on the music's own
+    windows, prefer their level, the music's run folds into it; where they
+    do not, it is a step of its own."""
+    found, offsets = _effects_readings((100.0, 130.0, -1.000, "high", 20.0), (137.5, 167.5, -1.083, "low", 8.0))
+    runs = _level_runs([f[0] for f in found], offsets)
+    assert len(runs) == 2, runs
+    kept, relabelled = _Aligner._effects_rule(_EffectsStub(effects_prefer=True), found, runs, offsets)
+    assert kept == [] and set(round(o) for o in relabelled) == {-1000}, (kept, relabelled)
+    kept, _ = _Aligner._effects_rule(_EffectsStub(effects_prefer=False), found, runs, offsets)
+    assert [round(level) for _a, _b, level in kept] == [-1000, -1083], kept
+
+
+def test_a_level_that_leaves_and_comes_back_within_a_minute_is_a_repeat():
+    """A dub does not lose 400 ms and gain it back 30 s later; a cue that
+    repeats at that interval reads exactly so. Unless the effects put it
+    there, the excursion folds into the level around it."""
+    found, offsets = _effects_readings(
+        (100.0, 130.0, -1.000, "low", 9.0), (137.5, 160.0, -1.400, "low", 9.0), (167.5, 197.5, -1.000, "low", 9.0),
+    )
+    runs = _level_runs([f[0] for f in found], offsets)
+    assert len(runs) == 3, runs
+    stub = _EffectsStub(effects_prefer=False)
+    kept, relabelled = _Aligner._effects_rule(stub, found, runs, offsets)
+    assert kept == [] and set(round(o) for o in relabelled) == {-1000}, (kept, relabelled)
+    assert any("a repeat, not a cut" in line for line in stub.logs), stub.logs
