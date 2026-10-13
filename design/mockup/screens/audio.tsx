@@ -148,7 +148,7 @@ const FLAT71_LOG = [
   "14:02:11  source: TrueHD Atmos · 8 ch · 48000 Hz · 7.1 · 02:46:01 · stream #0",
   "14:02:11  target: DDP 7.1 Atmos flat 1536k",
   "14:02:11  note: flat 7.1: Lb Rb via the patched DEE (truehdd → DEE 5.2.1 patch → Surround EX flag)",
-  "14:02:11  Extracting TrueHD (1/5): $ C:\\ffmpeg\\ffmpeg.exe -y -nostdin -i D:\\Films\\Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.mkv -map 0:a:0 -vn -sn -dn -c:a copy -f truehd -progress pipe:1 C:\\Users\\me\\AppData\\Local\\com.audiosyncmaster.app\\encode\\temp\\fpsjob_3f9c2a\\fpsconv_3f9c2a.thd",
+  "14:02:11  Extracting TrueHD (1/5): $ C:\\Tools\\eac3to\\eac3to.exe D:\\Films\\Dune.Part.Two.2024.2160p.UHD.BluRay.REMUX.mkv 2: C:\\Users\\me\\AppData\\Local\\com.audiosyncmaster.app\\encode\\temp\\fpsjob_3f9c2a\\fpsconv_3f9c2a.thd -progressnumbers",
   "14:02:52  Extracting TrueHD (1/5): finished in 00:00:41",
   "14:02:52  truehdd decode (2/5): $ C:\\Tools\\truehdd.exe --progress decode --output-path C:\\…\\fpsjob_3f9c2a\\master --warp-mode normal --bed-conform C:\\…\\fpsjob_3f9c2a\\fpsconv_3f9c2a.thd",
   "14:02:52  truehdd: truehdd decode started",
@@ -401,7 +401,7 @@ export function FpsConv({ phase }: { phase: FPhase }) {
   const strip = (
     <>
       <L label="Conversion"><Combo value="23.976 → 25 fps" w={150} /></L>
-      <span className="t3 num" style={{ marginRight: 16 }}>×1.0427 · atempo=1.042708</span>
+      <span className="t3 num" style={{ marginRight: 16 }}>×1.0427 · eac3to -23.976 -changeTo25.000</span>
       <PathPick icon={<VideoClipRegular />} value="Blade.Runner.2049.2017.2160p.UHD.mkv · 25 fps" ph="Target video" clear w={300} />
       <span className="grow" />
       <PathPick icon={<FolderOpenRegular />} value={OUT} ph="Output folder" w={190} />
@@ -479,7 +479,7 @@ export function FpsConv({ phase }: { phase: FPhase }) {
                 ["Frame rate", "23.976 fps, from the video track"],
                 ["Duration", "2:43:48"],
                 ["Target", "25 fps · 2:37:13"],
-                ["Path", "ffmpeg wav → deew ddp"],
+                ["Path", "eac3to wav → deew ddp"],
                 ["Writes", <MidText key="o" text={selJob.out} tail={24} />],
               ]}
             />

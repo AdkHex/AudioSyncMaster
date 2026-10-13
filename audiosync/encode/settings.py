@@ -48,6 +48,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "tools": {"ffmpeg": "", "ffprobe": "", "deew_python": "",
               "mediainfo": "", "deezy": "", "deezy_python": "", "truehdd": "",
+              "eac3to": "",     # decodes, re-times and extracts when set (see eac3to.py); "" = ffmpeg does it
               "patcher": ""},   # folder of the DD+ 7.1 Atmos patcher ("" = the Dolby tools pack's)
     "dirs": {                  # "" = the default shown by dir_defaults()
         "temp": "",            # job intermediates (WAVs, truehdd masters) + deew's own temp

@@ -48,6 +48,7 @@ These parts do **not** exist yet and must be built:
 | D9 | Settings | The engine owns a settings file: **`%APPDATA%\com.audiosyncmaster.app\encode\settings.json`**, a port of FPSConv's `config.py` (same keys and defaults, atomic writes, key coercion). Finished jobs go in `history.json` next to it. The pages read and write both through the engine, and the CLI reads the same files. Settings are **imported once** from FPSConv's `settings.json` and deew's `config.toml`. | The CLI is ported (D11), and a CLI can't read the webview's localStorage. Users don't have to set up the tools again. |
 | D10 | Rollout | All work happens on branch `feature/encode-fps`. **Nothing reaches `main` until the Windows acceptance run (§7) passes.** | A push to `main` ships to every installed AudioSyncMaster. |
 | D11 | CLI | **FPSConv's CLI is ported** into the engine exe as `audiosync-cli.exe convert \| encode \| probe \| doctor \| patcher \| dee`, with the same flags (§2.4). With no arguments the exe is still the app's engine, which is how Rust starts it (`bridge.rs:255`, `:278-279`). A Start-menu shortcut "AudioSyncMaster command line" replaces FPSConv's. | Your choice (2026-10-12). The engine is already a console exe, so no second program is needed. |
+| D12 | eac3to | **eac3to does all it can** when its path is set in Preferences → Encode: it decodes and re-times FPS changes to W64 (`-23.976 -changeTo25.000`), decodes Encode sources (`-resampleTo48000` when not 48 kHz) and extracts TrueHD for flat 7.1. DEE still encodes every Dolby output, ffmpeg the AAC output. ffmpeg keeps FPSConv's steps when eac3to is not set, for containers eac3to cannot read (MP4, M4A, MOV, WebM, Ogg) and for 3/5/7-channel layouts that need padding. **This overrides D8 for those steps:** eac3to's frame-rate change resamples, so the pitch moves with the speed (≈4 % for 23.976 → 25) where FPSConv's `atempo` kept it, and FPS-change outputs no longer match the Phase 0 baseline byte for byte. Output names and durations do not change. | Your choice (2026-10-13). eac3to is freeware, Windows only, and not redistributable as far as its terms say, so it is a user-set path like DEE. |
 
 ---
 
@@ -374,7 +375,7 @@ Every row is compared with the Phase 0 FPSConv baseline. The job-log command lin
 
 | # | Case | Pass when |
 |---|---|---|
-| A1 | FPS: AAC 2.0, 23.976→25 | AAC output; duration = source × 24000/25025 within 1 frame; progress reaches 100 % |
+| A1 | FPS: AAC 2.0, 23.976→25 | AAC output; duration = source × 24000/25025 within 1 frame; progress reaches 100 %. With eac3to set (D12) and an MKV/MKA source the job log shows eac3to's `-23.976 -changeTo25.000` and the pitch is raised; an M4A source stays on `atempo` |
 | A2 | FPS: AC-3 5.1, 25→23.976 | `.ac3` 5.1 at the source bitrate |
 | A3 | FPS: E-AC-3 5.1, 24→25 | `.ec3` 5.1 |
 | A4 | FPS: TrueHD 7.1, 23.976→24 | `.thd` 7.1 |

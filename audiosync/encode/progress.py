@@ -52,6 +52,7 @@ STAGE_WEIGHT = {
     "Extracting TrueHD": 5, "truehdd decode": 45, "Patching DEE": 1, "DEE measure": 14, "DEE encode": 31,
     "Surround EX flag": 1, "TrueHD decode": 40, "Decoding to WAV": 35, "Extracting WAV": 35,
     "ffmpeg": 5, "DEE: measure": 20, "DEE: encode": 37, "ffmpeg atempo + AAC": 97, "Finishing": 3,
+    "Encoding AAC": 40,     # after eac3to's re-timed WAV (Extracting WAV)
 }
 _STEP_SUFFIX = re.compile(r"\s*\(\d+/\d+(?:[–-]\d+/\d+)?\)$")   # "Extracting TrueHD (1/5)" → "Extracting TrueHD"
 _STAGE_ALIAS = {"Encoding AAC Engine": "ffmpeg atempo + AAC"}

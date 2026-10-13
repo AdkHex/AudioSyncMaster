@@ -23,7 +23,7 @@ import threading
 import time
 from typing import Optional
 
-from . import atmos, commands, flat71, probe, settings
+from . import atmos, commands, eac3to, flat71, probe, settings
 from .formats import ENCODE_CONV, TASK_ENCODE, encode_output_name, encode_plan, resolve_encode
 from .fps import DEE_CODEC_MAP, FPS_CONVERSIONS, atempo_chain, output_name
 from .job import Job, ProgressFn, next_free
@@ -364,6 +364,31 @@ def run_deezy_progress(cmd: list[str], job: Job, step_name: str, notify: Progres
 # ───────────────────────── pipelines ─────────────────────────
 
 
+def _eac3to_input(job: Job, tools: Tools) -> Optional[tuple[Optional[int], list[str]]]:
+    """How eac3to picks this job's audio stream -- ``(track number or None, options)`` --
+    or None when ffmpeg has to do it: no eac3to, a container eac3to cannot read,
+    or a stream eac3to does not list."""
+    if not tools.eac3to or not eac3to.can_read(job.source):
+        return None
+    if not eac3to.is_container(job.source):
+        return (None, []) if job.stream_index == 0 else None
+    try:
+        listing = eac3to.list_tracks(tools.eac3to, job.source)
+    except (OSError, subprocess.SubprocessError) as exc:
+        job.say(f"eac3to could not list the tracks ({exc}); using ffmpeg", "warning")
+        return None
+    found = eac3to.track_for(listing, job.stream_index)
+    if found is None:
+        job.say(f"eac3to lists no audio stream #{job.stream_index}; using ffmpeg", "warning")
+    return found
+
+
+def _run_eac3to(cmd: list[str], job: Job, step_name: str, notify: ProgressFn, work_dir: str) -> bool:
+    stage = stage_of(step_name)
+    return run_tool_progress(cmd, job, step_name, notify, tool_name="eac3to", parse=eac3to.parse_line(stage),
+                             stages={stage: (0, 100)}, work_dir=work_dir, idle_stage=stage)
+
+
 def _has_dee(dee: str) -> bool:
     return bool(dee) and (os.path.isfile(dee) or bool(shutil.which(dee)))
 
@@ -422,16 +447,45 @@ def convert(job: Job, notify: ProgressFn, tools: Tools, work_root: Optional[str]
     job.step = "Initializing"
     job.started_at = time.time()
     job.say(f"job started: {os.path.basename(file_path)}  →  {os.path.basename(out_path)}")
+    via = _eac3to_input(job, tools)
+    how = f"eac3to {' '.join(eac3to.fps_flags(conv_type))}, pitch moves with speed" if via else f"atempo {atempo_chain(ratio)}"
     job.say(f"source: {codec.upper()} · {job.bitrate} kbps · {job.channels} ch · {fmt_time(job.duration)} · "
-            f"stream #{job.stream_index} · mode {conv_type} (atempo {atempo_chain(ratio)})")
-    job.plan_stages(["ffmpeg atempo + AAC", "Finishing"] if codec == "aac"
-                    else ["Extracting WAV", "DEE: measure", "DEE: encode", "Finishing"])
+            f"stream #{job.stream_index} · mode {conv_type} ({how})")
+    if via:
+        job.plan_stages(["Extracting WAV", "Encoding AAC", "Finishing"] if codec == "aac"
+                        else ["Extracting WAV", "DEE: measure", "DEE: encode", "Finishing"])
+    else:
+        job.plan_stages(["ffmpeg atempo + AAC", "Finishing"] if codec == "aac"
+                        else ["Extracting WAV", "DEE: measure", "DEE: encode", "Finishing"])
     notify(job)
 
     t0 = time.time()
     success = False
     try:
-        if codec == "aac":
+        if via:
+            # eac3to decodes and re-times; then ffmpeg (AAC) or deew + DEE (Dolby) encodes.
+            temp_wav = os.path.join(work_dir, f"fpsconv_{job.id}.w64")
+            track, extra = via
+            wav_ok = _run_eac3to(eac3to.fps_wav(tools.eac3to, file_path, track, extra, conv_type, temp_wav),
+                                 job, "Extracting WAV (1/2)", notify, work_dir)
+            if wav_ok and os.path.exists(temp_wav) and not job.cancelled:
+                if codec == "aac":
+                    cmd = commands.aac_from_wav(tools.ffmpeg, temp_wav, job.bitrate, job.channels, out_path)
+                    success = run_ffmpeg_progress(cmd, job, "Encoding AAC (2/2)", job.duration / ratio, notify)
+                else:
+                    cmd = commands.deew_fps(tools.deew, temp_wav, fmt, job.bitrate, work_dir)
+                    dee_ok = run_deew_progress(cmd, job, "Dolby DEE Encoding (2/2)", notify)
+                    base = os.path.splitext(os.path.basename(temp_wav))[0]
+                    deew_out = commands.deew_output(work_dir, base)
+                    if dee_ok and deew_out:
+                        shutil.move(deew_out, out_path)
+                        success = True
+                    elif dee_ok:
+                        job.error = (f"deew reported success but {base}{ext} was not produced — "
+                                     f"check the DEE path and the deew lines above")
+            elif wav_ok and not job.cancelled:
+                job.error = f"eac3to finished but wrote no {os.path.basename(temp_wav)}"
+        elif codec == "aac":
             cmd = commands.fps_aac(tools.ffmpeg, file_path, job.stream_index, job.bitrate, job.channels, ratio, out_path)
             success = run_ffmpeg_progress(cmd, job, "Encoding AAC Engine", job.duration, notify, ratio)
         else:
@@ -546,14 +600,25 @@ def convert_encode(job: Job, notify: ProgressFn, tools: Tools, work_root: Option
         else:
             # Unique name: deew writes its own wav/xml under ONE shared temp folder
             # using this basename (see convert()).
-            temp_wav = os.path.join(work_dir, f"fpsconv_{job.id}.wav")
-            soxr = ffmpeg_has_soxr(tools.ffmpeg)
-            if int(stream["sample_rate"]) != 48000:
-                resampler = "soxr" if soxr else "ffmpeg swresample (no libsoxr in this build)"
-                job.say(f"note: {stream['sample_rate']} Hz source resampled to 48 kHz with {resampler}")
-            wav_ok = run_ffmpeg_progress(commands.encode_wav(tools.ffmpeg, file_path, job.stream_index, stream, enc,
-                                                             temp_wav, soxr=soxr),
-                                         job, "Decoding to WAV (1/2)", job.duration, notify)
+            # eac3to cannot pad 3, 5 or 7 channels to a layout DEE takes; ffmpeg does those.
+            via = _eac3to_input(job, tools) if enc.wav_channels == stream["channels"] else None
+            soxr = False
+            if via:
+                temp_wav = os.path.join(work_dir, f"fpsconv_{job.id}.w64")
+                if int(stream["sample_rate"]) != 48000:
+                    job.say(f"note: {stream['sample_rate']} Hz source resampled to 48 kHz by eac3to")
+                track, extra = via
+                wav_ok = _run_eac3to(eac3to.encode_wav(tools.eac3to, file_path, track, extra, stream["sample_rate"],
+                                                       temp_wav), job, "Decoding to WAV (1/2)", notify, work_dir)
+            else:
+                temp_wav = os.path.join(work_dir, f"fpsconv_{job.id}.wav")
+                soxr = ffmpeg_has_soxr(tools.ffmpeg)
+                if int(stream["sample_rate"]) != 48000:
+                    resampler = "soxr" if soxr else "ffmpeg swresample (no libsoxr in this build)"
+                    job.say(f"note: {stream['sample_rate']} Hz source resampled to 48 kHz with {resampler}")
+                wav_ok = run_ffmpeg_progress(commands.encode_wav(tools.ffmpeg, file_path, job.stream_index, stream,
+                                                                 enc, temp_wav, soxr=soxr),
+                                             job, "Decoding to WAV (1/2)", job.duration, notify)
             if not wav_ok and soxr and not job.cancelled and int(stream["sample_rate"]) != 48000:
                 job.say("note: soxr resampler failed, retrying with ffmpeg's default resampler", "warning")
                 job.error = ""
@@ -591,17 +656,22 @@ def _deezy_work_dir() -> str:
 
 def _encode_flat71(job: Job, stream: dict, enc, work_dir: str, out_path: str, notify: ProgressFn,
                    tools: Tools) -> bool:
-    """TrueHD Atmos → flat DD+ 7.1 JOC: ffmpeg copy → truehdd DAMF → patched DEE via the wrapper."""
+    """TrueHD Atmos → flat DD+ 7.1 JOC: extract (eac3to, else ffmpeg) → truehdd DAMF → patched DEE via the wrapper."""
     deezy = tools.deezy_tools()
     src = job.source
     # 1/5 the TrueHD elementary stream (skip the copy when the source already is one)
     thd = src
     if (stream.get("format_name") or "") != "truehd":
         thd = os.path.join(work_dir, f"fpsconv_{job.id}.thd")
-        if not run_ffmpeg_progress(commands.thd_extract(tools.ffmpeg, src, job.stream_index, thd), job,
-                                   "Extracting TrueHD (1/5)", job.duration, notify):
-            return False
-        if job.cancelled:
+        via = _eac3to_input(job, tools)
+        if via:
+            track, extra = via
+            ok = _run_eac3to(eac3to.thd_extract(tools.eac3to, src, track, thd), job,
+                             "Extracting TrueHD (1/5)", notify, work_dir) and os.path.isfile(thd)
+        else:
+            ok = run_ffmpeg_progress(commands.thd_extract(tools.ffmpeg, src, job.stream_index, thd), job,
+                                     "Extracting TrueHD (1/5)", job.duration, notify)
+        if not ok or job.cancelled:
             return False
     # 2/5 truehdd → DAMF master
     master = os.path.join(work_dir, "master")

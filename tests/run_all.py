@@ -59,6 +59,7 @@ MODULES = [
     "test_encode_service",
     "test_encode_cli",
     "test_encode_import",
+    "test_encode_eac3to",
 ]
 
 

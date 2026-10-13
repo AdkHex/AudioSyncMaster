@@ -65,6 +65,7 @@ function EncodeBody() {
       </div>
       <div className="group-h">Tools</div>
       <div className="group">
+        <PathRow h="eac3to" value="C:\Tools\eac3to\eac3to.exe" ok />
         <PathRow h="truehdd" value="C:\Tools\truehdd\truehdd.exe" ok />
         <PathRow h="DeeZy" value="C:\Tools\DeeZy\deezy.exe" ok />
         <PathRow h="MediaInfo" ph="From the Dolby tools" ok />

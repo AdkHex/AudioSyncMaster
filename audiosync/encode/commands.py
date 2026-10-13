@@ -55,6 +55,12 @@ def fps_wav(ffmpeg: str, src: str, stream_index: int, channels: int, ratio: floa
     ]
 
 
+def aac_from_wav(ffmpeg: str, wav: str, bitrate: int, channels: int, out_path: str) -> list[str]:
+    """AAC from eac3to's already re-timed W64: an encode only, no filter."""
+    return [ffmpeg, "-y", "-nostdin", "-i", wav, "-map_metadata", "-1",
+            "-c:a", "aac", "-b:a", f"{bitrate}k", "-ac", str(channels), out_path]
+
+
 def deew_fps(deew: list[str], temp_wav: str, fmt: str, bitrate: int, out_dir: str) -> list[str]:
     """``deew`` back to the source's codec at its bitrate (``fmt`` is dd, ddp or thd)."""
     return deew + ["-i", temp_wav, "-f", fmt, "-b", str(bitrate), "-o", out_dir, "-np"]

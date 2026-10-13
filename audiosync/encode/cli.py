@@ -174,6 +174,7 @@ def _cli_doctor() -> int:
     print(f"mediainfo   : {d['mediainfo'] or ('pymediainfo (Dolby tools pack)' if d['pymediainfo'] else 'NOT FOUND (needed to detect Atmos)')}")
     print(f"deezy       : {'ok (' + d['deezy_via'] + ')' if d['deezy'] else 'NOT FOUND — needed for DDP Atmos: DeeZy standalone exe (github.com/jessielw/DeeZy), set its path in Preferences → Encode'}")
     print(f"truehdd     : {d['truehdd'] or 'NOT FOUND — needed for DDP Atmos (github.com/truehdd/truehdd)'}")
+    print(f"eac3to      : {d['eac3to'] or 'not set — ffmpeg decodes and re-times (atempo) instead'}")
     print(f"7.1 patcher : {d['patcher'] or 'not installed (Preferences → Encode → Dolby tools pack, or: patcher)'}")
     print(f"DEE for 7.1 : {_DLL_TEXT[d['dee_dll']['state']]}")
     print(f"settings    : {d['config_dir']}")

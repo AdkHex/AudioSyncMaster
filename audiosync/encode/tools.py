@@ -243,6 +243,7 @@ class Tools:
     ffprobe: str
     mediainfo: str
     truehdd: str
+    eac3to: str                 # "" = not found: ffmpeg decodes and re-times instead
     dee: str                    # from deew's config; "" = not configured
     deew: list[str]
     deezy: list[str]
@@ -261,6 +262,7 @@ class Tools:
             ffprobe=find_ffprobe(tools),
             mediainfo=tools.get("mediainfo") or "mediainfo",
             truehdd=tools.get("truehdd") or "truehdd",
+            eac3to=resolved(tools.get("eac3to")) or resolved("eac3to"),
             dee=configured_dee(),
             deew=deew_cmd(tools, pack_python),
             deezy=deezy_cmd(tools),
@@ -321,6 +323,7 @@ def doctor(overrides: Optional[dict] = None) -> dict:
         "mediainfo": resolved(t.mediainfo) or None,
         "pymediainfo": bool(t.pack_python),
         "truehdd": resolved(t.truehdd) or None,
+        "eac3to": t.eac3to or None,
         "deezy": _runs(t.deezy),
         "deezy_via": t.deezy[0],
         "dolby_pack": bool(t.pack_python),
