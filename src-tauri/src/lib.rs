@@ -1,5 +1,6 @@
 mod bridge;
 mod csv;
+mod encode;
 mod subsync;
 
 use std::fs;
@@ -13,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 
 use bridge::{BridgeHandle, ShotBridge, WaveformBridge};
+use encode::EncodeBridge;
 use subsync::SubsInfoBridge;
 
 /// How long to wait for a single engine event before assuming it has stalled.
@@ -1389,6 +1391,7 @@ pub fn run() {
         .manage(WaveformBridge::default())
         .manage(ShotBridge::default())
         .manage(SubsInfoBridge::default())
+        .manage(EncodeBridge::default())
         .invoke_handler(tauri::generate_handler![
             pick_video_folder,
             pick_audio_folder,
@@ -1426,9 +1429,26 @@ pub fn run() {
             subsync::subs_pack,
             subsync::subs_secret_status,
             subsync::subs_secret_set,
+            // Registered on every OS; each one refuses off Windows.
+            encode::start_audio_queue,
+            encode::audio_send,
+            encode::audio_probe,
+            encode::audio_reference,
+            encode::audio_suggest,
+            encode::encode_resolve,
+            encode::encode_doctor,
+            encode::encode_set_dee,
+            encode::audio_mediainfo,
+            encode::fpsconv_import,
+            encode::encode_settings_load,
+            encode::encode_settings_save,
+            encode::audio_history,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
+                if let Some(handle) = window.app_handle().try_state::<EncodeBridge>() {
+                    handle.close();
+                }
                 if let Some(handle) = window.app_handle().try_state::<BridgeHandle>() {
                     handle.shutdown();
                 }

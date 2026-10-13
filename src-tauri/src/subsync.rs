@@ -177,6 +177,18 @@ fn exchange<R: Runtime>(
     terminal: &str,
     timeout: Duration,
 ) -> Result<Value, String> {
+    exchange_on(app, handle, payload, terminal, timeout, "subsync-event")
+}
+
+/// [`exchange`], forwarding the events to the webview as `channel`.
+pub(crate) fn exchange_on<R: Runtime>(
+    app: &AppHandle<R>,
+    handle: &BridgeHandle,
+    payload: Value,
+    terminal: &str,
+    timeout: Duration,
+    channel: &str,
+) -> Result<Value, String> {
     handle.with(app, |bridge| {
         bridge.send(&payload)?;
         loop {
@@ -211,7 +223,7 @@ fn exchange<R: Runtime>(
                 }
                 _ => {}
             }
-            let _ = app.emit("subsync-event", &event);
+            let _ = app.emit(channel, &event);
             if kind == terminal {
                 return Ok(event);
             }
