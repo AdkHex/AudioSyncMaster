@@ -1,0 +1,38 @@
+"""Audio encode and FPS change, ported from FPSConv v1.1.24. See ENCODE.md.
+
+Two tasks share one queue:
+
+* **FPS change** -- an audio track timed to one frame rate re-timed to
+  another with ``atempo``: AAC in one ffmpeg pass, AC-3 / E-AC-3 / TrueHD
+  through a 24-bit WAV and DEE so the codec stays the same.
+* **Encode** -- any source to DD / DDP / DDP Atmos through DEE, no speed
+  change; TrueHD Atmos to DDP JOC through truehdd and DeeZy, or to flat 7.1
+  (Lb Rb) through the patched DEE.
+
+DEE runs on Windows only, so every entry point that runs a job calls
+:func:`require_windows` first. The pure modules (formats, fps, commands,
+progress, atmos) import and test on every OS.
+
+Behaviour matches FPSConv exactly -- the same command lines, output names,
+bitrate tables and notes -- apart from the fixes listed in
+FPSCONV-MIGRATION.md section 8.
+"""
+
+from __future__ import annotations
+
+import sys
+
+WINDOWS_ONLY = "Encode is available on Windows only"
+
+
+class WindowsOnly(RuntimeError):
+    """Raised by an encode entry point on macOS and Linux."""
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def require_windows() -> None:
+    if not is_windows():
+        raise WindowsOnly(WINDOWS_ONLY)

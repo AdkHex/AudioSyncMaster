@@ -48,6 +48,14 @@ MODULES = [
     "test_subs_tonemap",
     "test_subs_pgs",
     "test_subs_ocr",
+    "test_encode_formats",
+    "test_encode_fps",
+    "test_encode_commands",
+    "test_encode_progress",
+    "test_encode_atmos",
+    "test_encode_flat71",
+    "test_encode_settings",
+    "test_encode_job",
 ]
 
 
