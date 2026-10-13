@@ -499,10 +499,8 @@ export default function Index() {
 
   const note = update ? (
     <button type="button" className="acc" onClick={() => setPrefs("updates")}>Version {update.version} is ready — Update</button>
-  ) : ffmpeg ? (
-    `FFmpeg ${ffmpeg}`
-  ) : desktop ? null : (
-    "Browser preview — files and runs need the desktop app"
+  ) : (
+    "Made by Ionicboy"
   );
 
   const busyPage = enginePage && enginePage !== active ? enginePage : null;

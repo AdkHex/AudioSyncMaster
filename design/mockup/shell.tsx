@@ -201,7 +201,7 @@ export function Window({
       </div>
 
       <footer className="pagebar">
-        <span className="l">FFmpeg 6.1 · GPU ready</span>
+        <span className="l">Made by Ionicboy</span>
         <nav className="pages" aria-label="Pages">
           {pagesFor(mac).map((p, i) => (
             <button key={p.id} type="button" className={cx("pg", page === p.id && "on")} onClick={() => go(p.to)} title={`${p.label} (Ctrl+${i + 1})`}>
