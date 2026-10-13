@@ -4,6 +4,8 @@ import {
   ClosedCaptionRegular,
   ColumnDoubleCompareFilled,
   ColumnDoubleCompareRegular,
+  DeviceEqFilled,
+  DeviceEqRegular,
   ErrorCircleFilled,
   FilmstripFilled,
   FilmstripRegular,
@@ -14,6 +16,8 @@ import {
   MoviesAndTvFilled,
   MoviesAndTvRegular,
   SettingsRegular,
+  TopSpeedFilled,
+  TopSpeedRegular,
   WarningFilled,
   WindowConsoleRegular,
 } from "@fluentui/react-icons";
@@ -60,7 +64,7 @@ export function AutoGo({ to, ms }: { to: string; ms: number }) {
 }
 
 /* -------------------------------- window -------------------------------- */
-export type Page = "movies" | "series" | "match" | "dub" | "subs";
+export type Page = "movies" | "series" | "match" | "dub" | "subs" | "encode" | "fpsconv";
 
 export const SUB_TOOLS: { id: string; label: string }[] = [
   { id: "sync", label: "Sync" },
@@ -80,7 +84,13 @@ const PAGES: { id: Page; label: string; icon: ReactNode; on: ReactNode; to: stri
   { id: "match", label: "Find match", icon: <ColumnDoubleCompareRegular />, on: <ColumnDoubleCompareFilled />, to: "match-done" },
   { id: "dub", label: "Dub sync", icon: <HeadphonesSoundWaveRegular />, on: <HeadphonesSoundWaveFilled />, to: "dub-done" },
   { id: "subs", label: "Subsync", icon: <ClosedCaptionRegular />, on: <ClosedCaptionFilled />, to: "sub-sync" },
+  // Windows only: Dolby Encoding Engine does not run on macOS or Linux.
+  { id: "encode", label: "Encode", icon: <DeviceEqRegular />, on: <DeviceEqFilled />, to: "encode-ready" },
+  { id: "fpsconv", label: "FPSConv", icon: <TopSpeedRegular />, on: <TopSpeedFilled />, to: "fps-ready" },
 ];
+const WINDOWS_ONLY: Page[] = ["encode", "fpsconv"];
+/** The pages this OS shows, in page-bar order (Ctrl+1 … Ctrl+7 on Windows). */
+export const pagesFor = (mac: boolean) => PAGES.filter((p) => !mac || !WINDOWS_ONLY.includes(p.id));
 
 const MENUS = ["File", "Edit", "View", "Tools", "Help"];
 
@@ -193,8 +203,8 @@ export function Window({
       <footer className="pagebar">
         <span className="l">FFmpeg 6.1 · GPU ready</span>
         <nav className="pages" aria-label="Pages">
-          {PAGES.map((p) => (
-            <button key={p.id} type="button" className={cx("pg", page === p.id && "on")} onClick={() => go(p.to)} title={`${p.label} (Ctrl+${PAGES.indexOf(p) + 1})`}>
+          {pagesFor(mac).map((p, i) => (
+            <button key={p.id} type="button" className={cx("pg", page === p.id && "on")} onClick={() => go(p.to)} title={`${p.label} (Ctrl+${i + 1})`}>
               <span className="ic">{page === p.id ? p.on : p.icon}</span>
               {p.label}
               {busy === p.id && page !== p.id && <span className="busy"><Ring size={10} /></span>}

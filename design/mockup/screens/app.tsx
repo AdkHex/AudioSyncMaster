@@ -1,16 +1,20 @@
 import {
   ArrowDownloadRegular,
   ArrowSyncRegular,
+  CheckmarkCircleFilled,
   ClosedCaptionRegular,
   DataHistogramRegular,
+  DeviceEqRegular,
   HeadphonesSoundWaveRegular,
   SettingsRegular,
+  WarningFilled,
 } from "@fluentui/react-icons";
 import type { ReactNode } from "react";
 
 import { Btn, Combo, PBar, Slider, TBox, Toggle, cx } from "../kit";
 import { AutoGo, useProgress, useProto } from "../shell";
 import { Movies } from "./analyse";
+import { Encode } from "./audio";
 
 const Row = ({ h, d, children, sub }: { h: ReactNode; d?: ReactNode; children?: ReactNode; sub?: boolean }) => (
   <div className={cx("srow", sub && "sub")}>
@@ -25,17 +29,70 @@ const SliderCtl = ({ pct, v }: { pct: number; v: string }) => (
   <div className="row" style={{ gap: 12, width: 240 }}><Slider pct={pct} /><span className="num" style={{ width: 36, textAlign: "right" }}>{v}</span></div>
 );
 
-type PTab = "general" | "analysis" | "dub" | "subs" | "updates";
-const TABS: { id: PTab; label: string; icon: ReactNode }[] = [
+type PTab = "general" | "analysis" | "dub" | "subs" | "encode" | "updates";
+const TABS: { id: PTab; label: string; icon: ReactNode; windows?: boolean }[] = [
   { id: "general", label: "General", icon: <SettingsRegular /> },
   { id: "analysis", label: "Analysis", icon: <DataHistogramRegular /> },
   { id: "dub", label: "Dub sync", icon: <HeadphonesSoundWaveRegular /> },
   { id: "subs", label: "Subtitles", icon: <ClosedCaptionRegular /> },
+  { id: "encode", label: "Encode", icon: <DeviceEqRegular />, windows: true },
   { id: "updates", label: "Updates", icon: <ArrowSyncRegular /> },
 ];
 
+const Found = ({ ok }: { ok: boolean }) => (
+  <span style={{ fontSize: 16, display: "grid", marginRight: 4 }}>{ok ? <CheckmarkCircleFilled className="ok" /> : <WarningFilled className="warn" />}</span>
+);
+const PathRow = ({ h, value, ph, ok, open }: { h: string; value?: string; ph?: string; ok?: boolean; open?: boolean }) => (
+  <Row h={h}>
+    {ok !== undefined && <Found ok={ok} />}
+    <TBox value={value} ph={ph} w={290} />
+    <Btn>Browse</Btn>
+    {open && <Btn>Open</Btn>}
+  </Row>
+);
+
+function EncodeBody() {
+  return (
+    <>
+      <div className="group-h">Dolby Encoding Engine</div>
+      <div className="group">
+        <Row h="dee.exe"><TBox value="C:\Program Files\Dolby\DEE\dee.exe" w={290} /><Btn>Browse</Btn><Btn accent>Apply</Btn></Row>
+        <Row h="Build" d="DEE 5.2.1 · supported by the flat 7.1 patch"><Found ok /></Row>
+      </div>
+      <div className="group-h">Dolby tools</div>
+      <div className="group">
+        <Row h="deew, MediaInfo and the 7.1 patcher" d="deew 3.2.2 · pymediainfo 7.0.1 · patcher v1.1-stable · 38 MB"><span className="t3" style={{ marginRight: 8 }}>Installed</span><Btn>Remove</Btn></Row>
+      </div>
+      <div className="group-h">Tools</div>
+      <div className="group">
+        <PathRow h="truehdd" value="C:\Tools\truehdd\truehdd.exe" ok />
+        <PathRow h="DeeZy" value="C:\Tools\DeeZy\deezy.exe" ok />
+        <PathRow h="MediaInfo" ph="From the Dolby tools" ok />
+        <PathRow h="FFmpeg" ph="Bundled · FFmpeg 6.1" ok />
+        <PathRow h="FFprobe" ph="Bundled · FFmpeg 6.1" ok />
+        <PathRow h="7.1 patcher folder" ph="From the Dolby tools" />
+      </div>
+      <div className="group-h">Flat 7.1</div>
+      <div className="group">
+        <Row h="Conform the Atmos bed" d="truehdd --bed-conform"><Toggle on /></Row>
+        <Row h="Ready"><Found ok /></Row>
+      </div>
+      <div className="group-h">Folders</div>
+      <div className="group">
+        <PathRow h="Temp" ph="…\AppData\Local\com.audiosyncmaster.app\encode\temp" open />
+        <PathRow h="Working" ph="…\AppData\Local\com.audiosyncmaster.app\encode\work" open />
+      </div>
+      <div className="group-h">FPSConv</div>
+      <div className="group">
+        <Row h="Import FPSConv settings"><Btn>Import</Btn></Row>
+      </div>
+    </>
+  );
+}
+
 function PrefsBody({ tab }: { tab: PTab }) {
   const p = useProgress(42, 8000, 20);
+  if (tab === "encode") return <EncodeBody />;
   if (tab === "analysis")
     return (
       <>
@@ -118,18 +175,18 @@ function UpdateBtn() {
 }
 
 function PrefsWindow({ tab }: { tab: PTab }) {
-  const { go } = useProto();
+  const { go, mac } = useProto();
   return (
     <div className="smoke">
       <div className="prefs">
         <div className="pt">
           Preferences
-          <button type="button" className="cap x" style={{ marginLeft: "auto" }} aria-label="Close" onClick={() => go("movies-done")}>
+          <button type="button" className="cap x" style={{ marginLeft: "auto" }} aria-label="Close" onClick={() => go(tab === "encode" ? "encode-ready" : "movies-done")}>
             <svg width="10" height="10"><path d="M.5.5l9 9M9.5.5l-9 9" stroke="currentColor" /></svg>
           </button>
         </div>
         <div className="ptabs">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !mac || !t.windows).map((t) => (
             <button key={t.id} type="button" className={cx("ptab", t.id === tab && "on")} onClick={() => go(t.id === "general" ? "prefs" : `prefs-${t.id}`)}>
               <span className="ic">{t.icon}</span>
               {t.label}
@@ -140,7 +197,7 @@ function PrefsWindow({ tab }: { tab: PTab }) {
         <div className="pfoot">
           <Btn>Reset to defaults</Btn>
           <span style={{ flex: 1 }} />
-          <Btn accent style={{ minWidth: 96 }} onClick={() => go("movies-done")}>Done</Btn>
+          <Btn accent style={{ minWidth: 96 }} onClick={() => go(tab === "encode" ? "encode-ready" : "movies-done")}>Done</Btn>
         </div>
       </div>
     </div>
@@ -148,6 +205,7 @@ function PrefsWindow({ tab }: { tab: PTab }) {
 }
 
 export function Prefs({ tab }: { tab: PTab }) {
+  if (tab === "encode") return <Encode phase="ready" overlay={<PrefsWindow tab={tab} />} />;
   return <Movies phase="done" overlay={<PrefsWindow tab={tab} />} />;
 }
 

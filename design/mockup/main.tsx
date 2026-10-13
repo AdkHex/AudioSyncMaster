@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { FindMatch, Movies, Series } from "./screens/analyse";
 import { Prefs, UpdateInstall } from "./screens/app";
+import { Encode, FpsConv } from "./screens/audio";
 import { DubSync } from "./screens/dub";
 import { OcrReview, SubTool } from "./screens/subs";
 import { Ctx, SUB_TOOLS, type Proto } from "./shell";
@@ -52,12 +53,30 @@ const SCREENS: Screen[] = [
   { id: "sub-ocr-done", group: "Subsync", label: "OCR · review", render: () => <OcrReview /> },
   ...SUB_TOOLS.filter((t) => t.id !== "sync").map((t) => ({ id: `sub-${t.id}`, group: "Subsync", label: t.label, render: () => <SubTool tool={t.id} /> })),
 
+  // Windows only.
+  { id: "encode-empty", group: "Encode", label: "Empty", render: () => <Encode phase="empty" /> },
+  { id: "encode-import", group: "Encode", label: "FPSConv settings found", render: () => <Encode phase="import" /> },
+  { id: "encode-ready", group: "Encode", label: "Ready", render: () => <Encode phase="ready" /> },
+  { id: "encode-blocked", group: "Encode", label: "Ready · DEE not set", render: () => <Encode phase="blocked" /> },
+  { id: "encode-more", group: "Encode", label: "More options", render: () => <Encode phase="more" /> },
+  { id: "encode-run", group: "Encode", label: "Encoding · progress", render: () => <Encode phase="run" /> },
+  { id: "encode-log", group: "Encode", label: "Encoding · job log", render: () => <Encode phase="log" /> },
+  { id: "encode-done", group: "Encode", label: "Done + a refused DEE", render: () => <Encode phase="done" /> },
+  { id: "encode-mediainfo", group: "Encode", label: "MediaInfo", render: () => <Encode phase="mediainfo" /> },
+
+  { id: "fps-empty", group: "FPSConv", label: "Empty", render: () => <FpsConv phase="empty" /> },
+  { id: "fps-ready", group: "FPSConv", label: "Ready · target video", render: () => <FpsConv phase="ready" /> },
+  { id: "fps-more", group: "FPSConv", label: "More options", render: () => <FpsConv phase="more" /> },
+  { id: "fps-run", group: "FPSConv", label: "Converting", render: () => <FpsConv phase="run" /> },
+  { id: "fps-done", group: "FPSConv", label: "Done", render: () => <FpsConv phase="done" /> },
+
   { id: "menu-file", group: "App", label: "File menu", render: () => <Movies phase="done" menu /> },
   { id: "history", group: "App", label: "History", render: () => <Movies phase="done" history /> },
   { id: "prefs", group: "App", label: "Preferences · General", render: () => <Prefs tab="general" /> },
   { id: "prefs-analysis", group: "App", label: "Preferences · Analysis", render: () => <Prefs tab="analysis" /> },
   { id: "prefs-dub", group: "App", label: "Preferences · Dub sync", render: () => <Prefs tab="dub" /> },
   { id: "prefs-subs", group: "App", label: "Preferences · Subtitles", render: () => <Prefs tab="subs" /> },
+  { id: "prefs-encode", group: "App", label: "Preferences · Encode", render: () => <Prefs tab="encode" /> },
   { id: "prefs-updates", group: "App", label: "Preferences · Updates", render: () => <Prefs tab="updates" /> },
   { id: "update-install", group: "App", label: "Installing an update", render: () => <UpdateInstall /> },
 ];
