@@ -635,7 +635,7 @@ export function AnalysePage({ mode, hidden }: { mode: Mode; hidden: boolean }) {
       tools={tools}
       lcd={lcd}
       primary={primary}
-      cols={withDetails(mode, state) ? "minmax(0,1fr) 300px" : "minmax(0,1fr)"}
+      cols={withDetails(mode, state) ? "minmax(0,1fr) var(--side)" : "minmax(0,1fr)"}
       dock={dock}
     >
       <AnalyseWorkspace
@@ -757,7 +757,7 @@ function statusDisplay({
               ? baseName(state.currentFile)
               : `${plural(state.progress.total, "pair")}`,
       pct,
-      time: left,
+      time: pct === null ? left : left ? `${Math.round(pct)}% · ${left}` : `${Math.round(pct)}%`,
     };
   }
   if (state.error) return { icon: "bad", l1: "The analysis could not finish", l2: state.error };
@@ -784,9 +784,13 @@ function statusDisplay({
       };
     }
     const outcome = resultsOutcome(state.results);
+    // Episodes with no dub have no result, but their rows say "Not paired":
+    // the count says so too.
+    const pairedPaths = new Set(effectivePairing?.pairs.map((p) => p.primaryPath) ?? []);
+    const unpaired = mode === "series" && effectivePairing ? state.videoFiles.filter((f) => !pairedPaths.has(f.path)).length : 0;
     return {
-      icon: outcome.tone === "ok" ? "ok" : "warn",
-      l1: outcome.text,
+      icon: outcome.tone === "ok" && !unpaired ? "ok" : "warn",
+      l1: unpaired ? `${outcome.text} · ${unpaired} not paired` : outcome.text,
       l2: runTook
         ? `${state.results.length} analysed in ${tookText(runTook)}${state.status === "cancelled" ? " · stopped" : ""}`
         : `${plural(state.results.length, mode === "series" ? "episode" : "file")} analysed${state.status === "cancelled" ? " · stopped" : ""}`,

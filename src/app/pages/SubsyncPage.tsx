@@ -760,7 +760,7 @@ export function SubsyncPage({ hidden }: { hidden: boolean }) {
       lcd={lcd}
       primary={primary}
       strip={strip}
-      cols={empty ? "minmax(0,1fr)" : "minmax(0,1fr) 300px"}
+      cols={empty ? "minmax(0,1fr)" : "minmax(0,1fr) var(--side)"}
       dock={dock}
     >
       {empty ? (

@@ -35,6 +35,9 @@ export function lowerFirst(text: string): string {
   return text.charAt(0).toLowerCase() + text.slice(1);
 }
 
+/** "looking for cuts" -> "Looking for cuts". */
+const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
 // ---------------------------------------------------------------- problems
 
 /** The engine-independent problems inputs.ts reports, in three lengths: the
@@ -127,8 +130,8 @@ export function jobStatus(job: RunJob): RowStatus {
     case "queued":
       return { s: "wait", text: "Waiting" };
     case "running":
-      // The percent, as the mockup has it; the stage is in the tooltip and the status display.
-      return { s: "run", pct: job.percent, title: job.stage ?? undefined };
+      // What the job is doing and its percent, over its bar.
+      return { s: "run", pct: job.percent, text: job.stage ? upperFirst(job.stage) : "Starting", title: job.stage ?? undefined };
     case "done":
       return job.outcome ? doneStatus(job.outcome) : { s: "ok" };
     case "failed":

@@ -513,7 +513,7 @@ export function pageStatus(i: StatusInput): PageStatus {
       l1: `Syncing ${Math.min(run.length, Math.max(1, closed + running.length))} of ${run.length}` + (focus ? ` · ${stageLabel(focus.stage)}` : ""),
       l2: `${collectionTitle(run.map((j) => j.name))} · ${Math.min(i.workers, run.length)} at a time`,
       pct: fraction * 100,
-      time: timeLeft(queue.startedAt, fraction, i.now),
+      time: [`${Math.round(fraction * 100)}%`, timeLeft(queue.startedAt, fraction, i.now)].filter(Boolean).join(" · "),
     };
   }
 

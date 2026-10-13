@@ -311,7 +311,7 @@ export function PageView({
   lcd,
   primary,
   strip,
-  cols = "minmax(0,1fr) 300px",
+  cols = "minmax(0,1fr) var(--side)",
   dock,
   children,
   hidden,

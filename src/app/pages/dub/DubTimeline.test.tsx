@@ -43,9 +43,10 @@ describe("DubTimeline", () => {
     expect(blocks(html, "dub")).toHaveLength(4);
     expect(blocks(html, "fill")).toHaveLength(4);
     expect(html.match(/class="segm dub sel"/g)).toHaveLength(1);
-    // The minimap marks every stretch taken from the original, and the view.
+    // The minimap marks every stretch taken from the original. The view's
+    // frame shows only when zoomed in: here the whole film is in view.
     expect(html.match(/<i style="left:[\d.]+%;width:max\(2px, [\d.]+%\)"><\/i>/g)).toHaveLength(4);
-    expect(html).toMatch(/<b style="left:0;width:800px"><\/b>/);
+    expect(html).not.toContain("<b style=");
   });
 
   it("outlines what the engine has not placed yet, while it places", () => {

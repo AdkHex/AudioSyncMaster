@@ -62,8 +62,8 @@ describe("DubQueue", () => {
     expect(html).toContain("Show.S01E01.mkv");
     expect(html).toContain("Finding where the dub belongs");
     expect(html).toContain('aria-valuenow="40"');
-    // No error measured yet.
-    expect(html).toContain('<span class="t3">—</span>');
+    // No error measured yet: the column stays blank until the pair is done.
+    expect(html).not.toContain('<span class="t3">—</span>');
   });
 
   it("shows every job of a season, each with its own state", () => {

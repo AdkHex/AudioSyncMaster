@@ -1009,8 +1009,16 @@ export function DubPage({ hidden }: { hidden: boolean }) {
     if (lengthError) return `Could not read the waveforms: ${lengthError}`;
     const parts = Object.entries(reading)
       .filter(([path]) => path === shown?.videoPath || path === shown?.dubPath)
-      .map(([path, pct]) => `${path === shown?.videoPath ? shown?.videoName : shown?.dubName} ${pct}%`);
+      .map(([path]) => (path === shown?.videoPath ? shown?.videoName : shown?.dubName));
     return parts.length ? `Reading the waveforms — ${parts.join(" · ")}` : "Reading the files…";
+  })();
+  // The two files' reading as one bar under the note; null until it starts.
+  const readingPct = (() => {
+    if (!desktop || lengthError || (!shown?.paired && !job)) return undefined;
+    const pcts = Object.entries(reading)
+      .filter(([path]) => path === shown?.videoPath || path === shown?.dubPath)
+      .map(([, pct]) => pct);
+    return pcts.length ? pcts.reduce((sum, pct) => sum + pct, 0) / pcts.length : null;
   })();
 
   const timelineTools = (
@@ -1072,7 +1080,7 @@ export function DubPage({ hidden }: { hidden: boolean }) {
       onKeyDown={onEditorKey}
     />
   ) : (
-    <TimelineMessage>{readingNote}</TimelineMessage>
+    <TimelineMessage pct={readingPct}>{readingNote}</TimelineMessage>
   );
 
   const pairs = rows.filter((r) => r.paired).length;
@@ -1084,7 +1092,7 @@ export function DubPage({ hidden }: { hidden: boolean }) {
   });
 
   return (
-    <PageView hidden={hidden} tools={tools} lcd={lcd} primary={primary} cols={empty ? "minmax(0,1fr)" : "minmax(0,1fr) 300px"} dock={dock}>
+    <PageView hidden={hidden} tools={tools} lcd={lcd} primary={primary} cols={empty ? "minmax(0,1fr)" : "minmax(0,1fr) var(--side)"} dock={dock}>
       {empty ? (
         <section className="box">
           <Empty icon={<HeadphonesSoundWaveRegular />} title="Drop movies and their dubs">

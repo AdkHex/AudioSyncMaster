@@ -40,6 +40,7 @@ import type {
   VoiceToolsResult,
   VoiceToolsStatus,
 } from "@/lib/types";
+import { formatPlayerDelay } from "@/lib/types";
 import type { SubJob, SubJobOutcome, SubsyncEvent } from "@/lib/subsync/types";
 
 import { DUB_STAGES, DUB_STAGE_MS, DUB_WRITE_MS, describePlan, draftPlan, generatedPlan, muxPathFor, outputFor, skylinePlan, verification, verificationText } from "./dubfx";
@@ -226,7 +227,8 @@ async function startSync(request: AnalyzeRequest): Promise<SyncRun> {
       log(
         result.error
           ? `${pair.primaryName}: ${result.error}`
-          : `${pair.primaryName}: delay ${result.delayMs?.toFixed(1)} ms, confidence ${Math.round((result.confidence ?? 0) * 100)}%`,
+          : // In the player convention, as the table shows it.
+            `${pair.primaryName}: delay ${formatPlayerDelay(result.delayMs)}, confidence ${Math.round((result.confidence ?? 0) * 100)}%`,
       );
       return true;
     };

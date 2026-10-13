@@ -184,7 +184,7 @@ describe("OutputBox", () => {
 });
 
 describe("StagesBox", () => {
-  it("ticks the stages done, spins the current one with its percent", () => {
+  it("ticks the stages done, spins the current one, and shows the job's percent on a bar", () => {
     let state = dubQueueReducer(initialDubQueueState, { type: "queueStarted", jobs: [{ name: "film.mkv", dubName: "film.ac3" }] });
     state = dubQueueReducer(state, { type: "jobStart", job: 0 });
     state = dubQueueReducer(state, { type: "jobProgress", job: 0, percent: 42, stage: "placing the cuts" });
@@ -194,7 +194,10 @@ describe("StagesBox", () => {
     // Four done before it: reading, frame rate, finding, measuring.
     expect(html.match(/<svg[^>]*class="[^"]*\bok\b/g)).toHaveLength(4);
     expect(html).toContain('class="ring"');
-    expect(html).toMatch(/Placing the cuts<\/span><span class="t3 num">42%<\/span>/);
+    expect(html).toContain('<span class="grow truncate strong">Placing the cuts</span>');
+    // The engine's percent is the whole job's: one bar under the list.
+    expect(html).toMatch(/Step 5 of 9<\/span><span class="num">42%<\/span>/);
+    expect(html).toMatch(/<span class="pbar live"[^>]*aria-valuenow="42"/);
     expect(renderToStaticMarkup(<StagesBox title="x" job={state.jobs[0]} mux />).match(/class="row"/g)).toHaveLength(10);
   });
 

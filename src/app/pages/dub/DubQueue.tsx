@@ -77,7 +77,8 @@ export const DubQueue = memo(function DubQueue({
                 )}
               </span>
               <span className="r num" style={{ display: "flex" }}>
-                {error ?? <span className="t3">—</span>}
+                {/* Blank until the pair is done, as in every list. */}
+                {error ?? (status.s === "ok" || status.s === "warn" || status.s === "bad" ? <span className="t3">—</span> : null)}
               </span>
               <span className="dubq-st" title={status.title}>
                 <Status s={status.s} text={status.text} pct={status.pct} />

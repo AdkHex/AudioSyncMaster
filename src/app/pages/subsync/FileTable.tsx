@@ -60,7 +60,8 @@ export function FilesTable(props: FilesProps) {
               </span>
             </span>
             <span className="r num" style={{ display: "flex" }}>
-              {result ?? <span className="t3">—</span>}
+              {/* Blank until the file is done, as in every list. */}
+              {result ?? (status.s === "ok" || status.s === "warn" || status.s === "bad" ? <span className="t3">—</span> : null)}
             </span>
             <span className="ss-status" title={status.title}>
               <Status s={status.s} text={status.text} pct={status.pct} />

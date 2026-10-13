@@ -48,6 +48,7 @@ import {
   Links,
   Meter,
   MidText,
+  PBar,
   Ring,
   Seg,
   Status,
@@ -123,7 +124,10 @@ function Name({ children, icon = <VideoClipRegular />, tail = 18 }: { children: 
 }
 
 function Conf({ r }: { r?: SyncResult }) {
-  if (!r || r.error || r.confidence === null || r.delayMs === null) return <Dash />;
+  // Blank until the row is measured, and for a failure (its delay has the
+  // one dash); a dash for a measured row with no confidence.
+  if (!r || r.error) return <span />;
+  if (r.confidence === null || r.delayMs === null) return <Dash />;
   const c = Math.round(r.confidence * 100);
   return (
     <span className="cell num">
@@ -135,7 +139,7 @@ function Conf({ r }: { r?: SyncResult }) {
 
 function Delay({ r }: { r?: SyncResult }) {
   const ms = r ? playerDelayMs(r.delayMs) : null;
-  return <span className="r num" style={{ display: "flex" }}>{ms === null || r?.isLikelyCut ? <Dash /> : delayText(r!.delayMs)}</span>;
+  return <span className="r num" style={{ display: "flex" }}>{!r ? null : ms === null || r.isLikelyCut ? <Dash /> : delayText(r.delayMs)}</span>;
 }
 
 /** Status word for a measured result. */
@@ -560,23 +564,23 @@ function FileDetails({
   ];
   if (kind === "video") rows.push(["Frame rate", fps ? `${formatFps(fps)} fps` : "—"]);
   rows.push(["Size", formatSize(file.size)]);
-  if (tracks.length > 1)
-    rows.push([
-      "Audio track",
-      <Combo
-        key="t"
-        sm
-        w="100%"
-        label={`Audio track for ${file.name}`}
-        value={trackChoice}
-        options={tracks.map((t, i) => ({ value: i, label: trackText({ ...t, index: i }) || t.label || `Track ${i + 1}` }))}
-        onChange={onTrackChange}
-      />,
-    ]);
-  else rows.push(["Audio", streamSummary(probe, listing, kind) ?? (probe && !probe.hasAudio ? "None" : "—")]);
+  if (tracks.length <= 1) rows.push(["Audio", streamSummary(probe, listing, kind) ?? (probe && !probe.hasAudio ? "None" : "—")]);
   return (
     <Box title={<MidText text={file.name} tail={22} />}>
       <DL rows={rows} />
+      {tracks.length > 1 && (
+        // The pane's full width, so "1 · English · TrueHD 7.1" reads whole.
+        <div className="col" style={{ gap: 6 }}>
+          <span className="t3">Audio track</span>
+          <Combo
+            w="100%"
+            label={`Audio track for ${file.name}`}
+            value={trackChoice}
+            options={tracks.map((t, i) => ({ value: i, label: trackText({ ...t, index: i }) || t.label || `Track ${i + 1}` }))}
+            onChange={onTrackChange}
+          />
+        </div>
+      )}
       {probe && !probe.hasAudio && <span className="bad sm">This file has no audio track to compare.</span>}
       {listing?.error && <span className="bad sm">{listing.error}</span>}
     </Box>
@@ -585,12 +589,21 @@ function FileDetails({
 
 const WINDOWS = [0.08, 0.24, 0.4, 0.56, 0.72, 0.88];
 
+/** How many of a file's windows are measured, from its percent. */
+const windowsLit = (pct: number, windows: number) => Math.min(windows, Math.floor((pct / 100) * (windows + 1)));
+
+/** "Window 3 of 6": the one being measured now. */
+const windowText = (pct: number, windows: number) => `Window ${Math.max(1, Math.min(windows, windowsLit(pct, windows) + 1))} of ${windows}`;
+
 function RunDetails({ name, pct, windows }: { name: string; pct: number; windows: number }) {
-  const lit = Math.min(windows, Math.floor((pct / 100) * (windows + 1)));
+  const lit = windowsLit(pct, windows);
   const at = windowsAt(windows);
   return (
     <Box title={<MidText text={name} tail={22} />}>
-      <div className="row"><span className="grow">Measuring</span><span className="t3 num">window {Math.max(1, Math.min(windows, lit + 1))} of {windows}</span></div>
+      <div className="col" style={{ gap: 8 }}>
+        <div className="row"><span className="grow">Measuring</span><span className="t3 num">{windowText(pct, windows).toLowerCase()} · {Math.round(pct)}%</span></div>
+        <PBar pct={pct} live />
+      </div>
       <div style={{ position: "relative", height: 64 }}>
         <Wave seed={name.length * 17} color="var(--wave-a)" />
         {at.map((x, i) => (
@@ -642,10 +655,12 @@ export interface WorkspaceProps {
 }
 
 /** Movies shows the selected file's details as soon as there are files;
- *  Series and Find match only once a run has results. */
+ *  Series and Find match from the start of a run (the file being measured)
+ *  on. The pane stays through the run, so the columns do not move when the
+ *  results come in. */
 export function withDetails(mode: Mode, state: SyncState): boolean {
   if (mode === "movie") return state.videoFiles.length > 0 || state.audioFiles.length > 0;
-  return state.results.length > 0 && state.status !== "processing";
+  return state.status === "processing" || state.results.length > 0;
 }
 
 export function AnalyseWorkspace(props: WorkspaceProps) {
@@ -690,8 +705,10 @@ function ListPage(props: WorkspaceProps) {
 
   const series = mode === "series";
   const withChk = hasResults;
-  const cols = [withChk && "18px", series && "64px", "minmax(0,1fr)", "88px", "84px", series ? "140px" : "132px"].filter(Boolean).join(" ");
-  const head = [withChk && "", series && "Episode", series ? "Video" : "Name", " Delay", "Confidence", "Status"].filter((h) => h !== false) as string[];
+  // The check column is there from the start, blank until there is something
+  // to fix, so the names do not move when the results come in.
+  const cols = ["18px", series && "64px", "minmax(0,1fr)", "88px", "84px", "150px"].filter(Boolean).join(" ");
+  const head = ["", series && "Episode", series ? "Video" : "Name", " Delay", "Confidence", "Status"].filter((h) => h !== false) as string[];
 
   // Rows: measured results once there are any, the videos before. Series
   // keeps every episode in its place, the ones with no dub among them.
@@ -699,7 +716,7 @@ function ListPage(props: WorkspaceProps) {
   const measured: Row[] = applyFilter(results, filter).map((r) => ({ key: resultKey(r), video: r.primaryPath ?? r.videoFile, name: r.videoFile, r }));
   const paired = new Set((pairing?.pairs ?? []).map((p) => p.primaryPath));
   const rows: Row[] = !hasResults
-    ? state.videoFiles.map((f) => ({ key: f.path, video: f.path, name: f.name, r: byVideo.get(f.path) }))
+    ? state.videoFiles.map((f) => ({ key: f.path, video: f.path, name: f.name, r: byVideo.get(f.path), unpaired: series && !!pairing && !paired.has(f.path) }))
     : series && pairing && filter === "all"
       ? [
           ...state.videoFiles.flatMap((f): Row[] => {
@@ -738,7 +755,7 @@ function ListPage(props: WorkspaceProps) {
     }
     if (running) {
       const pct = measuringPct(row);
-      return pct !== undefined ? <Status s="run" pct={pct} /> : <Status s="wait" />;
+      return pct !== undefined ? <Status s="run" pct={pct} text={windowText(pct, props.windowCount)} /> : <Status s="wait" />;
     }
     const probe = probes[row.video];
     if (probe && !probe.hasAudio) return <Status s="warn" text="No audio" />;
@@ -811,13 +828,14 @@ function ListPage(props: WorkspaceProps) {
         <Table cols={cols} head={head} label={title}>
           {rows.map((row) => (
             <Tr key={row.key} on={withDetails(mode, state) && row.key === focused?.key} onClick={() => onFocus(row.key)} label={row.name}>
-              {withChk &&
-                (row.r && !row.r.error && row.r.delayMs !== null && !row.r.isLikelyCut ? (
-                  <Chk name={`Fix ${row.name}`} on={selectedKeys.has(row.key)} onChange={() => onToggle(row.key)} />
-                ) : (
-                  // Nothing to fix (a failure, another cut): the box stays empty.
-                  <span className="chk" aria-hidden />
-                ))}
+              {!withChk ? (
+                <span aria-hidden />
+              ) : row.r && !row.r.error && row.r.delayMs !== null && !row.r.isLikelyCut ? (
+                <Chk name={`Fix ${row.name}`} on={selectedKeys.has(row.key)} onChange={() => onToggle(row.key)} />
+              ) : (
+                // Nothing to fix (a failure, another cut): the box stays empty.
+                <span className="chk" aria-hidden />
+              )}
               {series && <span className="num t2">{episodeCode(keyByVideo.get(row.video), row.name)}</span>}
               <Name>{row.name}</Name>
               <Delay r={row.r} />
@@ -957,7 +975,7 @@ const sides = (results: SyncResult[], side: "video" | "dub"): Side[] => [
 ];
 type Side = Pick<FileItem, "path" | "name">;
 
-function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyCommand, onOpenDubSync }: WorkspaceProps) {
+function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyCommand, onOpenDubSync, windowCount }: WorkspaceProps) {
   // A run reopened from History brings its results, not the files: the grid
   // is then built from what the results name.
   const videos: Side[] = state.videoFiles.length ? state.videoFiles : sides(state.results, "video");
@@ -984,6 +1002,13 @@ function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyComm
   const title = commonTitle(videos.map((v) => v.name));
   const dubNames = dubs.map((d) => d.name);
   const doneCount = state.results.length;
+  // The percent of a video being tested now; undefined while it waits.
+  const testingPct = (v: Side): number | undefined => {
+    const pct = state.inFlight[v.name] ?? state.inFlight[baseName(v.path)] ?? state.inFlight[v.path];
+    if (pct !== undefined) return pct;
+    return state.currentFile && (state.currentFile === v.path || baseName(state.currentFile) === v.name) ? state.fileProgress : undefined;
+  };
+  const testingVideo = running ? videos.find((v) => testingPct(v) !== undefined) : undefined;
 
   return (
     <>
@@ -1011,7 +1036,7 @@ function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyComm
                   const isBest = r ? best.get(d.path) === key : false;
                   const c = r && r.confidence !== null && !r.error ? Math.round(r.confidence * 100) : null;
                   const on = !!r && focusedResult === r;
-                  const testing = running && !r && state.currentFile && (state.currentFile === v.path || baseName(state.currentFile) === v.name);
+                  const testing = running && !r ? testingPct(v) : undefined;
                   return (
                     <button
                       key={d.path}
@@ -1037,8 +1062,10 @@ function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyComm
                             {r.error ? shortError(r.error) : (c ?? 0) >= 50 ? delayText(r.delayMs) : "No match"}
                           </span>
                         </>
-                      ) : testing ? (
-                        <span className="cell t3"><Ring size={14} /> Testing</span>
+                      ) : testing !== undefined ? (
+                        <Status s="run" pct={testing} text="Testing" />
+                      ) : running ? (
+                        <span className="t3">Waiting</span>
                       ) : (
                         <Dash />
                       )}
@@ -1063,7 +1090,9 @@ function MatchGrid({ state, focus, onFocus, previewingKey, onPreview, onCopyComm
           </div>
         </div>
       </Box>
-      {!withDetails("compare", state) ? null : focusedResult ? (
+      {!withDetails("compare", state) ? null : testingVideo ? (
+        <RunDetails name={testingVideo.name} pct={testingPct(testingVideo) ?? 0} windows={windowCount} />
+      ) : focusedResult ? (
         <MatchDetails
           r={focusedResult}
           title={`${dubLabel(focusedResult.audioFile, dubNames)} × ${releaseName(focusedResult.videoFile, title)}`}

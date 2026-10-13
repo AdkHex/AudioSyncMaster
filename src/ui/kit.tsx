@@ -362,9 +362,11 @@ export function Slider({
 
 /* -------------------------------- progress -------------------------------- */
 
-export const PBar = ({ pct, ind, w }: { pct?: number | null; ind?: boolean; w?: number | string }) => (
+/** `live` runs a sheen along the filled part, so a bar that is waiting on a
+ *  slow step still reads as working. */
+export const PBar = ({ pct, ind, w, live }: { pct?: number | null; ind?: boolean; w?: number | string; live?: boolean }) => (
   <span
-    className={cx("pbar", ind && "ind")}
+    className={cx("pbar", ind && "ind", live && "live")}
     style={{ width: w ?? "100%", display: "block" }}
     role="progressbar"
     aria-valuenow={ind || pct == null ? undefined : Math.round(pct)}
@@ -393,13 +395,17 @@ export const Meter = ({ pct }: { pct: number }) => (
 
 export type St = "ready" | "wait" | "run" | "ok" | "warn" | "bad" | "written" | "writing";
 
-/** One status vocabulary for every queue in the app. */
+/** One status vocabulary for every queue in the app. A running row shows
+ *  what it is doing and its percent over a bar the width of the column. */
 export function Status({ s, text, pct }: { s: St; text?: string; pct?: number | null }) {
   if (s === "run" || s === "writing")
     return (
-      <span className="cell" style={{ width: "100%" }}>
-        <PBar pct={pct ?? 0} ind={pct == null} w={64} />
-        <span className="sm t2 num truncate">{text ?? `${Math.round(pct ?? 0)}%`}</span>
+      <span className="runst">
+        <span className="top">
+          <span className="truncate">{text ?? (s === "writing" ? "Writing" : "Measuring")}</span>
+          {pct != null && <span className="p">{Math.round(pct)}%</span>}
+        </span>
+        <PBar pct={pct ?? 0} ind={pct == null} live />
       </span>
     );
   const icon =

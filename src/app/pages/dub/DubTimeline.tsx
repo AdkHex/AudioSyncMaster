@@ -60,7 +60,7 @@ import {
   zoomAround,
   type View,
 } from "@/lib/waveformView";
-import { cx } from "@/ui/kit";
+import { PBar, cx } from "@/ui/kit";
 
 import { useCursor, type CursorStore } from "./cursorStore";
 import { rulerTicks } from "./dubModel";
@@ -788,7 +788,9 @@ export const DubTimeline = forwardRef<DubTimelineHandle, DubTimelineProps>(funct
             <i key={i} style={{ left: `${(s.startS / duration) * 100}%`, width: `max(2px, ${((s.endS - s.startS) / duration) * 100}%)` }} />
           ) : null,
         )}
-        <b style={{ left: box.x0, width: box.x1 - box.x0 }} />
+        {/* The view's frame only once zoomed in: around the whole film it
+            read as a broken outline. */}
+        {view.endS - view.startS < duration * 0.995 && <b style={{ left: box.x0, width: box.x1 - box.x0 }} />}
       </div>
     </div>
   );
@@ -825,10 +827,22 @@ function HeadLine({
 }
 
 /** The Timeline's body while there is nothing to draw yet. */
-export function TimelineMessage({ children }: { children: string }) {
+/** The timeline's place while there is nothing to draw. With `pct` it is
+ *  the waveforms being read: a bar under the note, null while it starts. */
+export function TimelineMessage({ children, pct }: { children: string; pct?: number | null }) {
   return (
     <div className="tl dub-tl-empty">
-      <span className="t3">{children}</span>
+      {pct === undefined ? (
+        <span className="t3">{children}</span>
+      ) : (
+        <div className="col" style={{ gap: 8, width: "min(420px, 80%)" }}>
+          <div className="row sm">
+            <span className="grow truncate t2">{children}</span>
+            {pct !== null && <span className="num">{Math.round(pct)}%</span>}
+          </div>
+          <PBar pct={pct} ind={pct === null} live />
+        </div>
+      )}
     </div>
   );
 }

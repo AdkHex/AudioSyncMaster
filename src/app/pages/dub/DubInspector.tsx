@@ -43,7 +43,7 @@ import {
   type DubVerification,
 } from "@/lib/types";
 import { Box } from "@/ui/frame";
-import { Btn, Cmd, Combo, DL, InfoBar, Links, Ring, TBox, Toggle, baseName, cx, type Option } from "@/ui/kit";
+import { Btn, Cmd, Combo, DL, InfoBar, Links, MidText, PBar, Ring, TBox, Toggle, baseName, cx, type Option } from "@/ui/kit";
 
 import { createCursorStore, useCursor, type CursorStore } from "./cursorStore";
 import { channelName, formatLength, formatOffset, parseOffset, planFacts, sentence, stageIndex, stagesFor, stretchName } from "./dubModel";
@@ -123,20 +123,30 @@ export function OutputBox({
 
 /* ------------------------------------------------------------------ stages */
 
-/** A running job's checklist: done, doing (with its percent), to do. */
+/** A running job: its percent on a bar (the engine's percent is the whole
+ *  job's, not the step's), over the checklist: done, doing, to do. The bar
+ *  leads, so a short window still shows it. */
 export function StagesBox({ title, job, mux }: { title: string; job: DubQueueJob; mux: boolean }) {
   const stages = stagesFor(mux);
   const cur = job.status === "queued" ? -1 : Math.max(0, stageIndex(job.stage, stages));
   return (
     <Box title={title}>
+      {cur >= 0 && (
+        <div className="col" style={{ gap: 6 }}>
+          <div className="row sm">
+            <span className="grow t3">Step {cur + 1} of {stages.length}</span>
+            <span className="num">{Math.round(job.percent)}%</span>
+          </div>
+          <PBar pct={job.percent} live />
+        </div>
+      )}
       <div className="col" aria-label="Stages">
         {stages.map((stage, i) => (
           <div key={stage.label} className="row" style={{ gap: 10, height: 29, color: i > cur ? "var(--text-3)" : undefined }}>
             <span style={{ width: 16, display: "grid", fontSize: 16 }} aria-hidden>
               {i < cur ? <CheckmarkCircleFilled className="ok" /> : i === cur ? <Ring size={16} /> : <CircleRegular style={{ color: "var(--text-4)" }} />}
             </span>
-            <span className="grow truncate">{stage.label}</span>
-            {i === cur && <span className="t3 num">{Math.round(job.percent)}%</span>}
+            <span className={cx("grow truncate", i === cur && "strong")}>{stage.label}</span>
           </div>
         ))}
       </div>
@@ -246,9 +256,8 @@ function OutputLine({ job }: { job: DubQueueJob }) {
   return (
     <section className="col" style={{ gap: 2 }} aria-label="Written">
       <span className="h">Written</span>
-      <span className="mono dub-path" title={output.outputPath}>
-        {baseName(output.outputPath)}
-      </span>
+      {/* The end of the name (".dub.ac3") stays; the middle gives way. */}
+      <MidText className="mono dub-path" text={baseName(output.outputPath)} tail={16} />
       <span>{parts.join(" · ")}</span>
       {job.muxedPath && (
         <span title={job.muxedPath}>
