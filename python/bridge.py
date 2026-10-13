@@ -75,6 +75,7 @@ try:
     from audiosync.encode import cli as encode_cli
     from audiosync.encode import formats as encode_formats
     from audiosync.encode import fps as encode_fps
+    from audiosync.encode import fpsconv_import as encode_fpsconv_import
     from audiosync.encode import probe as encode_probe
     from audiosync.encode import service as audio_service
     from audiosync.encode import settings as encode_settings
@@ -1254,6 +1255,17 @@ def handle_encode_settings_save(request: dict) -> None:
     _settings_result()
 
 
+@_encode_handler("fpsconvImportResult", found=False, settings={})
+def handle_fpsconv_import(request: dict) -> None:
+    """``apply: false`` only looks (for the one-time offer); ``apply: true`` saves it."""
+    if request.get("apply"):
+        t = encode_tools.Tools.resolve()
+        result = encode_fpsconv_import.apply(t.ffmpeg, t.ffprobe)
+    else:
+        result = encode_fpsconv_import.find()
+    emit({"type": "fpsconvImportResult", **result, "applied": bool(request.get("apply"))})
+
+
 @_encode_handler("audioHistoryResult", jobs=[])
 def handle_audio_history_load(request: dict) -> None:
     emit({"type": "audioHistoryResult", "jobs": encode_settings.load_history()})
@@ -1370,6 +1382,7 @@ HANDLERS = {
     "encodeDoctor": handle_encode_doctor,
     "encodeSetDee": handle_encode_set_dee,
     "mediainfoReport": handle_mediainfo_report,
+    "fpsconvImport": handle_fpsconv_import,
     "encodeSettingsLoad": handle_encode_settings_load,
     "encodeSettingsSave": handle_encode_settings_save,
     "audioHistoryLoad": handle_audio_history_load,

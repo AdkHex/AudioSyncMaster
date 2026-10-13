@@ -122,6 +122,24 @@ class PackSpec:
     download_bytes: Optional[int] = None
     size_bytes: Optional[int] = None
     models: Tuple[ModelSpec, ...] = ()
+    files: Tuple["PackFile", ...] = ()
+
+
+@dataclass(frozen=True)
+class PackFile:
+    """A pinned archive unpacked into a pack after its packages install.
+
+    The SHA-256 is part of the app, so a changed or substituted download is
+    refused rather than installed.
+    """
+
+    url: str
+    sha256: str
+    #: Folder inside the pack the archive is unpacked into.
+    dest: str
+    #: A file that must exist under ``dest`` once unpacked.
+    expect: str
+    label: str
 
 
 MB = 1_000_000
@@ -265,6 +283,40 @@ PACKS: Dict[str, PackSpec] = {
         download_bytes=130 * MB,
         size_bytes=290 * MB,
         models=_OCR_MODELS,
+    ),
+    # Encode and FPSConv (Windows only, see ENCODE.md). The pins are what
+    # FPSConv 1.1.24 shipped (its release build log): deew drives DEE, and a
+    # new deew may change its command line. pymediainfo's Windows wheel
+    # carries MediaInfo.dll, which is how Atmos is detected. DeeZy is not
+    # here: it needs rich >= 14 and deew needs rich < 14.
+    "dolby-tools": PackSpec(
+        id="dolby-tools",
+        label="Dolby tools",
+        description=(
+            "deew, MediaInfo and the DD+ 7.1 Atmos patcher for the Encode and "
+            "FPSConv pages. Dolby Encoding Engine itself is set in Encode settings."
+        ),
+        kind="python",
+        version="1",
+        platforms=(("windows", "x86_64"),),
+        steps=(InstallStep((
+            "deew==3.2.2", "rich==13.9.4", "pymediainfo==7.0.1", "toml==0.10.2", "xmltodict==0.13.0",
+            "Unidecode==1.4.0", "packaging==23.2",
+        )),),
+        import_check=(
+            "import deew, pymediainfo, sys; "
+            "sys.exit(0 if pymediainfo.MediaInfo.can_parse() else 'no MediaInfo library')"
+        ),
+        download_bytes=10 * MB,
+        size_bytes=40 * MB,
+        files=(PackFile(
+            url=("https://github.com/LumaVistaLab/DEE_DDPlusJOC_7.1_Patcher/raw/main/release/"
+                 "dee-ddp71-atmos-wrapper-v1.1-stable.zip"),
+            sha256="b0dd0d73e37d1fb20131ff6845f5e340a09d3669a6b3a0fd20e822f7df1328e9",
+            dest="patcher",
+            expect="dee-ddp71-atmos-wrapper-v1.1-stable/dee-ddp71-atmos-wrapper.py",
+            label="DD+ 7.1 patcher",
+        ),),
     ),
     "ffmpeg-full": PackSpec(
         id="ffmpeg-full",
@@ -964,6 +1016,10 @@ def _install_python(spec: PackSpec, progress: Optional[ProgressFn], log: LogFn, 
                 detail = next((l for l in reversed(tail) if "error" in l.lower()), tail[-1] if tail else str(code))
                 raise TaskError(f"Installing {spec.label} failed: {detail}")
 
+        for i, item in enumerate(spec.files):
+            emit(90 + 2 * i / len(spec.files), f"Downloading the {item.label}")
+            _install_file(item, stage, log, token)
+
         emit(92, "Checking the installation")
         if spec.import_check:
             code, tail = _run_streaming([python, "-c", spec.import_check], _clean_env(), token, log, cwd=stage)
@@ -988,6 +1044,23 @@ def _install_python(spec: PackSpec, progress: Optional[ProgressFn], log: LogFn, 
         # cache costs a second copy's worth of disk once the pack is removed.
         # Clearing it keeps "remove" honest about the space it frees.
         shutil.rmtree(cache, ignore_errors=True)
+
+
+def _install_file(item: PackFile, stage: str, log: LogFn, token: CancellationToken) -> None:
+    """Download one pinned archive, check its SHA-256, and unpack it into the staged pack."""
+    archive = os.path.join(stage, os.path.basename(item.url.split("?")[0]))
+    log(f"$ download {item.url}")
+    download(item.url, archive, token=token)
+    digest = _sha256(archive)
+    if digest != item.sha256:
+        raise TaskError(f"The {item.label} download has SHA-256 {digest[:16]}…, expected "
+                        f"{item.sha256[:16]}… — not installed")
+    dest = os.path.join(stage, item.dest)
+    os.makedirs(dest, exist_ok=True)
+    _extract(archive, dest)
+    os.remove(archive)
+    if not os.path.isfile(os.path.join(dest, item.expect)):
+        raise TaskError(f"The {item.label} archive did not contain {item.expect}")
 
 
 def _install_ffmpeg(spec: PackSpec, progress: Optional[ProgressFn], log: LogFn, token: CancellationToken) -> None:

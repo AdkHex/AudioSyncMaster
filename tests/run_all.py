@@ -58,6 +58,7 @@ MODULES = [
     "test_encode_job",
     "test_encode_service",
     "test_encode_cli",
+    "test_encode_import",
 ]
 
 
