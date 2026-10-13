@@ -181,7 +181,7 @@ def test_worker_count_changes_while_jobs_run():
         events = Events()
         queue = AudioQueue(events, workers=1, tool_overrides={"ffmpeg": _fake_ffmpeg(root)})
         queue.add([_spec(f"j{i}", s, root / "out") for i, s in enumerate(sources)])
-        assert _wait(lambda: len(events.of("audioJobStart")) == 1)
+        assert _wait(lambda: len(events.of("audioJobStart")) == 1), "the first job never started"
         time.sleep(0.3)
         assert len(events.of("audioJobStart")) == 1, "one worker runs one job"
         assert queue.set_workers(3) == 3
@@ -189,7 +189,8 @@ def test_worker_count_changes_while_jobs_run():
         assert queue.set_workers(99) == 8
         assert queue.set_workers(0) == 1
         assert queue.wait_idle(30), "the queue never drained"
-        assert events.of("audioIdle")[-1]["summary"] == {"fps": {"done": 3}}
+        summaries = [e["summary"] for e in events.of("audioIdle")]
+        assert summaries == [{"fps": {"done": 3}}], summaries
 
 
 def test_a_job_added_while_running_joins_the_live_queue():

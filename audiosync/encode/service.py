@@ -107,6 +107,8 @@ class AudioQueue:
         self._order: list[str] = []
         self._pending: collections.deque[Job] = collections.deque()
         self._running = 0
+        self._reporting = 0               # jobs over but not yet reported
+        self._announcing = 0              # an audioIdle summary on its way out
         self._summary: dict[str, dict[str, int]] = {}
         self._log_marks: dict[str, tuple[int, str]] = {}
         self._idle = threading.Condition(self._lock)
@@ -186,6 +188,7 @@ class AudioQueue:
                     self._pending.remove(job)
                 except ValueError:
                     pass
+                self._reporting += 1
                 queued = True
             elif job.state == "running":
                 queued = False
@@ -215,7 +218,9 @@ class AudioQueue:
             return self._busy_locked()
 
     def _busy_locked(self) -> bool:
-        return self._running > 0 or bool(self._pending)
+        # A job still being reported counts: the queue is idle only once its
+        # audioIdle summary is out, so a waiter never reads ahead of it.
+        return self._running > 0 or bool(self._pending) or self._reporting > 0 or self._announcing > 0
 
     def wait_idle(self, timeout: Optional[float] = None) -> bool:
         with self._idle:
@@ -254,6 +259,7 @@ class AudioQueue:
         finally:
             with self._lock:
                 self._running -= 1
+                self._reporting += 1
             self._finished(job)
             self._pump()
 
@@ -281,13 +287,18 @@ class AudioQueue:
         with self._lock:
             tally = self._summary.setdefault(job.task, {})
             tally[job.state] = tally.get(job.state, 0) + 1
-            idle = not self._busy_locked()
-            summary = self._summary if idle else None
-            if idle:
-                self._summary = {}
-            self._idle.notify_all()
+            self._reporting -= 1          # the caller counted this job in
+            summary = None
+            if self._running == 0 and not self._pending and self._reporting == 0 and self._summary:
+                summary, self._summary = self._summary, {}
+                self._announcing += 1
+            else:
+                self._idle.notify_all()
         if summary is not None:
             self._emit({"type": "audioIdle", "summary": summary})
+            with self._lock:
+                self._announcing -= 1
+                self._idle.notify_all()
 
     @staticmethod
     def _remember(job: Job) -> None:
