@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from typing import Optional
+from typing import Callable, Optional
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -78,6 +78,30 @@ def mediainfo_json(path: str, mediainfo: str = "mediainfo") -> Optional[dict]:
 
 def mediainfo_atmos(path: str, mediainfo: str = "mediainfo") -> Optional[list[dict]]:
     return parse_mediainfo_audio(mediainfo_json(path, mediainfo))
+
+
+def reader(mediainfo: str = "mediainfo", pack_python: str = "") -> Callable[[str], Optional[list[dict]]]:
+    """Atmos facts for one file: the MediaInfo CLI, else pymediainfo in the Dolby tools pack."""
+    def read(path: str) -> Optional[list[dict]]:
+        data = mediainfo_json(path, mediainfo)
+        if data is None and pack_python:
+            data = worker_json([path], pack_python).get(path)
+        return parse_mediainfo_audio(data)
+    return read
+
+
+def worker_json(paths: list[str], pack_python: str) -> dict[str, Optional[dict]]:
+    """MediaInfo JSON for each path from the Dolby tools pack's worker (pymediainfo)."""
+    if not paths or not pack_python:
+        return {}
+    from ..media import CancellationToken
+    from ..subs import packs
+    try:
+        result = packs._run_worker_process(pack_python, "mediainfo_worker.py", {"paths": list(paths)},
+                                           CancellationToken(), lambda _event: None, None, "MediaInfo worker")
+    except Exception:  # noqa: BLE001 - no MediaInfo is "Atmos unknown", never a failed probe
+        return {}
+    return dict(result.get("files") or {})
 
 
 def mediainfo_report(path: str, mediainfo: str = "mediainfo") -> str:

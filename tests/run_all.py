@@ -56,6 +56,7 @@ MODULES = [
     "test_encode_flat71",
     "test_encode_settings",
     "test_encode_job",
+    "test_encode_service",
 ]
 
 

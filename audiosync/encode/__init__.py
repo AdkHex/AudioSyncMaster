@@ -20,6 +20,7 @@ FPSCONV-MIGRATION.md section 8.
 
 from __future__ import annotations
 
+import os
 import sys
 
 WINDOWS_ONLY = "Encode is available on Windows only"
@@ -30,7 +31,13 @@ class WindowsOnly(RuntimeError):
 
 
 def is_windows() -> bool:
-    return sys.platform == "win32"
+    """True on Windows, or anywhere ``AUDIOSYNC_ENCODE_ANY_OS=1`` is set.
+
+    The override exists for the test suite: the AAC FPS path needs only
+    ffmpeg, so the queue, the bridge commands and the CLI can be exercised
+    end to end on the macOS and Linux CI runners too.
+    """
+    return sys.platform == "win32" or os.environ.get("AUDIOSYNC_ENCODE_ANY_OS") == "1"
 
 
 def require_windows() -> None:

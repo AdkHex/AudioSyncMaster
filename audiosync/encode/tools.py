@@ -12,11 +12,15 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import settings
+from .. import media
+from ..subs import packs
+from . import flat71, settings
 
 _log = logging.getLogger(__name__)
 
@@ -31,11 +35,16 @@ def deew_cmd(tools: dict, pack_python: str = "") -> list[str]:
 
     * a Python set in Preferences (``deew_python``) → ``python -m deew``
     * the Dolby tools pack's Python → ``python -m deew``
+    * ``deew`` on PATH → that
     * from source → this interpreter's ``-m deew``
     """
     python = (tools or {}).get("deew_python", "") or pack_python
     if python:
         return [python, "-m", "deew"]
+    if shutil.which("deew") or FROZEN:
+        # The frozen engine is not a Python that can run -m (it would read
+        # "-m" as its own argument); a missing deew fails as "cannot start deew".
+        return ["deew"]
     return [sys.executable, "-m", "deew"]
 
 
@@ -174,3 +183,163 @@ def resolved(path: Optional[str]) -> str:
     if not path:
         return ""
     return shutil.which(path) or (path if os.path.isfile(path) else "")
+
+
+# ───────────────────────── discovery ─────────────────────────
+
+DOLBY_PACK = "dolby-tools"
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def tool_settings(overrides: Optional[dict] = None) -> dict:
+    """The tool paths from the settings file, with a request's own paths on top."""
+    tools = dict(settings.load_settings().get("tools") or {})
+    for key, value in (overrides or {}).items():
+        if isinstance(value, str) and value.strip():
+            tools[key] = value.strip()
+    return tools
+
+
+def dolby_pack_python() -> str:
+    """The Dolby tools pack's interpreter (deew, pymediainfo, the patcher), or ""."""
+    return packs.python_for(DOLBY_PACK) or ""
+
+
+def patcher_folder(tools: dict) -> Path:
+    """The 7.1 patcher folder: the one set in Preferences, else the Dolby tools pack's."""
+    chosen = (tools or {}).get("patcher", "")
+    return Path(chosen) if chosen else Path(packs.pack_dir(DOLBY_PACK)) / "patcher"
+
+
+def script_runner(pack_python: str) -> list[str]:
+    """The Python that runs the patcher's stdlib-only wrapper script, or [] when there is none."""
+    if pack_python:
+        return [pack_python]
+    return [] if FROZEN else [sys.executable]
+
+
+def find_ffmpeg(tools: dict) -> str:
+    """ffmpeg: the path set in Preferences, else the ffmpeg-full pack, else the app's own discovery."""
+    return (tools or {}).get("ffmpeg") or packs.ffmpeg_full() or media.ffmpeg_path()
+
+
+def find_ffprobe(tools: dict) -> str:
+    chosen = (tools or {}).get("ffprobe")
+    if chosen:
+        return chosen
+    full = packs.ffmpeg_full()
+    if full:
+        sibling = os.path.join(os.path.dirname(full), "ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if os.path.isfile(sibling):
+            return sibling
+    return media.ffprobe_path()
+
+
+@dataclass
+class Tools:
+    """Every tool a job may run, resolved once when the job starts."""
+
+    ffmpeg: str
+    ffprobe: str
+    mediainfo: str
+    truehdd: str
+    dee: str                    # from deew's config; "" = not configured
+    deew: list[str]
+    deezy: list[str]
+    pack_python: str
+    patcher_dir: Path
+    patcher_script: Optional[Path]
+    runner: list[str]
+
+    @classmethod
+    def resolve(cls, overrides: Optional[dict] = None) -> "Tools":
+        tools = tool_settings(overrides)
+        pack_python = dolby_pack_python()
+        folder = patcher_folder(tools)
+        return cls(
+            ffmpeg=find_ffmpeg(tools),
+            ffprobe=find_ffprobe(tools),
+            mediainfo=tools.get("mediainfo") or "mediainfo",
+            truehdd=tools.get("truehdd") or "truehdd",
+            dee=configured_dee(),
+            deew=deew_cmd(tools, pack_python),
+            deezy=deezy_cmd(tools),
+            pack_python=pack_python,
+            patcher_dir=folder,
+            patcher_script=flat71.patcher_script(folder),
+            runner=script_runner(pack_python),
+        )
+
+    def deezy_tools(self) -> dict:
+        """Explicit tool paths for DeeZy: our ffmpeg, DEE from deew's config, truehdd."""
+        return {"ffmpeg": resolved(self.ffmpeg), "dee": self.dee, "truehdd": resolved(self.truehdd)}
+
+    def flat71_ready(self) -> tuple[bool, str]:
+        script = self.patcher_script if self.runner else None
+        return flat71.flat71_ready(script, self.deezy_tools())
+
+
+_SOXR_CACHE: dict[str, bool] = {}
+
+
+def ffmpeg_has_soxr(ffmpeg: str) -> bool:
+    """Whether this ffmpeg build links libsoxr (``--enable-libsoxr`` in ``-version``)."""
+    if ffmpeg not in _SOXR_CACHE:
+        try:
+            out = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=20,
+                                 creationflags=_NO_WINDOW, stdin=subprocess.DEVNULL).stdout
+            _SOXR_CACHE[ffmpeg] = "--enable-libsoxr" in out
+        except Exception:  # noqa: BLE001
+            _SOXR_CACHE[ffmpeg] = False
+    return _SOXR_CACHE[ffmpeg]
+
+
+def _runs(argv: list[str]) -> Optional[bool]:
+    """True when ``argv --version`` exits 0, None when it cannot run."""
+    try:
+        return subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30,
+                              creationflags=_NO_WINDOW, stdin=subprocess.DEVNULL).returncode == 0 or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def doctor(overrides: Optional[dict] = None) -> dict:
+    """What is installed: FPSConv's /api/doctor fields. DEE is only visible through deew's config."""
+    t = Tools.resolve(overrides)
+    current = settings.load_settings()
+    out = {
+        "python": sys.version.split()[0],
+        "frozen": FROZEN,
+        "ffmpeg": resolved(t.ffmpeg) or None,
+        "ffprobe": resolved(t.ffprobe) or None,
+        "ffmpeg_soxr": False,
+        "deew": _runs(t.deew),
+        "deew_via": t.deew[0],
+        "deew_config": None,
+        "dee": None,
+        "dee_path": "",
+        "mediainfo": resolved(t.mediainfo) or None,
+        "pymediainfo": bool(t.pack_python),
+        "truehdd": resolved(t.truehdd) or None,
+        "deezy": _runs(t.deezy),
+        "deezy_via": t.deezy[0],
+        "dolby_pack": bool(t.pack_python),
+        "config_dir": str(settings.config_dir()),
+        "dirs": {"temp": str(settings.temp_dir()), "work": str(settings.work_dir()), "logs": str(settings.logs_dir()),
+                 "defaults": settings.dir_defaults()},
+        "settings": current,
+        "patcher": str(t.patcher_script) if t.patcher_script else None,
+        "patcher_dir": str(t.patcher_dir),
+    }
+    if out["ffmpeg"]:
+        out["ffmpeg_soxr"] = ffmpeg_has_soxr(out["ffmpeg"])
+    cfg = deew_config_path()
+    if cfg.exists():
+        out["deew_config"] = str(cfg)
+        dee = str(read_deew_config().get("dee_path") or "")
+        out["dee_path"] = dee
+        out["dee"] = t.dee or None
+    out["dee_dll"] = flat71.dee_dll_status(out["dee_path"])
+    ok, why = t.flat71_ready()
+    out["flat71"] = {"ok": ok, "reason": why}
+    return out
