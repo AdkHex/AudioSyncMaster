@@ -134,8 +134,12 @@ class AudioQueue:
     def workers(self) -> int:
         return self._workers
 
-    def add(self, specs: list[dict]) -> dict:
-        """Queue every valid, new job. Returns ``{"added": [ids], "skipped": [{id, reason}]}``."""
+    def add(self, specs: list[dict], start: bool = True) -> dict:
+        """Queue every valid, new job. Returns ``{"added": [ids], "skipped": [{id, reason}]}``.
+
+        ``start=False`` leaves them waiting until :meth:`start`, so a caller can
+        acknowledge the ids before the first job reports that it started.
+        """
         added: list[Job] = []
         skipped: list[dict] = []
         with self._lock:
@@ -160,8 +164,13 @@ class AudioQueue:
         if added:
             _log.info("queued %d job(s)", len(added))
             tools.ensure_deew_config()      # deew's temp follows the Temp folder; rewrite before running
-        self._pump()
+        if start:
+            self.start()
         return {"added": [j.id for j in added], "skipped": skipped}
+
+    def start(self) -> None:
+        """Start waiting jobs in every free slot."""
+        self._pump()
 
     def cancel(self, job_id: str) -> bool:
         with self._lock:

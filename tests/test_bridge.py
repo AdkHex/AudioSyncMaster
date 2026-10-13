@@ -39,8 +39,11 @@ def _case(name):
     raise KeyError(name)
 
 
-def run_bridge(commands, timeout=300):
-    """Send commands to the bridge and collect the emitted events."""
+def run_bridge(commands, timeout=300, env=None):
+    """Send commands to the bridge and collect the emitted events.
+
+    ``env`` adds to the inherited environment.
+    """
     payload = "".join(json.dumps(c) + "\n" for c in commands)
     payload += json.dumps({"command": "shutdown"}) + "\n"
 
@@ -50,6 +53,7 @@ def run_bridge(commands, timeout=300):
         capture_output=True,
         timeout=timeout,
         cwd=ROOT,
+        env={**os.environ, **(env or {})},
     )
     events = []
     for line in process.stdout.decode().splitlines():
@@ -524,3 +528,105 @@ def test_the_delay_checks_the_app_turns_off_are_skipped():
     result = next(e for e in events if e["type"] == "result")
     assert result["method"] == "survey" and result["edits"] == [], result
     assert result["cutPositionS"] is None, result["cutPositionS"]
+
+
+# ------------------------------------------------------------------ encode
+
+ENCODE_ANY_OS = {"AUDIOSYNC_ENCODE_ANY_OS": "1"}
+
+
+def _encode_sandbox_env(root):
+    """Keep the engine's settings, history and temp folders out of the user's own."""
+    return {**ENCODE_ANY_OS, "APPDATA": str(root / "roaming"), "LOCALAPPDATA": str(root / "local"),
+            "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache"), "HOME": str(root)}
+
+
+def test_encode_commands_refuse_off_windows():
+    if sys.platform == "win32":
+        return
+    events, _ = run_bridge([{"command": "audioProbe", "paths": []},
+                            {"command": "encodeResolve", "streams": [], "encode": {}},
+                            {"command": "audioCancelAll"}],
+                           env={"AUDIOSYNC_ENCODE_ANY_OS": ""})
+    answers = {e["type"]: e for e in events if e["type"] not in ("ready",)}
+    for kind in ("audioProbeResult", "encodeResolveResult", "audioCancelAllAck"):
+        assert answers[kind]["error"] == "Encode is available on Windows only", answers.get(kind)
+
+
+def test_encode_probe_resolve_and_an_aac_fps_job_through_the_queue():
+    import pathlib
+    import tempfile
+
+    from audiosync.media import ffmpeg_path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        source = root / "film.m4a"
+        subprocess.run([ffmpeg_path(), "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=3:sample_rate=48000", "-ac", "2", "-c:a", "aac", str(source)],
+                       check=True)
+        job = {"id": "job-1", "task": "fps", "path": str(source), "out_dir": str(root / "out"),
+               "conv_type": "23.976-25"}
+        events, process = run_bridge([
+            {"command": "audioProbe", "paths": [str(source)]},
+            {"command": "encodeResolve", "streams": [{"channels": 8, "atmos": True, "codec": "truehd"}],
+             "encode": {"target": "ddp", "channels": 6}},
+            {"command": "audioQueue", "workers": 1, "jobs": [job]},
+        ], env=_encode_sandbox_env(root))
+        assert process.returncode == 0, process.stderr.decode()[-400:]
+        kinds = [e["type"] for e in events]
+        row = next(e for e in events if e["type"] == "audioProbeResult")["rows"][0]
+        assert row["streams"][0]["codec"] == "aac" and row["streams"][0]["engine"] == "ffmpeg aac", row
+        plans = next(e for e in events if e["type"] == "encodeResolveResult")["plans"]
+        assert plans[0]["label"] == "DDP 5.1 Atmos 768k", plans
+        assert kinds.index("audioEnqueueAck") < kinds.index("audioJobStart"), "ids are acknowledged first"
+        done = next(e for e in events if e["type"] == "audioJobDone")
+        assert done["jobId"] == "job-1" and done["state"] == "done", done
+        assert os.path.basename(done["output"]) == "film_23_976-25.aac"
+        assert next(e for e in events if e["type"] == "audioIdle")["summary"] == {"fps": {"done": 1}}
+        assert kinds[-1] == "audioQueueDone", "shutdown lets the queue finish, then closes the session"
+        history = next(e for e in run_bridge([{"command": "audioHistoryLoad"}], env=_encode_sandbox_env(root))[0]
+                       if e["type"] == "audioHistoryResult")
+        assert [j["id"] for j in history["jobs"]] == ["job-1"]
+
+
+def test_audio_commands_reach_a_queue_that_is_running():
+    """audioEnqueue and the cancels are answered from the reading thread while audioQueue holds the command thread."""
+    import pathlib
+    import tempfile
+
+    from audiosync.media import ffmpeg_path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        source = root / "film.m4a"
+        subprocess.run([ffmpeg_path(), "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=2:sample_rate=48000", "-ac", "2", "-c:a", "aac", str(source)],
+                       check=True)
+        spec = {"task": "fps", "path": str(source), "out_dir": str(root / "out")}
+        events, _ = run_bridge([
+            {"command": "audioQueue", "workers": 1, "jobs": [{**spec, "id": "a", "conv_type": "24-25"}]},
+            {"command": "audioEnqueue", "jobs": [{**spec, "id": "b", "conv_type": "25-24"}]},
+            {"command": "audioSetWorkers", "n": 2},
+            {"command": "audioCancelJob", "jobId": "nope"},
+        ], env=_encode_sandbox_env(root))
+        acks = {e["type"]: e for e in events if e["type"].endswith("Ack")}
+        assert acks["audioSetWorkersAck"]["workers"] == 2
+        assert acks["audioCancelJobAck"] == {"type": "audioCancelJobAck", "jobId": "nope", "ok": False}
+        done = {e["jobId"]: e["state"] for e in events if e["type"] == "audioJobDone"}
+        assert done == {"a": "done", "b": "done"}, done
+
+
+def test_encode_settings_round_trip_through_the_engine():
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _encode_sandbox_env(pathlib.Path(tmp))
+        events, _ = run_bridge([{"command": "encodeSettingsSave", "partial": {"workers": 3, "tools": {"truehdd": "/t"}}},
+                                {"command": "encodeSettingsLoad"}], env=env)
+        results = [e for e in events if e["type"] == "encodeSettingsResult"]
+        assert len(results) == 2
+        assert results[1]["settings"]["workers"] == 3
+        assert results[1]["settings"]["tools"]["truehdd"] == "/t"
+        assert results[1]["defaults"]["workers"] == 2

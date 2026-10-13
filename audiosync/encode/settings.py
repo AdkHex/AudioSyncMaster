@@ -12,7 +12,8 @@ The pages read and write these through the engine rather than localStorage,
 because the CLI has to see the same tool paths and folders.
 
 Same keys, defaults and coercion as FPSConv, minus ``auto_update`` and
-``native_window``, which belonged to FPSConv's own updater and window.
+``native_window``, which belonged to FPSConv's own updater and window, plus
+``dee_path``, which FPSConv kept only in deew's config.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ DEFAULTS: dict[str, Any] = {
     "bitrate": 0,              # 0 = use the source bitrate (fps.py behaviour)
     "overwrite": "overwrite",  # overwrite | skip | rename
     "task": "fps",             # fps | encode
+    "dee_path": "",            # dee.exe, also written into deew's config.toml (deew reads it from there)
+    "fpsconv_import_offered": False,   # FPSConv's settings were offered for import once
     "encode": {                # the audio-only encode task
         "target": "ddp",       # ddp | dd
         "channels": 0,         # 0 = same as source, else 1 / 2 / 6 / 8

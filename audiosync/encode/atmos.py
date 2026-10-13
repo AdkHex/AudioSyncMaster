@@ -90,6 +90,26 @@ def reader(mediainfo: str = "mediainfo", pack_python: str = "") -> Callable[[str
     return read
 
 
+def batch_reader(paths: list[str], mediainfo: str = "mediainfo",
+                 pack_python: str = "") -> Callable[[str], Optional[list[dict]]]:
+    """:func:`reader` for a batch of added files: the CLI per file, then one
+    worker run for every file the CLI could not read, instead of one each."""
+    cache: dict[str, Optional[dict]] = {}
+    missing = []
+    for path in paths:
+        if os.path.isfile(path):
+            cache[path] = mediainfo_json(path, mediainfo)
+            if cache[path] is None:
+                missing.append(path)
+    if missing and pack_python:
+        cache.update(worker_json(missing, pack_python))
+    fallback = reader(mediainfo, pack_python)
+
+    def read(path: str) -> Optional[list[dict]]:
+        return parse_mediainfo_audio(cache[path]) if path in cache else fallback(path)
+    return read
+
+
 def worker_json(paths: list[str], pack_python: str) -> dict[str, Optional[dict]]:
     """MediaInfo JSON for each path from the Dolby tools pack's worker (pymediainfo)."""
     if not paths or not pack_python:

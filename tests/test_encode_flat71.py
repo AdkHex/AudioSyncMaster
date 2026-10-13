@@ -71,3 +71,12 @@ def test_patcher_script_found_in_the_release_folder():
         (nested / flat71.PATCHER_SCRIPT).write_text("")
         assert flat71.patcher_script(Path(tmp)) == nested / flat71.PATCHER_SCRIPT
         assert flat71.patcher_script(None) is None
+
+
+def test_doctor_reports_the_flat71_verdict():
+    """The second half of FPSConv's Flat71 test: doctor() carries flat71_ready()'s answer."""
+    from audiosync.encode import tools
+
+    with mock.patch.object(tools.Tools, "flat71_ready", return_value=(False, "why not")), \
+         mock.patch.object(tools, "_runs", return_value=None):
+        assert tools.doctor()["flat71"] == {"ok": False, "reason": "why not"}
