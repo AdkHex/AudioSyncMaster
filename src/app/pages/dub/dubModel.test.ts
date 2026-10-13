@@ -111,6 +111,18 @@ describe("stages", () => {
     expect(stageIndex("writing x")).toBeLessThan(stageIndex("checking the finished track"));
   });
 
+  it("names every stage the engine reports, so the checklist never falls back to its first row", () => {
+    // Each of these once read as unknown, and the checklist showed
+    // "Reading the files" at 75% while the voices were being checked.
+    expect(stageLabel("searching the whole dub")).toBe("Finding where the dub belongs");
+    expect(stageLabel("checking every stretch once more")).toBe("Placing the cuts");
+    expect(stageLabel("reading the speech in both tracks")).toBe("Checking the voices against the lips");
+    expect(stageLabel("checking the dub's voices against the lips")).toBe("Checking the voices against the lips");
+    expect(stageLabel("checking the dub's lines against the original's")).toBe("Checking against the video");
+    expect(stageIndex("assembling the plan")).toBeLessThan(stageIndex("checking the dub's voices against the lips"));
+    expect(stageIndex("checking the dub's voices against the lips")).toBeLessThan(stageIndex("writing x"));
+  });
+
   it("adds the mux stage only when the track goes into a copy of the video", () => {
     expect(stagesFor(true)).toHaveLength(10);
     expect(stageLabel("muxing")).toBe("Adding the track to a copy of the video");
