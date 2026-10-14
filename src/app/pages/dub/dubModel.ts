@@ -84,13 +84,16 @@ export interface StageDef {
 export const DUB_STAGES: StageDef[] = [
   { label: "Reading the files", keys: ["starting", "probing", "reading the original", "reading the dub"] },
   { label: "Checking the frame rate", keys: ["checking the frame rate"] },
-  { label: "Finding where the dub belongs", keys: ["finding the offsets"] },
+  { label: "Finding where the dub belongs", keys: ["finding the offsets", "searching the whole dub"] },
   { label: "Measuring each stretch", keys: ["measuring the offsets"] },
-  { label: "Placing the cuts", keys: ["placing the cuts"] },
-  { label: "Looking for dub inside the gaps", keys: ["looking for dub inside the gaps"] },
+  { label: "Placing the cuts", keys: ["placing the cuts", "checking every stretch once more"] },
   { label: "Assembling the plan", keys: ["assembling the plan"] },
+  {
+    label: "Checking the voices against the lips",
+    keys: ["reading the speech in both tracks", "checking the dub's voices against the lips"],
+  },
   { label: "Writing the track", keys: ["writing"] },
-  { label: "Checking against the video", keys: ["checking the finished track"] },
+  { label: "Checking against the video", keys: ["checking the finished track", "checking the dub's lines against the original's"] },
 ];
 
 /** Only when the track also goes into a copy of the video. */

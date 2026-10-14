@@ -244,7 +244,7 @@ class PairResult:
     window_s: Optional[float] = None
     """Length of each measurement window, which bounds how late a cut can be."""
     speed_compensation: float = 1.0
-    """Playback-speed difference undone during decoding so the windows could be
+    """Playback-speed difference undone during decoding so the windows could be 
     correlated at all. 1.0 means the files were measured as they are."""
     codec_delay_ms: float = 0.0
     """Codec delay already removed from delay_ms. Some formats decode shifted

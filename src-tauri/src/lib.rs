@@ -1,5 +1,8 @@
 mod bridge;
 mod csv;
+mod encode;
+pub mod remote_status;
+mod service;
 mod subsync;
 
 use std::fs;
@@ -13,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 
 use bridge::{BridgeHandle, ShotBridge, WaveformBridge};
+use encode::EncodeBridge;
 use subsync::SubsInfoBridge;
 
 /// How long to wait for a single engine event before assuming it has stalled.
@@ -276,6 +280,7 @@ fn list_files(folder: &Path, accept: Accept, kind: &str) -> Vec<FileItem> {
 
 #[tauri::command]
 async fn pick_video_folder<R: tauri::Runtime>(window: Window<R>) -> Result<PickResponse, String> {
+    service::guard()?;
     let Some(folder) = pick_folder(window).await else {
         return Ok(PickResponse {
             folder: None,
@@ -291,6 +296,7 @@ async fn pick_video_folder<R: tauri::Runtime>(window: Window<R>) -> Result<PickR
 
 #[tauri::command]
 async fn pick_audio_folder<R: tauri::Runtime>(window: Window<R>) -> Result<PickResponse, String> {
+    service::guard()?;
     let Some(folder) = pick_folder(window).await else {
         return Ok(PickResponse {
             folder: None,
@@ -332,6 +338,7 @@ async fn pick_media_files<R: tauri::Runtime>(
     window: Window<R>,
     kind: String,
 ) -> Result<PickResponse, String> {
+    service::guard()?;
     let (tx, rx) = std::sync::mpsc::channel();
     window.dialog().file().pick_files(move |paths| {
         let _ = tx.send(paths.unwrap_or_default());
@@ -358,6 +365,7 @@ async fn pick_single<R: tauri::Runtime>(
     window: Window<R>,
     kind: &str,
 ) -> Result<PickResponse, String> {
+    service::guard()?;
     let Some(file) = pick_file(window).await else {
         return Ok(PickResponse {
             folder: None,
@@ -387,6 +395,7 @@ fn resolve_dropped_paths(
     kind: String,
     accept: Option<String>,
 ) -> Result<Vec<FileItem>, String> {
+    service::guard()?;
     let in_folders = Accept::from_name(accept.as_deref().unwrap_or(kind.as_str()));
 
     let mut items = Vec::new();
@@ -516,10 +525,12 @@ async fn start_sync<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<SyncRun, String> {
+    let work = service::begin("sync")?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _work = work;
         handle.with(&app_for_task, |bridge| {
             let mut payload = request.clone();
             if let Some(object) = payload.as_object_mut() {
@@ -551,6 +562,7 @@ async fn list_audio_tracks<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     paths: Vec<String>,
 ) -> Result<Value, String> {
+    service::guard()?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
@@ -593,6 +605,7 @@ async fn preview_pairs<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
+    service::guard()?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
@@ -636,6 +649,7 @@ async fn render_preview<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Option<String>, String> {
+    service::guard()?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
@@ -705,6 +719,7 @@ async fn waveform_exchange<R: tauri::Runtime>(
     request: Value,
     command: &'static str,
 ) -> Result<Value, String> {
+    service::guard()?;
     let app_for_task = app.clone();
     let reply = if command == "waveformBuild" {
         "waveformReady"
@@ -761,6 +776,7 @@ async fn shot_cuts<R: tauri::Runtime>(
     handle: State<'_, ShotBridge>,
     request: Value,
 ) -> Result<Value, String> {
+    service::guard()?;
     let handle = handle.inner().0.clone();
     let app_for_task = app.clone();
 
@@ -807,6 +823,7 @@ async fn render_dub_preview<R: tauri::Runtime>(
     handle: State<'_, WaveformBridge>,
     request: Value,
 ) -> Result<Option<Value>, String> {
+    service::guard()?;
     let handle = handle.inner().0.clone();
     let app_for_task = app.clone();
 
@@ -858,6 +875,7 @@ async fn render_dub_preview<R: tauri::Runtime>(
 /// used to read anything else on the disk.
 #[tauri::command]
 async fn read_preview_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    service::guard()?;
     let path = PathBuf::from(path);
     tauri::async_runtime::spawn_blocking(move || {
         let bytes = preview_bytes_guard(&path)?;
@@ -894,10 +912,12 @@ async fn apply_corrections<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
+    let work = service::begin("apply")?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _work = work;
         handle.with(&app_for_task, |bridge| {
             let mut payload = request.clone();
             if let Some(object) = payload.as_object_mut() {
@@ -947,10 +967,12 @@ async fn start_dubsync<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
+    let work = service::begin("dubsync-render")?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _work = work;
         handle.with(&app_for_task, |bridge| {
             let mut payload = request.clone();
             if let Some(object) = payload.as_object_mut() {
@@ -1011,10 +1033,12 @@ async fn start_dubsync_batch<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
+    let work = service::begin("dubsync")?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _work = work;
         handle.with(&app_for_task, |bridge| {
             let mut payload = request.clone();
             if let Some(object) = payload.as_object_mut() {
@@ -1082,10 +1106,12 @@ async fn voice_tools<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     action: String,
 ) -> Result<Value, String> {
+    let work = service::begin("voice-tools")?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _work = work;
         handle.with(&app_for_task, |bridge| {
             bridge.send(&serde_json::json!({ "command": "voiceTools", "action": action }))?;
             loop {
@@ -1139,6 +1165,7 @@ async fn probe_media<R: tauri::Runtime>(
     handle: State<'_, BridgeHandle>,
     path: String,
 ) -> Result<MediaProbe, String> {
+    service::guard()?;
     let handle = handle.inner().clone();
     let app_for_task = app.clone();
 
@@ -1186,6 +1213,7 @@ async fn export_csv<R: tauri::Runtime>(
     window: Window<R>,
     results: Vec<SyncResult>,
 ) -> Result<String, String> {
+    service::guard()?;
     let Some(path) = pick_save_path(window, "sync-results.csv").await else {
         return Err("Export cancelled".into());
     };
@@ -1199,6 +1227,7 @@ async fn export_json<R: tauri::Runtime>(
     window: Window<R>,
     results: Vec<SyncResult>,
 ) -> Result<String, String> {
+    service::guard()?;
     let Some(path) = pick_save_path(window, "sync-results.json").await else {
         return Err("Export cancelled".into());
     };
@@ -1213,6 +1242,7 @@ async fn export_json<R: tauri::Runtime>(
 /// anything embeddable, and it already knows their audio device.
 #[tauri::command]
 fn open_path<R: tauri::Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
+    service::guard()?;
     use tauri_plugin_opener::OpenerExt;
     if !PathBuf::from(&path).exists() {
         return Err("That file no longer exists.".into());
@@ -1224,6 +1254,7 @@ fn open_path<R: tauri::Runtime>(app: AppHandle<R>, path: String) -> Result<(), S
 
 #[tauri::command]
 fn reveal_path(path: String) -> Result<(), String> {
+    service::guard()?;
     let path = PathBuf::from(path);
     if !path.exists() {
         return Err("That file no longer exists.".into());
@@ -1374,6 +1405,9 @@ pub fn run() {
 
     builder
         .setup(|_app| {
+            // Before the page can ask for anything: a lock from the last
+            // run is back on before any command runs.
+            service::setup(_app.handle());
             #[cfg(target_os = "macos")]
             {
                 let menu = app_menu(_app.handle())?;
@@ -1389,6 +1423,7 @@ pub fn run() {
         .manage(WaveformBridge::default())
         .manage(ShotBridge::default())
         .manage(SubsInfoBridge::default())
+        .manage(EncodeBridge::default())
         .invoke_handler(tauri::generate_handler![
             pick_video_folder,
             pick_audio_folder,
@@ -1426,9 +1461,31 @@ pub fn run() {
             subsync::subs_pack,
             subsync::subs_secret_status,
             subsync::subs_secret_set,
+            // Registered on every OS; each one refuses off Windows.
+            encode::start_audio_queue,
+            encode::audio_send,
+            encode::audio_probe,
+            encode::audio_reference,
+            encode::audio_suggest,
+            encode::encode_resolve,
+            encode::encode_doctor,
+            encode::encode_set_dee,
+            encode::audio_mediainfo,
+            encode::fpsconv_import,
+            encode::encode_settings_load,
+            encode::encode_settings_save,
+            encode::audio_history,
+            // The lock screen's own commands: never refused.
+            service::service_lock,
+            service::check_service_status,
+            service::unlock_access,
+            service::legacy_install,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
+                if let Some(handle) = window.app_handle().try_state::<EncodeBridge>() {
+                    handle.close();
+                }
                 if let Some(handle) = window.app_handle().try_state::<BridgeHandle>() {
                     handle.shutdown();
                 }
@@ -1450,6 +1507,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine tests one at a time: the remote lock is process-wide,
+    /// and one of them switches it on.
+    fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENGINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENGINE.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Every field the engine sends must survive the trip through SyncResult.
     ///
@@ -1572,6 +1636,7 @@ mod tests {
             eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
             return;
         }
+        let _engine = engine_lock();
 
         let app = tauri::test::mock_builder()
             .manage(BridgeHandle::default())
@@ -1716,6 +1781,7 @@ mod tests {
             eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
             return;
         }
+        let _engine = engine_lock();
 
         let app = tauri::test::mock_builder()
             .manage(BridgeHandle::default())
@@ -1782,6 +1848,7 @@ mod tests {
             eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
             return;
         }
+        let _engine = engine_lock();
 
         let app = tauri::test::mock_builder()
             .manage(BridgeHandle::default())
@@ -1830,5 +1897,145 @@ mod tests {
         let rms = peaks["rms"][0].as_array().expect("rms per bucket");
         assert!(rms.iter().filter_map(Value::as_f64).all(|v| v <= loudest));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A status server on 127.0.0.1 answering whatever `doc` holds.
+    fn status_server(doc: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "http://127.0.0.1:{}/status.json",
+            listener.local_addr().unwrap().port()
+        );
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                let body = doc.lock().unwrap().clone();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    /// The remote pause against the real engine (docs/REMOTE-STATUS.md): a
+    /// dub sync in flight comes back cancelled within seconds of the switch
+    /// saying maintenance, new work is refused in the core while it does,
+    /// the lock's event names the work it stopped, and when it says ok
+    /// again the event hands that work back to resume and the engine takes
+    /// work again.
+    #[test]
+    fn a_remote_pause_stops_the_engine_and_hands_its_work_back() {
+        if std::env::var_os("AUDIOSYNC_E2E").is_none() {
+            eprintln!("skipped: set AUDIOSYNC_E2E=1 to run the engine end to end");
+            return;
+        }
+        let _engine = engine_lock();
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+
+        let app = tauri::test::mock_builder()
+            .manage(BridgeHandle::default())
+            .invoke_handler(tauri::generate_handler![start_dubsync])
+            .build(context())
+            .expect("app should build");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview should build");
+        let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let seen = events.clone();
+        app.listen(service::EVENT, move |event| {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let wait_for = |what: &str, check: &dyn Fn() -> bool| {
+            let began = std::time::Instant::now();
+            while !check() {
+                assert!(began.elapsed() < Duration::from_secs(10), "never {what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let doc = Arc::new(Mutex::new(r#"{"status":"ok"}"#.to_string()));
+        let url = status_server(doc.clone());
+        let store = std::env::temp_dir().join(format!("asm-pause-e2e-{}", std::process::id()));
+        service::start(
+            app.handle(),
+            Some(url),
+            false,
+            Some(store.join("remote-status.json")),
+            Some(Duration::from_millis(500)),
+        );
+        wait_for("read the first document", &|| {
+            !events.lock().unwrap().is_empty()
+        });
+
+        let long = synthetic_pair(&app, "pause", Some(40));
+        let request = |dir: &Path| {
+            serde_json::json!({ "request": {
+                "videoPath": dir.join("org.wav"), "dubPath": dir.join("dub.wav"),
+                "videoTrack": 0, "dubTrack": 0, "codec": "wav", "outputPath": dir.join("synced.wav"),
+                "mux": false, "language": null, "fillUnmatched": false, "overwrite": true,
+            } })
+        };
+        let runner = webview.clone();
+        let first = request(&long);
+        let run = std::thread::spawn(move || invoke(&runner, "start_dubsync", first));
+        std::thread::sleep(Duration::from_secs(3));
+
+        *doc.lock().unwrap() = r#"{"status":"maintenance","message":"Testing"}"#.into();
+        wait_for("locked", &|| service::GATE.is_locked());
+        let locked_at = std::time::Instant::now();
+        let outcome: Value = run
+            .join()
+            .expect("run thread")
+            .expect("the stopped run still answers")
+            .deserialize()
+            .expect("JSON");
+        assert_eq!(outcome["cancelled"], true, "outcome: {outcome}");
+        assert!(
+            locked_at.elapsed() < Duration::from_secs(30),
+            "the run took {:?} to stop",
+            locked_at.elapsed()
+        );
+        let refused = invoke(&webview, "start_dubsync", request(&long))
+            .expect_err("new work must be refused while paused");
+        assert_eq!(refused, remote_status::PAUSED_ERROR);
+        let engaged = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e["locked"] == true)
+            .cloned()
+            .expect("a lock event");
+        assert_eq!(engaged["reason"], "maintenance");
+        assert_eq!(engaged["stopped"], serde_json::json!(["dubsync-render"]));
+
+        *doc.lock().unwrap() = r#"{"status":"ok"}"#.into();
+        wait_for("unlocked", &|| !service::GATE.is_locked());
+        let released = events.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(released["locked"], false);
+        assert_eq!(released["resume"], serde_json::json!(["dubsync-render"]));
+
+        // And the engine takes work again.
+        let short = synthetic_pair(&app, "after-pause", Some(1));
+        let after: Value = invoke(&webview, "start_dubsync", request(&short))
+            .expect("work runs again after the pause")
+            .deserialize()
+            .expect("JSON");
+        app.state::<BridgeHandle>().shutdown();
+        assert_eq!(after["cancelled"], false, "outcome: {after}");
+        assert!(after["error"].is_null(), "engine error: {}", after["error"]);
+        let _ = fs::remove_dir_all(&long);
+        let _ = fs::remove_dir_all(&short);
+        let _ = fs::remove_dir_all(&store);
     }
 }

@@ -40,6 +40,7 @@ import type {
   VoiceToolsResult,
   VoiceToolsStatus,
 } from "@/lib/types";
+import { OPEN, type ServiceLock } from "@/lib/service";
 import { formatPlayerDelay } from "@/lib/types";
 import type { SubJob, SubJobOutcome, SubsyncEvent } from "@/lib/subsync/types";
 
@@ -630,6 +631,24 @@ async function streamUpdate(channel: { id: number }): Promise<void> {
   internals.runCallback(channel.id, { index: index++, end: true });
 }
 
+/** The lock screen as ?lock= asks for it; open without it. */
+function demoLock(): ServiceLock {
+  const reason = state.options.get("lock") as ServiceLock["reason"];
+  const valid = reason === "maintenance" || reason === "update" || reason === "password" || reason === "connect";
+  return {
+    ...OPEN,
+    locked: valid,
+    reason: valid ? reason : null,
+    message: reason === "maintenance" ? "We're updating AudioSyncMaster. Back in a few minutes." : null,
+    minVersion: reason === "update" ? NEW_VERSION : null,
+    updateUrl: reason === "update" ? "https://github.com/AdkHex/AudioSyncMaster/releases/latest" : null,
+    appVersion: VERSION,
+    enabled: true,
+    checkedAt: reason === "connect" ? null : Date.now(),
+    lastError: reason === "connect" ? "cannot reach the status server: offline (demo)" : null,
+  };
+}
+
 function dialogOpen(options: Args): unknown {
   const { videos, dubs, videoFolder } = state.scenario;
   if (options.directory) return videoFolder;
@@ -747,6 +766,17 @@ function handler(cmd: string, raw?: InvokeArgs): unknown {
     case "subs_secret_set":
       state.secrets[String(a.name)] = String(a.value ?? "") !== "";
       return null;
+
+    // -- the remote lock (docs/REMOTE-STATUS.md): ?lock=maintenance|update|password|connect
+    case "service_lock":
+    case "check_service_status":
+      return demoLock();
+    case "unlock_access":
+      if (String(a.password) !== "demo") return Promise.reject("Wrong password");
+      state.options.delete("lock");
+      return demoLock();
+    case "legacy_install":
+      return state.options.get("legacy") === "1" ? "C:\\Program Files\\AudioSyncMaster" : null;
 
     // -- plugins
     case "plugin:updater|check":

@@ -141,13 +141,81 @@ ship unnoticed.
 
 ## Platform notes
 
-- **Windows** — the NSIS installer is used for updates (`updaterJsonPreferNsis`).
-  It runs in passive mode: a progress bar, no prompts.
+- **Windows** — only the NSIS installer is built, and it installs for the user
+  who runs it (see below). Updates use the same installer (`updaterJsonPreferNsis`)
+  in passive mode: a progress bar, no prompts, no administrator.
 - **macOS** — updates replace the `.app` bundle. The build is unsigned by Apple,
   so first-time users still need to right-click → Open. Updates themselves are
   unaffected.
 - **Linux** — only AppImage supports self-updating. `.deb` users must install
   new versions through their package manager.
+
+## Per-user Windows install
+
+On a shared Windows machine (the RDP server) an install must reach only the
+account that ran it. Tauri's MSI always installs **per machine** -- Program
+Files, every account -- and `bundle.targets: "all"` used to build one beside
+the NSIS installer, so whoever ran the MSI installed the app for everyone.
+
+From the first release built from this change on (v2.22.0, if CI picks the
+next minor after v2.21.0 as usual):
+
+- Windows builds **only** the NSIS installer, in `currentUser` mode
+  (`src-tauri/tauri.windows.conf.json`: `bundle.targets: ["nsis"]`,
+  `bundle.windows.nsis.installMode: "currentUser"`). It installs into
+  `%LOCALAPPDATA%\AudioSyncMaster`, with the Start menu entry and uninstall
+  entry under that user's HKCU, and asks for no administrator. macOS and Linux
+  still build everything (`targets: "all"` in `tauri.conf.json`).
+- The release has no `.msi` and `latest.json` has no `windows-x86_64-msi`
+  entry: `windows-x86_64` is the `-setup.exe` and its signature. Installed
+  copies that came from an old MSI look for the `-msi` entry first, find none,
+  and fall back to that `-setup.exe` -- so their next update installs a
+  per-user copy for whoever runs it.
+- Three checks keep it that way (`scripts/windows-installer.cjs`): the config
+  is tested before anything is built (`npm test`, in every test job), the
+  Windows build job checks its own output before trusting it (no `.msi`, a
+  `-setup.exe`, `RequestExecutionLevel user` in the generated `installer.nsi`),
+  and the last job checks the published `latest.json`.
+
+### Migrating an all-users copy (administrator, once per machine)
+
+A per-user installer cannot remove a copy installed for all users: that takes
+administrator rights. Until an administrator removes it, every account still
+sees the old copy, and the new per-user copy shows its users a one-time notice
+("An all-users copy is still installed … Ask an administrator to uninstall it
+from Settings > Apps").
+
+On the RDP server, an administrator:
+
+1. Opens **Settings > Apps > Installed apps** (or Control Panel > Programs and
+   Features) and uninstalls **AudioSyncMaster** -- the entry installed for all
+   users, in `C:\Program Files\AudioSyncMaster`. Uninstalling it does not touch
+   any user's settings, history or per-user copy.
+2. From then on each user who should have the app installs the new
+   `AudioSyncMaster_<version>_x64-setup.exe` from their own account (or keeps
+   the per-user copy the updater already installed for them).
+
+Say this in the release notes of the first per-user release (the workflow's
+release body carries it).
+
+## Remote switch and access password
+
+Every copy reads a status document from a secret gist: it can pause every copy
+("Work is in progress"), force an update, and require an access password that
+each OS user enters once. Operating it is a command, not a release:
+
+```sh
+node scripts/audiosyncmaster-status.mjs maintenance "Updating, back soon"
+node scripts/audiosyncmaster-status.mjs ok
+node scripts/audiosyncmaster-status.mjs password          # set or change it
+node scripts/audiosyncmaster-status.mjs password --off
+node scripts/audiosyncmaster-status.mjs status
+```
+
+Everything else -- the document, what stops while paused, testing against a
+local server, limits -- is in [docs/REMOTE-STATUS.md](docs/REMOTE-STATUS.md).
+Never delete or rename the gist, and raise the app version before using
+`--min-version`.
 
 ## Verifying a release worked
 

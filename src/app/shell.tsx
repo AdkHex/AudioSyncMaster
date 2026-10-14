@@ -33,6 +33,8 @@ export interface PageCommands {
   start?: () => void;
   /** Esc during a run: stop it. */
   stop?: () => void;
+  /** A remote pause lifted: run again what it stopped. Absent means start. */
+  resume?: () => void;
   /** Paths dropped on the window while this page shows. */
   drop?: (paths: string[]) => void;
   /** Export the results as JSON (File menu); CSV is exportResults. */

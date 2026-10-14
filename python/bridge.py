@@ -22,6 +22,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
@@ -69,6 +70,16 @@ try:
         plan_correction,
     )
     from audiosync.subs import service as subs_service
+    from audiosync.encode import WindowsOnly, require_windows
+    from audiosync.encode import atmos as encode_atmos
+    from audiosync.encode import cli as encode_cli
+    from audiosync.encode import formats as encode_formats
+    from audiosync.encode import fps as encode_fps
+    from audiosync.encode import fpsconv_import as encode_fpsconv_import
+    from audiosync.encode import probe as encode_probe
+    from audiosync.encode import service as audio_service
+    from audiosync.encode import settings as encode_settings
+    from audiosync.encode import tools as encode_tools
 except Exception as exc:  # noqa: BLE001
     sys.stderr.write(f"Failed to import audiosync package: {exc}\n")
     traceback.print_exc(file=sys.stderr)
@@ -1107,6 +1118,232 @@ def handle_pack_remove(request: dict) -> None:
     subs_service.pack_remove(str(request.get("pack") or ""), emit, model=request.get("model"))
 
 
+# ------------------------------------------------------------------ encode
+# The Encode and FPSConv pages (Windows only, see ENCODE.md). Quick lookups
+# run here like any command; the audio queue runs in a second engine process
+# (the EncodeBridge) whose audioQueue session stays open while the app runs,
+# so a 40-minute encode never holds up the other pages.
+
+AUDIO_HEARTBEAT_S = 60.0
+_audio_queue: "audio_service.AudioQueue | None" = None
+_audio_lock = threading.Lock()
+_audio_closing = threading.Event()
+
+
+def _encode_handler(terminal: str, **extra):
+    """Refuse off Windows, and always answer with ``terminal`` (see _terminal_on_error)."""
+    def wrap(handler):
+        def run(request: dict) -> None:
+            try:
+                require_windows()
+                handler(request)
+            except WindowsOnly as exc:
+                emit({"type": terminal, **extra, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc(file=sys.stderr)
+                emit({"type": terminal, **extra, "error": f"{type(exc).__name__}: {exc}"})
+        return run
+    return wrap
+
+
+@_encode_handler("audioProbeResult", rows=[])
+def handle_audio_probe(request: dict) -> None:
+    paths = [str(p) for p in request.get("paths") or []]
+    t = encode_tools.Tools.resolve(request.get("tools"))
+    atmos_for = encode_atmos.batch_reader(paths, t.mediainfo, t.pack_python)
+    emit({"type": "audioProbeResult", "rows": [encode_probe.probe_row(t.ffprobe, p, atmos_for) for p in paths]})
+
+
+@_encode_handler("audioReferenceResult", reference=None)
+def handle_audio_reference(request: dict) -> None:
+    path = str(request.get("path") or "")
+    if not os.path.isfile(path):
+        emit({"type": "audioReferenceResult", "reference": None, "error": "file not found"})
+        return
+    t = encode_tools.Tools.resolve(request.get("tools"))
+    try:
+        reference = encode_probe.probe_video(t.ffprobe, path)
+    except Exception as exc:  # noqa: BLE001 - FPSConv's wording for an unreadable video
+        emit({"type": "audioReferenceResult", "reference": None,
+              "error": f"cannot read {os.path.basename(path)}: {exc}"})
+        return
+    emit({"type": "audioReferenceResult", "reference": reference})
+
+
+@_encode_handler("audioSuggestResult", suggestions=[])
+def handle_audio_suggest(request: dict) -> None:
+    ref = request.get("reference") or {}
+    suggestions = [
+        encode_fps.suggest_conversion(item.get("fps"), float(item.get("duration_s") or 0),
+                                      ref.get("fps"), float(ref.get("duration_s") or 0))
+        for item in request.get("items") or []
+    ]
+    emit({"type": "audioSuggestResult", "suggestions": suggestions})
+
+
+@_encode_handler("encodeResolveResult", plans=[])
+def handle_encode_resolve(request: dict) -> None:
+    encode = request.get("encode") or {}
+    error = audio_service.check_spec({"path": __file__, "out_dir": "-", "task": "encode", "encode": encode})
+    if error:
+        emit({"type": "encodeResolveResult", "plans": [], "error": error})
+        return
+    plans = []
+    for st in request.get("streams") or []:
+        enc = encode_formats.resolve_encode(
+            encode.get("target") or "ddp", int(encode.get("channels") or 0), bool(encode.get("atmos", True)),
+            int(encode.get("bitrate") or 0), int(st.get("channels") or 2), st.get("atmos"), st.get("codec") or "",
+            encode.get("atmos71") or "flat")
+        plans.append(enc.to_dict())
+    emit({"type": "encodeResolveResult", "plans": plans})
+
+
+@_encode_handler("encodeDoctorResult", doctor=None)
+def handle_encode_doctor(request: dict) -> None:
+    emit({"type": "encodeDoctorResult", "doctor": encode_tools.doctor(request.get("tools"))})
+
+
+@_encode_handler("encodeSetDeeResult", config=None, doctor=None)
+def handle_encode_set_dee(request: dict) -> None:
+    dee = str(request.get("dee_path") or "").strip()
+    if not dee:
+        emit({"type": "encodeSetDeeResult", "config": None, "doctor": None, "error": "give the path to dee.exe"})
+        return
+    if not encode_tools.resolved(dee):
+        emit({"type": "encodeSetDeeResult", "config": None, "doctor": None, "error": f"not found: {dee}"})
+        return
+    t = encode_tools.Tools.resolve(request.get("tools"))
+    config = encode_tools.write_deew_config(dee, t.ffmpeg, t.ffprobe)
+    encode_settings.save_settings({"dee_path": dee})
+    emit({"type": "encodeSetDeeResult", "config": str(config), "doctor": encode_tools.doctor(request.get("tools"))})
+
+
+@_encode_handler("mediainfoReportResult", report="")
+def handle_mediainfo_report(request: dict) -> None:
+    path = str(request.get("path") or "")
+    found, why = encode_atmos.find_output(path, str(request.get("folder") or ""), str(request.get("stem") or ""))
+    if not found:
+        emit({"type": "mediainfoReportResult", "path": path, "report": "", "resolved": False, "error": why})
+        return
+    t = encode_tools.Tools.resolve(request.get("tools"))
+    report = encode_atmos.mediainfo_report(found, t.mediainfo)
+    if not report:
+        data = encode_atmos.worker_json([found], t.pack_python).get(found)
+        report = encode_atmos.report_from_json(data) if data else ""
+    emit({"type": "mediainfoReportResult", "path": found, "name": os.path.basename(found), "report": report,
+          "resolved": found != path,
+          "error": "" if report else f"mediainfo could not read {found} (install the Dolby tools pack or set "
+                                     "the MediaInfo path in Preferences → Encode)"})
+
+
+def _settings_result() -> None:
+    emit({"type": "encodeSettingsResult", "settings": encode_settings.load_settings(),
+          "defaults": encode_settings.DEFAULTS, "dirDefaults": encode_settings.dir_defaults()})
+
+
+@_encode_handler("encodeSettingsResult", settings=None)
+def handle_encode_settings_load(request: dict) -> None:
+    _settings_result()
+
+
+@_encode_handler("encodeSettingsResult", settings=None)
+def handle_encode_settings_save(request: dict) -> None:
+    partial = request.get("partial") or {}
+    encode_settings.save_settings(partial)
+    if "dirs" in partial:
+        encode_tools.ensure_deew_config()      # deew's temp path follows the Temp folder
+    _settings_result()
+
+
+@_encode_handler("fpsconvImportResult", found=False, settings={})
+def handle_fpsconv_import(request: dict) -> None:
+    """``apply: false`` only looks (for the one-time offer); ``apply: true`` saves it."""
+    if request.get("apply"):
+        t = encode_tools.Tools.resolve()
+        result = encode_fpsconv_import.apply(t.ffmpeg, t.ffprobe)
+    else:
+        result = encode_fpsconv_import.find()
+    emit({"type": "fpsconvImportResult", **result, "applied": bool(request.get("apply"))})
+
+
+@_encode_handler("audioHistoryResult", jobs=[])
+def handle_audio_history_load(request: dict) -> None:
+    emit({"type": "audioHistoryResult", "jobs": encode_settings.load_history()})
+
+
+@_encode_handler("audioHistoryResult", jobs=[])
+def handle_audio_history_remove(request: dict) -> None:
+    emit({"type": "audioHistoryResult", "jobs": audio_service.history_remove(str(request.get("jobId") or ""))})
+
+
+@_encode_handler("audioHistoryResult", jobs=[])
+def handle_audio_history_clear(request: dict) -> None:
+    emit({"type": "audioHistoryResult", "jobs": audio_service.history_clear()})
+
+
+def _audio() -> "audio_service.AudioQueue":
+    """The one queue of this engine process, created by whichever command arrives first."""
+    global _audio_queue
+    with _audio_lock:
+        if _audio_queue is None:
+            _audio_queue = audio_service.AudioQueue(emit)
+        return _audio_queue
+
+
+@_encode_handler("audioQueueDone")
+def handle_audio_queue(request: dict) -> None:
+    """The queue session: open from the first Start until the app exits.
+
+    It never ends on its own, so jobs added later always join a live queue
+    instead of racing a batch that is just finishing. The heartbeat keeps the
+    host's 30-minute event timeout from firing through long idle stretches
+    and silent DEE phases. Shutdown lets queued and running jobs finish.
+    """
+    q = _audio()
+    q.set_tools(request.get("tools"))
+    if request.get("workers") is not None:
+        q.set_workers(request["workers"])
+    if request.get("jobs"):
+        emit({"type": "audioEnqueueAck", **q.add(list(request["jobs"]), start=False)})
+    q.start()
+    last = time.monotonic()
+    while True:
+        if _audio_closing.is_set():
+            if q.wait_idle(1.0):
+                break
+        else:
+            _audio_closing.wait(1.0)
+        if time.monotonic() - last >= AUDIO_HEARTBEAT_S:
+            emit({"type": "audioHeartbeat", "busy": q.busy()})
+            last = time.monotonic()
+    emit({"type": "audioQueueDone"})
+
+
+def _audio_immediate(ack: str, run: Callable[[dict], dict]) -> Callable[[dict], None]:
+    """A command for the running queue, answered at once from the reading thread."""
+    def handle(request: dict) -> None:
+        try:
+            require_windows()
+            emit({"type": ack, **run(request)})
+            _audio().start()
+        except WindowsOnly as exc:
+            emit({"type": ack, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            emit({"type": ack, "error": f"{type(exc).__name__}: {exc}"})
+    return handle
+
+
+AUDIO_IMMEDIATE = {
+    "audioEnqueue": _audio_immediate("audioEnqueueAck",
+                                     lambda r: _audio().add(list(r.get("jobs") or []), start=False)),
+    "audioCancelJob": _audio_immediate("audioCancelJobAck",
+                                       lambda r: {"jobId": r.get("jobId"), "ok": _audio().cancel(str(r.get("jobId") or ""))}),
+    "audioCancelAll": _audio_immediate("audioCancelAllAck", lambda r: {"cancelled": _audio().cancel_all()}),
+    "audioSetWorkers": _audio_immediate("audioSetWorkersAck", lambda r: {"workers": _audio().set_workers(r.get("n"))}),
+}
+
+
 def handle_cancel(request: dict) -> None:
     with _token_lock:
         token = _active_token
@@ -1138,6 +1375,21 @@ HANDLERS = {
     "subsSave": handle_subs_save,
     "packInstall": handle_pack_install,
     "packRemove": handle_pack_remove,
+    "audioProbe": handle_audio_probe,
+    "audioReference": handle_audio_reference,
+    "audioSuggest": handle_audio_suggest,
+    "encodeResolve": handle_encode_resolve,
+    "encodeDoctor": handle_encode_doctor,
+    "encodeSetDee": handle_encode_set_dee,
+    "mediainfoReport": handle_mediainfo_report,
+    "fpsconvImport": handle_fpsconv_import,
+    "encodeSettingsLoad": handle_encode_settings_load,
+    "encodeSettingsSave": handle_encode_settings_save,
+    "audioHistoryLoad": handle_audio_history_load,
+    "audioHistoryRemove": handle_audio_history_remove,
+    "audioHistoryClear": handle_audio_history_clear,
+    "audioQueue": handle_audio_queue,
+    **AUDIO_IMMEDIATE,
     "cancel": handle_cancel,
     "ping": lambda _r: emit({"type": "pong"}),
 }
@@ -1166,6 +1418,12 @@ def _serve(requests: "queue.Queue[dict | None]") -> None:
 
 
 def main() -> int:
+    # The same exe is the command line: `audiosync-cli convert ...` and the
+    # rest of FPSConv's subcommands. The app always starts it with no
+    # arguments, so it never takes this path.
+    if encode_cli.is_cli(sys.argv[1:]):
+        return encode_cli.main(sys.argv[1:])
+
     emit({"type": "ready", "ffmpeg": has_ffmpeg()})
 
     # Commands run on a worker thread so this loop is always reading. It
@@ -1197,6 +1455,12 @@ def main() -> int:
             handle_cancel(request)
             continue
 
+        # The same for commands aimed at the audio queue, whose session holds
+        # the command thread for as long as the app runs.
+        if request.get("command") in AUDIO_IMMEDIATE:
+            dispatch(request)
+            continue
+
         requests.put(request)
 
     # Shutdown means "no more commands", not "stop": whatever was sent
@@ -1205,6 +1469,7 @@ def main() -> int:
     # that pipes a request and a shutdown together -- the CI smoke test, a
     # shell script -- relies on that. To abort instead, send cancel first;
     # the host kills the process outright when its window closes.
+    _audio_closing.set()
     requests.put(None)
     worker.join()
     return 0

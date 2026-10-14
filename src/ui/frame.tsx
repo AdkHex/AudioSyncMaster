@@ -151,9 +151,9 @@ function MenuBar({ menus: source }: { menus: Menu[] | (() => Menu[]) }) {
 
 /* ------------------------------------------------------------- title bar */
 
-function AppIcon() {
+export function AppIcon({ size = 16 }: { size?: number }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden>
       <rect width="16" height="16" rx="4" fill="var(--ac)" />
       <path d="M4.5 6.5v3M8 4v8M11.5 5.5v5" stroke="var(--on-accent)" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
@@ -179,7 +179,7 @@ async function currentWindow(): Promise<TauriWindow | null> {
   }
 }
 
-function CaptionButtons() {
+export function CaptionButtons() {
   const [maximized, setMaximized] = useState(false);
   useEffect(() => {
     let dispose: (() => void) | undefined;

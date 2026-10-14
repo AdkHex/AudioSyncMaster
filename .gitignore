@@ -43,6 +43,9 @@ src-tauri/gen/
 # TypeScript incremental build info
 *.tsbuildinfo
 
+# Local copies of the remote status document (scripts/audiosyncmaster-status.mjs)
+remote-status/
+
 # Updater signing keys - never commit these
 *.key
 *.key.pub

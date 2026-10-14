@@ -97,7 +97,7 @@ def test_status_lists_every_pack_in_packstatus_shape():
     with sandbox():
         status = packs.status()
     ids = [s["id"] for s in status]
-    assert ids == ["asr-mlx", "asr-faster", "demucs", "ocr-rapidocr", "ffmpeg-full"], ids
+    assert ids == ["asr-mlx", "asr-faster", "demucs", "ocr-rapidocr", "dolby-tools", "ffmpeg-full"], ids
     for item in status:
         for key in ("id", "label", "description", "installed", "supported", "sizeBytes", "downloadBytes", "version"):
             assert key in item, (item["id"], key)
@@ -109,6 +109,7 @@ def test_status_lists_every_pack_in_packstatus_shape():
     mac_arm = packs.host() == ("macos", "arm64")
     assert by_id["asr-mlx"]["supported"] is mac_arm
     assert by_id["asr-faster"]["supported"] is True
+    assert by_id["dolby-tools"]["supported"] is (packs.host() == ("windows", "x86_64"))
 
 
 def test_packs_dir_override():
@@ -516,3 +517,83 @@ def _run_all():
 
 if __name__ == "__main__":
     sys.exit(1 if _run_all() else 0)
+
+
+# ------------------------------------------------------------- dolby tools
+
+
+def test_dolby_tools_pins_what_fpsconv_shipped():
+    spec = packs.PACKS["dolby-tools"]
+    from audiosync.encode import flat71
+
+    pins = set(spec.steps[0].packages)
+    assert {"deew==3.2.2", "rich==13.9.4", "pymediainfo==7.0.1"} <= pins
+    assert all("==" in p for p in pins), pins
+    assert spec.platforms == (("windows", "x86_64"),)
+    (patcher,) = spec.files
+    assert (patcher.url, patcher.sha256) == (flat71.PATCHER_URL, flat71.PATCHER_ZIP_SHA256)
+
+
+@contextlib.contextmanager
+def _pack_with_file(root: str, sha256: str):
+    payload = os.path.join(root, "release.zip")
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("tool-v1/tool.py", "print('hi')\n")
+    spec = packs.PackSpec(
+        id="asr-faster", label="Fake tools", description="test", kind="python", version="1",
+        steps=(packs.InstallStep(("fakepkg==1.0",)),), import_check="import json",
+        files=(packs.PackFile(url="https://example.invalid/release.zip", sha256=sha256 or _sha(payload),
+                              dest="extra", expect="tool-v1/tool.py", label="tool"),),
+    )
+    original_spec, original_download = packs.PACKS["asr-faster"], packs.download
+    packs.PACKS["asr-faster"] = spec
+    packs.download = lambda url, dest, *a, **k: shutil.copy(payload, dest)
+    try:
+        yield
+    finally:
+        packs.PACKS["asr-faster"], packs.download = original_spec, original_download
+
+
+def _sha(path: str) -> str:
+    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+
+def test_a_pinned_archive_is_verified_and_unpacked_into_the_pack():
+    if os.name == "nt":
+        return  # the fake uv is a shebang script
+    with sandbox() as (root, _):
+        uv = _write_fake_uv(root)
+        with _pack_with_file(root, ""), env(AUDIOSYNC_UV=uv):
+            packs.install("asr-faster", None, None, CancellationToken())
+        tool = os.path.join(packs.pack_dir("asr-faster"), "extra", "tool-v1", "tool.py")
+        assert os.path.isfile(tool), os.listdir(packs.pack_dir("asr-faster"))
+        assert not os.path.exists(os.path.join(packs.pack_dir("asr-faster"), "release.zip"))
+
+
+def test_a_changed_archive_is_refused_and_never_looks_installed():
+    if os.name == "nt":
+        return
+    with sandbox() as (root, _):
+        uv = _write_fake_uv(root)
+        with _pack_with_file(root, "0" * 64), env(AUDIOSYNC_UV=uv):
+            try:
+                packs.install("asr-faster", None, None, CancellationToken())
+            except TaskError as exc:
+                assert "SHA-256" in str(exc) and "not installed" in str(exc), exc
+            else:
+                raise AssertionError("a download with the wrong hash was installed")
+        assert packs.python_for("asr-faster") is None
+        assert not os.path.exists(packs.pack_dir("asr-faster"))
+
+
+def test_encode_finds_the_patcher_inside_the_installed_pack():
+    from audiosync.encode import flat71, tools
+
+    with sandbox():
+        folder = tools.patcher_folder({})
+        assert folder == __import__("pathlib").Path(packs.pack_dir("dolby-tools")) / "patcher"
+        script = folder / flat71.PATCHER_ZIP_TOP / flat71.PATCHER_SCRIPT
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        assert flat71.patcher_script(folder) == script
+        assert tools.patcher_folder({"patcher": "/elsewhere"}) == __import__("pathlib").Path("/elsewhere")

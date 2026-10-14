@@ -25,7 +25,7 @@ import {
   VideoClipRegular,
   WarningFilled,
 } from "@fluentui/react-icons";
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { delayOnlyText, type DubQueueJob } from "@/lib/dubQueueReducer";
 import { HAND_NOTE } from "@/lib/dubPlanEdit";
@@ -128,7 +128,12 @@ export function OutputBox({
  *  leads, so a short window still shows it. */
 export function StagesBox({ title, job, mux }: { title: string; job: DubQueueJob; mux: boolean }) {
   const stages = stagesFor(mux);
-  const cur = job.status === "queued" ? -1 : Math.max(0, stageIndex(job.stage, stages));
+  // A stage the checklist does not name keeps the last one it did, rather
+  // than jumping back to the first row.
+  const known = useRef(0);
+  const found = stageIndex(job.stage, stages);
+  if (found >= 0) known.current = found;
+  const cur = job.status === "queued" ? -1 : known.current;
   return (
     <Box title={title}>
       {cur >= 0 && (

@@ -666,6 +666,22 @@ export function DubPage({ hidden }: { hidden: boolean }) {
     await runEngine([run], [{ name: j.name }]);
   };
 
+  /** A remote pause lifted: run again the jobs it cut short, keeping every
+   *  other job's result, the way a retry does. */
+  const resumeStopped = async () => {
+    if (!desktop || queueRef.current.status === "running") return;
+    const stopped = queueRef.current.jobs.filter((j) => j.status === "cancelled");
+    if (stopped.length === 0) return;
+    if (!claim()) return;
+    const runs: DubSyncJob[] = stopped.map((j) => ({ videoPath: j.videoPath, dubPath: j.dubPath, videoTrack: j.videoTrack, dubTrack: j.dubTrack }));
+    jobMapRef.current = stopped.map((j) => j.id);
+    setRunJobs(stopped.map((j) => j.id));
+    setRunMux(settingsRef.current.dubMux);
+    queueDispatch({ type: "retryStarted", jobs: stopped.map((j) => ({ index: j.id })) });
+    shell.announce({ message: `Syncing ${plural(stopped.length, "dub")} again.`, politeness: "polite" });
+    await runEngine(runs, stopped.map((j) => ({ name: j.name })));
+  };
+
   /** Pick another dub for a failed pair and run it with that one. */
   const chooseAnotherDub = async (row: QueueRow) => {
     if (!desktop || !row.videoPath) return;
@@ -831,6 +847,7 @@ export function DubPage({ hidden }: { hidden: boolean }) {
     clear,
     start,
     stop: () => void stop(),
+    resume: () => void resumeStopped(),
     drop: (paths) => void addPaths(paths),
     addVideosLabel: "Add movies…",
     addAudioLabel: "Add dubs…",
