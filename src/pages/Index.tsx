@@ -30,11 +30,14 @@ import { EnginesSection } from "@/app/pages/subsync/EnginesSection";
 // TEMPORARY while the Dub sync and Subsync pages are being built: load them
 // only if present. Replaced by static imports once they exist.
 import { PreferencesWindow, type PrefsTab } from "@/app/Preferences";
+import { LegacyInstallNotice } from "@/app/ServiceLock";
+import { useServiceLock } from "@/app/useServiceLock";
 import { ShellContext, type PageCommands, type Shell } from "@/app/shell";
 import { UpdateProgress } from "@/app/UpdateProgress";
 import { LiveAnnouncer } from "@/components/LiveAnnouncer";
 import type { Announcement } from "@/lib/announce";
 import * as api from "@/lib/api";
+import { RESUME_KIND } from "@/lib/service";
 import * as subsApi from "@/lib/subsync/api";
 import { loadHistory, loadSettings, saveHistory, saveSettings } from "@/lib/storage";
 import type { AppSettings, HistoryEntry, SyncMode } from "@/lib/types";
@@ -117,6 +120,8 @@ export default function Index() {
   const activeRef = useRef(active);
   activeRef.current = active;
   const engineRef = useRef<SyncMode | null>(null);
+  /** The page that last let go of the engine, and when. */
+  const lastEngineRef = useRef<{ page: SyncMode; at: number } | null>(null);
   const listenersRef = useRef<Partial<Record<SyncMode, Partial<api.SyncListeners>>>>({});
   const commandsRef = useRef<Partial<Record<SyncMode, PageCommands>>>({});
   const [, bumpCommands] = useReducer((n: number) => n + 1, 0);
@@ -135,6 +140,7 @@ export default function Index() {
   const releaseEngine = useCallback((page: SyncMode) => {
     if (engineRef.current !== page) return;
     engineRef.current = null;
+    lastEngineRef.current = { page, at: Date.now() };
     setEnginePage(null);
   }, []);
 
@@ -351,6 +357,51 @@ export default function Index() {
     [active, show, desktop, settings, updateSettings, enginePage, claimEngine, releaseEngine, setEngineListeners, log, clearLogs, openOutput, dock, history, addHistory, announce, setCommands, openPreferences, copy],
   );
 
+  // ------------------------------------------------------------- remote lock
+
+  // The shell stops every run when the remote switch (or a new password)
+  // locks the app, and says what it stopped. When the lock lifts, the page
+  // whose run it stopped starts it again: Dub sync only the jobs it cut
+  // short, the others the run as it was set up. See docs/REMOTE-STATUS.md.
+  const [lock] = useServiceLock();
+  const lockedRef = useRef(false);
+  /** The page whose run was going when the lock came on. */
+  const stoppedPageRef = useRef<SyncMode | null>(null);
+
+  const resumeWhenFree = useCallback((page: SyncMode) => {
+    const began = Date.now();
+    const attempt = () => {
+      if (lockedRef.current) return; // locked again: the next unlock decides
+      if (engineRef.current === null) {
+        const commands = commandsRef.current[page];
+        const run = commands?.resume ?? commands?.start;
+        if (!run) return;
+        toast.info(`AudioSyncMaster is back. ${PAGE_LABEL[page]} carries on.`);
+        run();
+        return;
+      }
+      // The stopped run is still winding down; it lets go of the engine soon.
+      if (Date.now() - began < 60_000) window.setTimeout(attempt, 250);
+    };
+    attempt();
+  }, []);
+
+  useEffect(() => {
+    if (!lock) return;
+    const was = lockedRef.current;
+    lockedRef.current = lock.locked;
+    if (lock.locked && !was) {
+      // The lock's event usually beats the stopped run's answer; if not,
+      // the page that let go a moment ago is the one it stopped.
+      const recent = lastEngineRef.current && Date.now() - lastEngineRef.current.at < 5000 ? lastEngineRef.current.page : null;
+      stoppedPageRef.current = engineRef.current ?? recent;
+    } else if (!lock.locked && was) {
+      const page = stoppedPageRef.current;
+      stoppedPageRef.current = null;
+      if (page && lock.resume.includes(RESUME_KIND[page])) resumeWhenFree(page);
+    }
+  }, [lock, resumeWhenFree]);
+
   // ------------------------------------------------------------- keys
 
   useEffect(() => {
@@ -483,7 +534,8 @@ export default function Index() {
     let dispose: (() => void) | undefined;
     let cancelled = false;
     void import("@tauri-apps/api/event")
-      .then(({ listen }) => listen<string>("app-menu", (event) => menuActions.current[event.payload]?.()))
+      // Nothing from the menus while the lock screen is up.
+      .then(({ listen }) => listen<string>("app-menu", (event) => !lockedRef.current && menuActions.current[event.payload]?.()))
       .then((unlisten) => {
         if (cancelled) unlisten();
         else dispose = unlisten;
@@ -557,6 +609,7 @@ export default function Index() {
               />
             )}
             {installing && update && <UpdateProgress update={update} onClose={() => setInstalling(false)} />}
+            <LegacyInstallNotice />
           </>
         }
       >

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Runtime, State};
 
 use crate::bridge::BridgeHandle;
-use crate::subsync::{exchange_on, SubsInfoBridge};
+use crate::subsync::{exchange_on, exchange_watched, SubsInfoBridge};
 use crate::EVENT_TIMEOUT;
 
 const WINDOWS_ONLY: &str = "Encode is available on Windows only";
@@ -94,6 +94,7 @@ async fn run<R: Runtime>(
     timeout: Duration,
 ) -> Result<Value, String> {
     ensure_windows()?;
+    crate::service::guard()?;
     tauri::async_runtime::spawn_blocking(move || {
         exchange_on(&app, &handle, payload, terminal, timeout, CHANNEL)
     })
@@ -105,31 +106,48 @@ async fn run<R: Runtime>(
 
 /// Open the queue session and hold it until the app exits. Returns `Err` if
 /// the engine process dies; the page then marks its live jobs as failed, and
-/// the next Start launches a new process.
+/// the next Start launches a new process. Its jobs are followed so a remote
+/// pause can cancel them and queue them again when it lifts.
 #[tauri::command]
 pub(crate) async fn start_audio_queue<R: Runtime>(
     app: AppHandle<R>,
     handle: State<'_, EncodeBridge>,
     request: Value,
 ) -> Result<Value, String> {
-    let payload = with_command(request, "audioQueue");
-    run(
-        app,
-        handle.inner().0.clone(),
-        payload,
-        "audioQueueDone",
-        EVENT_TIMEOUT,
-    )
+    ensure_windows()?;
+    let mut payload = with_command(request, "audioQueue");
+    crate::service::record_encode_jobs(&mut payload)?;
+    let handle = handle.inner().0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        exchange_watched(
+            &app,
+            &handle,
+            payload,
+            "audioQueueDone",
+            EVENT_TIMEOUT,
+            CHANNEL,
+            crate::service::encode_event,
+        )
+    })
     .await
+    .map_err(|err| err.to_string())?
 }
 
 /// Add jobs to, cancel in, or resize the running queue. Answered by an
-/// `…Ack` event on `encode-event`.
+/// `…Ack` event on `encode-event`. Cancelling is always allowed; adding and
+/// resizing are refused while the app is paused or locked.
 #[tauri::command]
 pub(crate) fn audio_send(handle: State<'_, EncodeBridge>, message: Value) -> Result<(), String> {
     ensure_windows()?;
-    queue_command(&message)?;
-    handle.0.send_now(&message)
+    let command = queue_command(&message)?.to_string();
+    match command.as_str() {
+        "audioCancelJob" | "audioCancelAll" => handle.0.send_now(&message),
+        "audioEnqueue" => crate::service::send_encode_jobs(&handle.0, message),
+        _ => {
+            crate::service::guard()?;
+            handle.0.send_now(&message)
+        }
+    }
 }
 
 // ------------------------------------------------------------ quick queries

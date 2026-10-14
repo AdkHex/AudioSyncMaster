@@ -175,6 +175,30 @@ def test_cancel_queued_and_running_jobs():
         assert not queue.cancel("a")                          # already over
 
 
+def test_a_cancelled_job_can_be_queued_again_under_its_id():
+    """A remote pause cancels the queue's jobs and the app queues the same
+    specs again when it lifts. A job still running, or finished, keeps its
+    id to itself."""
+    with sandbox() as root:
+        a, b = _sine(root / "a.m4a", 1.0), _sine(root / "b.m4a", 1.0)
+        events = Events()
+        queue = AudioQueue(events, workers=1, tool_overrides={"ffmpeg": _fake_ffmpeg(root)})
+        queue.add([_spec("a", a, root / "out")])
+        assert _wait(lambda: events.of("audioJobProgress", "a"))
+        other = queue.add([_spec("a", b, root / "out")])
+        assert other["skipped"] == [{"id": "a", "reason": "id already used"}], "running"
+        assert queue.cancel("a")
+        assert queue.wait_idle(20)
+        assert events.of("audioJobDone", "a")[-1]["state"] == "cancelled"
+        again = queue.add([_spec("a", a, root / "out")])
+        assert again == {"added": ["a"], "skipped": []}
+        assert queue.wait_idle(30)
+        assert [e["state"] for e in events.of("audioJobDone", "a")] == ["cancelled", "done"]
+        assert [j["id"] for j in queue.snapshot()["jobs"]] == ["a"], "one row per id"
+        finished = queue.add([_spec("a", b, root / "out")])
+        assert finished["skipped"] == [{"id": "a", "reason": "id already used"}], "done"
+
+
 def test_worker_count_changes_while_jobs_run():
     with sandbox() as root:
         sources = [_sine(root / f"s{i}.m4a", 1.0) for i in range(3)]

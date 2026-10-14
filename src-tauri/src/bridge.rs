@@ -177,11 +177,14 @@ pub struct BridgeHandle {
 
 impl BridgeHandle {
     /// Run `action` against a live bridge, starting one if necessary.
+    /// Refused while the app is paused or locked (docs/REMOTE-STATUS.md):
+    /// every engine command passes through here, whichever command sent it.
     pub fn with<T, R: Runtime>(
         &self,
         app: &AppHandle<R>,
         action: impl FnOnce(&mut Bridge) -> Result<T, String>,
     ) -> Result<T, String> {
+        crate::service::guard()?;
         let mut guard = self
             .bridge
             .lock()

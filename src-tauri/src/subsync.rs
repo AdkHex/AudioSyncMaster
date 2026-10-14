@@ -114,6 +114,7 @@ pub(crate) async fn subs_pick_files<R: Runtime>(
     window: Window<R>,
     accept: String,
 ) -> Result<PickResponse, String> {
+    crate::service::guard()?;
     let (tx, rx) = std::sync::mpsc::channel();
     let mut dialog = window.dialog().file();
     match accept.as_str() {
@@ -149,6 +150,7 @@ pub(crate) async fn subs_pick_files<R: Runtime>(
 pub(crate) async fn subs_pick_folder<R: Runtime>(
     window: Window<R>,
 ) -> Result<Option<String>, String> {
+    crate::service::guard()?;
     let (tx, rx) = std::sync::mpsc::channel();
     window.dialog().file().pick_folder(move |path| {
         let _ = tx.send(path.and_then(|p| p.into_path().ok()));
@@ -161,8 +163,9 @@ pub(crate) async fn subs_pick_folder<R: Runtime>(
 
 /// Dropped paths, folders expanded, keeping only files the tools can use.
 #[tauri::command]
-pub(crate) fn subs_resolve_dropped(paths: Vec<String>) -> Vec<FileItem> {
-    items_for(paths.into_iter().map(PathBuf::from), "any")
+pub(crate) fn subs_resolve_dropped(paths: Vec<String>) -> Result<Vec<FileItem>, String> {
+    crate::service::guard()?;
+    Ok(items_for(paths.into_iter().map(PathBuf::from), "any"))
 }
 
 // --------------------------------------------------------- engine exchange
@@ -189,6 +192,19 @@ pub(crate) fn exchange_on<R: Runtime>(
     timeout: Duration,
     channel: &str,
 ) -> Result<Value, String> {
+    exchange_watched(app, handle, payload, terminal, timeout, channel, |_| {})
+}
+
+/// [`exchange_on`], showing every event to `watch` first.
+pub(crate) fn exchange_watched<R: Runtime>(
+    app: &AppHandle<R>,
+    handle: &BridgeHandle,
+    payload: Value,
+    terminal: &str,
+    timeout: Duration,
+    channel: &str,
+    watch: fn(&Value),
+) -> Result<Value, String> {
     handle.with(app, |bridge| {
         bridge.send(&payload)?;
         loop {
@@ -201,6 +217,7 @@ pub(crate) fn exchange_on<R: Runtime>(
                     return Err("The analysis engine exited unexpectedly.".into());
                 }
             };
+            watch(&event);
             let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
             match kind {
                 "log" => {
@@ -248,6 +265,7 @@ async fn run_blocking<R: Runtime>(
     terminal: &'static str,
     timeout: Duration,
 ) -> Result<Value, String> {
+    crate::service::guard()?;
     tauri::async_runtime::spawn_blocking(move || {
         exchange(&app, &handle, payload, terminal, timeout)
     })
@@ -347,19 +365,22 @@ pub(crate) async fn start_subs_batch<R: Runtime>(
     handle: State<'_, BridgeHandle>,
     request: Value,
 ) -> Result<Value, String> {
+    let work = crate::service::begin("subsync")?;
     let mut payload = with_command(request, "subsBatch");
     let secrets: BTreeMap<String, String> = read_secrets(&app);
     if let Some(object) = payload.as_object_mut() {
         object.insert("secrets".into(), json!(secrets));
     }
-    run_blocking(
+    let done = run_blocking(
         app,
         handle.inner().clone(),
         payload,
         "subsBatchDone",
         EVENT_TIMEOUT,
     )
-    .await
+    .await;
+    drop(work);
+    done
 }
 
 /// Install or remove an engine pack (or one model inside it). Progress
@@ -378,15 +399,18 @@ pub(crate) async fn subs_pack<R: Runtime>(
         "remove" => "packRemove",
         other => return Err(format!("Unknown pack action: {other}")),
     };
+    let work = crate::service::begin("pack")?;
     let payload = json!({ "command": command, "pack": pack, "model": model });
-    run_blocking(
+    let done = run_blocking(
         app,
         handle.inner().clone(),
         payload,
         "packDone",
         EVENT_TIMEOUT,
     )
-    .await
+    .await;
+    drop(work);
+    done
 }
 
 // ------------------------------------------------------------------ secrets
@@ -438,12 +462,15 @@ fn write_secrets<R: Runtime>(
 
 /// Which services have a key stored. Never the keys themselves.
 #[tauri::command]
-pub(crate) fn subs_secret_status<R: Runtime>(app: AppHandle<R>) -> BTreeMap<String, bool> {
+pub(crate) fn subs_secret_status<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<BTreeMap<String, bool>, String> {
+    crate::service::guard()?;
     let stored = read_secrets(&app);
-    SECRET_NAMES
+    Ok(SECRET_NAMES
         .iter()
         .map(|name| (name.to_string(), stored.contains_key(*name)))
-        .collect()
+        .collect())
 }
 
 /// Store a key; an empty value deletes it.
@@ -453,6 +480,7 @@ pub(crate) fn subs_secret_set<R: Runtime>(
     name: String,
     value: Option<String>,
 ) -> Result<(), String> {
+    crate::service::guard()?;
     if !SECRET_NAMES.contains(&name.as_str()) {
         return Err(format!("Unknown service: {name}"));
     }

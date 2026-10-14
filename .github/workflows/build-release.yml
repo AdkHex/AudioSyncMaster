@@ -342,6 +342,14 @@ jobs:
         shell: bash
         run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
+      # Windows installs for the user who runs the installer, never for every
+      # account: NSIS only, currentUser (RELEASING.md, "Per-user Windows
+      # install"). Checked before anything is built or published.
+      - name: The Windows installer is per-user NSIS only
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/windows-installer.cjs config
+
       # tauri-action builds, signs the updater artifacts with the private key,
       # and merges each platform's entry into a single latest.json on the
       # release. Installed apps poll that file, so it must exist and must list
@@ -359,10 +367,21 @@ jobs:
             Automated build of AudioSyncMaster v${{ steps.version.outputs.value }}.
 
             Installed apps offer this update automatically on next launch.
+
+            Windows: AudioSyncMaster installs for your Windows account only (no administrator needed), in
+            %LOCALAPPDATA%\AudioSyncMaster. If an older copy was installed for all users (in Program Files),
+            an administrator has to uninstall that one once from Settings > Apps; your own copy and your
+            settings are not affected.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
+
+      # What the Windows build produced: a per-user -setup.exe, no MSI.
+      - name: The Windows build is per-user NSIS only
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/windows-installer.cjs bundle src-tauri/target/release
 
       - name: Confirm the release carries an update manifest
         if: runner.os == 'Linux'
@@ -402,3 +421,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/check-release.cjs "v${{ needs.version.outputs.value }}"
+
+      # Installed copies update through latest.json: Windows must be offered
+      # the per-user -setup.exe, and no MSI.
+      - name: Windows is offered the per-user installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/windows-installer.cjs release "v${{ needs.version.outputs.value }}"

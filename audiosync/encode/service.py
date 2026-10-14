@@ -155,9 +155,15 @@ class AudioQueue:
                 if job.key() in live:
                     skipped.append({"id": job.id, "reason": "already queued"})
                     continue
-                if job.id in self._jobs:
+                previous = self._jobs.get(job.id)
+                if previous is not None and previous.state != "cancelled":
                     skipped.append({"id": job.id, "reason": "id already used"})
                     continue
+                if previous is not None:
+                    # A cancelled job queued again under its own id: the app
+                    # does this for the conversions a remote pause stopped,
+                    # so the pages keep following the same job.
+                    self._order.remove(job.id)
                 live.add(job.key())
                 self._jobs[job.id] = job
                 self._order.append(job.id)
