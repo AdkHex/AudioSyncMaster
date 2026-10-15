@@ -396,7 +396,6 @@ fn resume_work<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
 
 pub(crate) struct Service {
     core: ServiceCore,
-    wake: tokio::sync::Notify,
 }
 
 impl Service {
@@ -496,10 +495,7 @@ pub(crate) fn start<R: Runtime>(
     if core.restore() == Transition::Engaged {
         log::info!("remote status: locked from the start ({:?})", GATE.reason());
     }
-    let svc = Arc::new(Service {
-        core,
-        wake: tokio::sync::Notify::new(),
-    });
+    let svc = Arc::new(Service { core });
     app.manage(ServiceHandle(svc.clone()));
     let Some(url) = url else {
         log::info!("remote status: no status URL in this build; the switch is off");
@@ -518,10 +514,7 @@ pub(crate) fn start<R: Runtime>(
             let t = svc.core.check_now().await;
             handle(&app, &svc, t);
             let wait = every.unwrap_or_else(|| svc.core.interval());
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = svc.wake.notified() => {}
-            }
+            tokio::time::sleep(wait).await;
         }
     });
 }
@@ -542,8 +535,6 @@ pub(crate) async fn check_service_status<R: Runtime>(
     let svc = svc.0.clone();
     let t = svc.core.check_now().await;
     handle(&app, &svc, t);
-    // The poll loop's next wait starts from here.
-    svc.wake.notify_one();
     Ok(svc.snapshot())
 }
 

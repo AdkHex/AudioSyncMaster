@@ -670,7 +670,10 @@ export function DubPage({ hidden }: { hidden: boolean }) {
    *  other job's result, the way a retry does. */
   const resumeStopped = async () => {
     if (!desktop || queueRef.current.status === "running") return;
-    const stopped = queueRef.current.jobs.filter((j) => j.status === "cancelled");
+    // Only jobs of the run the pause stopped (null: that run was the whole
+    // queue), not ones a Stop of your own cancelled before it.
+    const lastRun = jobMapRef.current;
+    const stopped = queueRef.current.jobs.filter((j) => j.status === "cancelled" && (!lastRun || lastRun.includes(j.id)));
     if (stopped.length === 0) return;
     if (!claim()) return;
     const runs: DubSyncJob[] = stopped.map((j) => ({ videoPath: j.videoPath, dubPath: j.dubPath, videoTrack: j.videoTrack, dubTrack: j.dubTrack }));
