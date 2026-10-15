@@ -20,7 +20,10 @@ function useInertApp() {
   useEffect(() => {
     const root = document.getElementById("root");
     if (root) root.inert = true;
-    (document.activeElement as HTMLElement | null)?.blur?.();
+    // Whatever had focus on the page goes; the password field, which
+    // focused itself a moment ago (children's effects run first), stays.
+    const active = document.activeElement as HTMLElement | null;
+    if (!active?.closest?.(".lock-screen")) active?.blur?.();
     const swallow = (event: KeyboardEvent) => {
       event.stopImmediatePropagation();
       if (!(event.target as HTMLElement | null)?.closest?.(".lock-screen")) event.preventDefault();

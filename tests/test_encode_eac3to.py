@@ -117,9 +117,16 @@ def _fake_eac3to(root) -> str:
 
 
 def _seconds(path: str) -> float:
-    out = subprocess.run([ffprobe_path(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+    """A raw .aac's real length. ffprobe's format duration only estimates it
+    from the bitrate, and how far off depends on the FFmpeg build: 102 ms on
+    Ubuntu 24.04's 6.1, enough to fail a 0.1 s check on a track of the right
+    length. Count the 1024-sample frames instead and drop the encoder's one
+    frame of priming, as test_encode_service does."""
+    out = subprocess.run([ffprobe_path(), "-v", "error", "-count_packets", "-select_streams", "a:0",
+                          "-show_entries", "stream=nb_read_packets,sample_rate", "-of", "csv=p=0", path],
                          capture_output=True, text=True, check=True).stdout
-    return float(out)
+    rate, packets = (int(v) for v in out.strip().split(","))
+    return (packets - 1) * 1024 / rate
 
 
 def test_an_fps_job_runs_through_eac3to_then_ffmpeg_for_aac():
