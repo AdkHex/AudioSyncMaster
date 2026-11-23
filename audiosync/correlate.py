@@ -68,6 +68,16 @@ REFINE_WINDOW_MS = 3.0 * ENVELOPE_HOP / 16000 * 1000.0
 # few microseconds.
 MIN_REFINE_PEAK_RATIO = 50.0
 
+# A waveform peak found by searching the whole range (``_search_waveform``)
+# must stand this many times above the next one at least PHAT_EXCLUSION_MS
+# away. A shared bed gives one spike far above everything (555 against 23 on a
+# real window); music repeating sample for sample gives two of a height, and
+# which of them is right is for the other windows to say, not this one. The
+# exclusion is a few samples wider than the spike itself, and far narrower
+# than any echo or loop.
+PHAT_DOMINANCE = 2.0
+PHAT_EXCLUSION_MS = 2.0
+
 
 @dataclass
 class OffsetEstimate:
@@ -239,6 +249,7 @@ def estimate_offset(
     max_offset_ms: Optional[float] = None,
     min_peak_ratio: float = MIN_PEAK_RATIO,
     search_ms: Optional[Tuple[float, float]] = None,
+    search_waveform: bool = True,
 ) -> OffsetEstimate:
     """Estimate how far the secondary track lags the primary.
 
@@ -251,6 +262,8 @@ def estimate_offset(
         min_peak_ratio: prominence below which the match is rejected outright.
         search_ms: (lowest, highest) delay to accept, for a search centred
             somewhere other than zero. Applied on top of max_offset_ms.
+        search_waveform: when the envelope's answer is not confirmed by the
+            waveforms, search them over the whole range (_search_waveform).
 
     Returns:
         OffsetEstimate. delay_ms is positive when the secondary starts later.
@@ -304,10 +317,23 @@ def estimate_offset(
     peak_index = search_base + local_peak
     ratio = _peak_ratio(corr, peak_index, sr)
 
+    # The delays the search may answer with, for the waveform search below:
+    # the same bounds the envelope's were cut to.
+    lowest_ms = -abs(max_offset_ms) if max_offset_ms is not None else None
+    highest_ms = abs(max_offset_ms) if max_offset_ms is not None else None
+    if search_ms is not None:
+        lowest_ms = search_ms[0] if lowest_ms is None else max(lowest_ms, search_ms[0])
+        highest_ms = search_ms[1] if highest_ms is None else min(highest_ms, search_ms[1])
+
     if ratio < min_peak_ratio:
+        # No onset pattern stood out -- a dub's own dialogue can swamp the
+        # one it shares -- but the waveforms may still agree somewhere.
+        found = _search_waveform(primary, secondary, sr, lowest_ms, highest_ms) if search_waveform else None
+        if found is not None:
+            return _waveform_estimate(found, ratio)
         return OffsetEstimate(
             None,
-            _ratio_to_confidence(ratio, min_peak_ratio),
+            _ratio_to_confidence(ratio, MIN_PEAK_RATIO),
             ratio,
             NO_PEAK,
         )
@@ -319,9 +345,27 @@ def estimate_offset(
     lag_frames = refined_index - zero_lag_index
     delay_ms = -(lag_frames / env_sr) * 1000.0
 
-    confidence = _ratio_to_confidence(ratio, min_peak_ratio)
+    # Scored against MIN_PEAK_RATIO whatever bar the match was accepted at, so
+    # a window let through on a lowered bar (where agreement decides) reads as
+    # the weak window it is, and two sweeps measured at different bars compare
+    # like with like (analyze._sharper).
+    confidence = _ratio_to_confidence(ratio, MIN_PEAK_RATIO)
     refined = _refine_against_waveform(primary, secondary, sr, delay_ms)
     if refined is None:
+        # The waveforms do not agree where the envelope points. Either they
+        # agree nowhere -- a different performance, a pitch-kept speed change
+        # -- and the envelope's answer is all there is, or the envelope picked
+        # the wrong one of several near-equal peaks, which music with a steady
+        # beat or a repeating chord cycle gives it: measured on such a pair,
+        # its top three peaks scored 33.0, 32.1 and 30.0 and the first was 667
+        # ms out, while the waveforms placed the dub at the third with a
+        # prominence of 555 against 23 for anything else. Every window read
+        # the music the same wrong way, so they agreed with each other and the
+        # wrong delay came out at 99%. Search the waveforms over the whole
+        # range before settling for the envelope.
+        found = _search_waveform(primary, secondary, sr, lowest_ms, highest_ms) if search_waveform else None
+        if found is not None:
+            return _waveform_estimate(found, ratio)
         return OffsetEstimate(delay_ms=float(delay_ms), confidence=confidence, peak_ratio=float(ratio))
 
     # The waveforms agreeing is the stronger evidence of the two: noise
@@ -405,6 +449,75 @@ def _refine_against_waveform(
     residual_frames = refined_index - zero_lag
     residual_ms = -(residual_frames / sr) * 1000.0
     return coarse_delay_ms + residual_ms, waveform_ratio
+
+
+def _search_waveform(
+    primary: np.ndarray,
+    secondary: np.ndarray,
+    sr: int,
+    lowest_ms: Optional[float],
+    highest_ms: Optional[float],
+) -> Optional[Tuple[float, float]]:
+    """Find the offset from the waveforms alone, over the whole search range.
+
+    GCC-PHAT, as ``_refine_against_waveform`` uses it, but searched rather
+    than only consulted near the envelope's answer. Trusted only when its peak
+    clears MIN_REFINE_PEAK_RATIO -- what noise never reaches -- and stands
+    PHAT_DOMINANCE times above the next one outside PHAT_EXCLUSION_MS of it,
+    so music that repeats sample for sample, which the waveforms confirm at
+    every period equally, is left to the windows to settle between them.
+
+    Either polarity counts: a track whose wiring inverted it lines up as a
+    negative spike exactly as sharp.
+
+    Returns:
+        (delay in ms, waveform peak prominence), or None.
+    """
+    a = _standardize(primary)
+    b = _standardize(secondary)
+    if a.std() < 1e-9 or b.std() < 1e-9:
+        return None
+    corr = np.abs(_correlate_phat(a, b))
+    zero_lag = len(b) - 1
+    lo, hi = 0, len(corr)
+    if highest_ms is not None:
+        lo = max(lo, zero_lag - int(math.ceil(highest_ms / 1000.0 * sr)) - 2)
+    if lowest_ms is not None:
+        hi = min(hi, zero_lag - int(math.floor(lowest_ms / 1000.0 * sr)) + 3)
+    if hi - lo < 3:
+        return None
+    window = corr[lo:hi]
+    local = int(np.argmax(window))
+    peak_index = lo + local
+    # Most windows searched here share nothing with the dub, and the exact
+    # floor below is a median over millions of lags. A strided sample of it
+    # settles those at a fraction of the cost; the peak's own neighbourhood
+    # is too small a share of the lags to move it.
+    stride = max(1, len(corr) // 200_000)
+    rough_floor = float(np.median(corr[::stride]))
+    if rough_floor > 0 and float(corr[peak_index]) < 0.8 * MIN_REFINE_PEAK_RATIO * rough_floor:
+        return None
+    waveform_ratio = _peak_ratio(corr, peak_index, sr)
+    if waveform_ratio < MIN_REFINE_PEAK_RATIO:
+        return None
+    exclude = max(1, int(PHAT_EXCLUSION_MS / 1000.0 * sr))
+    rest = np.concatenate([window[: max(0, local - exclude)], window[local + exclude + 1:]])
+    if rest.size and float(corr[peak_index]) < PHAT_DOMINANCE * float(np.max(rest)):
+        return None
+    refined_index = _parabolic_vertex(corr, peak_index)
+    return -((refined_index - zero_lag) / sr) * 1000.0, waveform_ratio
+
+
+def _waveform_estimate(found: Tuple[float, float], envelope_ratio: float) -> OffsetEstimate:
+    """An estimate the waveform search settled: confirmed by construction."""
+    delay_ms, waveform_ratio = found
+    return OffsetEstimate(
+        delay_ms=float(delay_ms),
+        confidence=_ratio_to_confidence(waveform_ratio, MIN_REFINE_PEAK_RATIO),
+        peak_ratio=float(envelope_ratio),
+        confirmed=True,
+        waveform_ratio=float(waveform_ratio),
+    )
 
 
 def _ratio_to_confidence(ratio: float, threshold: float) -> float:

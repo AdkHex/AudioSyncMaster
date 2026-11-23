@@ -32,6 +32,7 @@ from .codecdelay import describe as describe_codec_delay
 from .codecdelay import relative_codec_delay_ms
 from .correlate import (
     ENVELOPE_HOP,
+    MIN_PEAK_RATIO,
     NO_PEAK,
     SILENT_PRIMARY,
     SILENT_SECONDARY,
@@ -40,10 +41,13 @@ from .correlate import (
     estimate_offset,
 )
 from .framerate import (
+    COMMON_RATES,
+    MAX_RATE_DRIFT_MS_PER_S,
     RateDiagnosis,
     conversion_guide,
     diagnose,
     speed_candidates,
+    speed_ratio_for,
 )
 from .media import Cancelled, CancellationToken, MediaError, load_audio, probe
 from .segments import Step, find_step
@@ -70,6 +74,52 @@ DECISIVE_PEAK_RATIO = 30.0
 # the answer is normally first or second; this only bounds how long a pair that
 # was never going to match can take.
 MAX_SPEED_TRIALS = 6
+
+# A trial speed whose one window found the dub without settling it is asked
+# again at two more places in the file. Three windows landing within this of
+# one offset, out of a search range of seconds, is a speed that fits: a dub
+# sped up with its pitch kept (PAL with pitch correction) never confirms on
+# the waveforms and peaks at 12-15 on its envelope, under DECISIVE_PEAK_RATIO
+# at every window, yet its windows agree to a few milliseconds. Wide enough
+# for the envelope's scatter through a time-stretch, which smears transients
+# by a frame of its own.
+CORROBORATION_MS = 30.0
+
+# The envelope prominence a window must clear to count towards corroboration,
+# and in a sweep through a speed change to land beside the window before it.
+# Under MIN_PEAK_RATIO, because the agreement is the evidence: unrelated audio
+# peaks anywhere in the range, and three such peaks falling within
+# CORROBORATION_MS of each other in a range of seconds is a chance of about
+# one in ten million per trial. A pitch-kept PAL dub at its right speed peaks
+# at 8-17 here; unrelated audio at its own median of about 5.
+CORROBORATION_PEAK_RATIO = 7.0
+
+# Only the likeliest speeds -- the durations order them -- are corroborated;
+# the rest still have to settle in one window. Unrelated audio clears the
+# lowered bar at random, so corroborating every trial tripled the time a pair
+# with no match takes to say so, for conversions the durations all but rule
+# out.
+CORROBORATED_TRIALS = 3
+
+# ... and only speeds within this of the ratio the two files' durations
+# suggest. Durations are a weak witness -- a dub without the video's recap runs
+# 4% short with no speed change at all -- so they never rule a speed out of
+# the search, only out of being settled on weak windows. A pitch-kept PAL dub
+# sits within 0.1% of its speed by them; an unrelated pair of the same length
+# is 4% from every PAL candidate.
+CORROBORATION_DURATION_SHARE = 0.02
+
+# How many times a drifting survey may be measured again with the speed taken
+# off. The first pass removes nearly all of it; a second catches a conversion
+# the first snapped to a neighbouring one (25/24 for 25/23.976).
+MAX_RATE_REFINEMENTS = 2
+
+# A measured drift is taken to be a standard conversion when it lies this close
+# to one, as a share of that conversion's own drift (with RATE_SNAP_FLOOR as
+# the least). Smeared windows measure a 24 -> 23.976 drift of 1.0 ms/s as
+# 0.92 ms/s; the nearest other conversions sit 100% away.
+RATE_SNAP_SHARE = 0.15
+RATE_SNAP_FLOOR_MS_PER_S = 0.03
 
 # The fast route: one long window for the offset, one short check near the end.
 # Decoding the whole offset range as padding around every survey window
@@ -158,6 +208,14 @@ TIMELINE_MIN_STRETCH_S = 30.0
 # nothing else confirming it, may claim: under MkvBatchMux's and the report's
 # 0.5 bar for using a delay unchecked.
 WEAK_SURVEY_CONFIDENCE = 0.45
+
+# Windows that each found the dub but sit this far apart, typically, from what
+# the file is doing cannot place it to better than that, however sure each
+# one was. Half the 45 ms BT.1359 puts lip sync at: past it, a delay read from
+# them can be visibly wrong. Measured on a pitch-kept PAL dub over music that
+# repeats every few seconds, six windows scattered by +-150 ms and their delay
+# came out 220 ms wrong at 68%.
+SCATTER_MS = 25.0
 
 # Shorter than this, a file has too little audio to measure a delay from:
 # fewer than two of the shortest windows the survey uses.
@@ -552,20 +610,35 @@ def analyze_pair(
         # audio itself confirms the rate.
         secondary_rate = ANALYSIS_SR
 
-        def sweep(rate: int):
-            """Measure every window with the secondary running at this speed."""
+        def sweep(rate: int, progress_from: int = 5, progress_to: int = 80):
+            """Measure every window with the secondary running at this speed.
+
+            Returns the window length, the windows, and how far either side of
+            its centre the narrowest window searched (``PairResult.search_ms``).
+            """
             # Only where both files have content, in the primary's timeline --
             # which is what the secondary's duration becomes once the speed
             # difference is taken off it.
-            span = min(primary_duration, secondary_duration * (rate / ANALYSIS_SR))
+            speed = rate / ANALYSIS_SR
+            span = min(primary_duration, secondary_duration * speed)
             length = min(window_s, max(5.0, span / 3.0))
             spots = plan_windows(span, length, window_count)
             measured = []
+            searched = max_offset_ms
             # The offset the last window found, which the next one searches
-            # around. Only at the files' own speed: a stretched dub drifts by
-            # design, and its windows keep the full range.
+            # around. Held on the clock the windows are measured on: at the
+            # files' own speed that is the offset itself, and with a speed
+            # taken off it is the offset on the stretched clock, which a real
+            # conversion holds constant however far the native one drifts.
             anchor = None
-            narrowing = rate == ANALYSIS_SR and max_offset_ms > NARROW_SEARCH_MS
+            anchored_at = None
+            narrowing = max_offset_ms > NARROW_SEARCH_MS
+            # A window measured through a speed change is often a weak one --
+            # a dub sped up with its pitch kept peaks under MIN_PEAK_RATIO even
+            # at the right speed -- and searched within NARROW_SEARCH_MS of the
+            # windows before it, landing beside them is the evidence a strong
+            # peak would otherwise have to be.
+            narrow_bar = MIN_PEAK_RATIO if rate == ANALYSIS_SR else CORROBORATION_PEAK_RATIO
             # Before any window has found the dub, the first is searched around
             # zero, where most pairs sit, and given the full range only if that
             # does not settle it. The full range reads the whole of it from the
@@ -579,16 +652,20 @@ def analyze_pair(
                     token.raise_if_cancelled()
                 estimate = None
                 if anchor is not None and narrowing:
+                    # Overlapping the anchor's window, landing beside it is
+                    # partly the same audio agreeing with itself, not evidence.
+                    bar = narrow_bar if position >= anchored_at + length else MIN_PEAK_RATIO
                     narrow = _measure_window(
                         primary_path, secondary_path, position, length,
                         max_offset_ms, token, primary_track, secondary_track, rate,
-                        expect_ms=anchor,
+                        expect_ms=anchor, min_peak_ratio=bar,
                     )
                     if narrow.matched and (
-                        narrow.confirmed or abs(narrow.delay_ms - anchor) <= NARROW_AGREEMENT_MS
+                        narrow.confirmed
+                        or abs(_compensated_ms(position, narrow.delay_ms, speed) - anchor) <= NARROW_AGREEMENT_MS
                     ):
                         estimate = narrow
-                        result.search_ms = NARROW_SEARCH_MS
+                        searched = NARROW_SEARCH_MS
                 elif anchor is None and near_zero:
                     near = _measure_window(
                         primary_path, secondary_path, position, length,
@@ -597,7 +674,7 @@ def analyze_pair(
                     )
                     if near.matched and near.confirmed:
                         estimate = near
-                        result.search_ms = NARROW_SEARCH_MS
+                        searched = NARROW_SEARCH_MS
                         from_zero = index
                     else:
                         near_zero = False
@@ -607,9 +684,10 @@ def analyze_pair(
                         max_offset_ms, token, primary_track, secondary_track, rate,
                     )
                 if estimate.matched:
-                    anchor = estimate.delay_ms
+                    anchor = _compensated_ms(position, estimate.delay_ms, speed)
+                    anchored_at = position
                 measured.append(WindowResult(position, estimate))
-                report(5 + int(75 * (index + 1) / len(spots)))
+                report(progress_from + int((progress_to - progress_from) * (index + 1) / len(spots)))
 
             # A loop in the music can confirm a period away from a true offset
             # that lies outside the search around zero. The windows after it
@@ -617,15 +695,18 @@ def analyze_pair(
             # range after all, as it always had.
             if from_zero is not None:
                 others = [
-                    w.estimate.delay_ms for i, w in enumerate(measured)
+                    _compensated_ms(w.position_s, w.estimate.delay_ms, speed) for i, w in enumerate(measured)
                     if i != from_zero and w.estimate.matched
                 ]
-                if others and abs(float(np.median(others)) - measured[from_zero].estimate.delay_ms) > NARROW_AGREEMENT_MS:
+                first = measured[from_zero]
+                if others and abs(
+                    float(np.median(others)) - _compensated_ms(first.position_s, first.estimate.delay_ms, speed)
+                ) > NARROW_AGREEMENT_MS:
                     measured[from_zero] = WindowResult(spots[from_zero], _measure_window(
                         primary_path, secondary_path, spots[from_zero], length,
                         max_offset_ms, token, primary_track, secondary_track, rate,
                     ))
-            return length, measured
+            return length, measured, searched
 
         report(5)
         result.search_ms = max_offset_ms
@@ -642,7 +723,7 @@ def analyze_pair(
             effective_window, windows = fast
             result.speed_compensation = 1.0
         else:
-            effective_window, windows = sweep(secondary_rate)
+            effective_window, windows, result.search_ms = sweep(secondary_rate)
 
             # Too little to work with, which is what a rate conversion looks
             # like when the durations did not predict it -- and they often
@@ -654,11 +735,11 @@ def analyze_pair(
                     primary_path, secondary_path, effective_window, max_offset_ms,
                     token, primary_track, secondary_track,
                     speed_candidates(primary_duration, secondary_duration),
-                    secondary_rate, primary_duration,
+                    secondary_rate, primary_duration, secondary_duration,
                 )
                 if alternative is not None and alternative != secondary_rate:
                     secondary_rate = alternative
-                    effective_window, windows = sweep(secondary_rate)
+                    effective_window, windows, result.search_ms = sweep(secondary_rate)
 
             result.speed_compensation = secondary_rate / ANALYSIS_SR
 
@@ -670,6 +751,32 @@ def analyze_pair(
         # answer. Re-running is cheaper than unpicking a provisional result,
         # and it keeps one code path deciding what a segmented file reports.
         step = _reconcile(result, allow_step=find_cuts)
+
+        # A steady drift the windows measured through is a speed difference
+        # they were smeared by: at 24 against 23.976 a 45 s window slides 45 ms
+        # inside itself, so its peak is blunt, rarely confirmed, and lands
+        # wherever the loudest moment of the window sits -- up to half that
+        # from the truth, which is what the delay at the start inherits. Taking
+        # the speed off and measuring again makes every window sharp. Only kept
+        # when the windows really are sharper for it (see _sharper), and never
+        # for a step, which no speed explains.
+        if fast is None and find_speed and step is None:
+            for _ in range(MAX_RATE_REFINEMENTS):
+                rate = _compensating_rate(result, secondary_rate)
+                if rate is None:
+                    break
+                trial_window, trial, trial_search = sweep(rate, 80, 92)
+                if not _sharper(trial, windows):
+                    break
+                secondary_rate, effective_window, windows = rate, trial_window, trial
+                result.speed_compensation = secondary_rate / ANALYSIS_SR
+                result.window_s = effective_window
+                result.windows = windows
+                result.search_ms = trial_search
+                step = _reconcile(result, allow_step=find_cuts)
+                if step is not None:
+                    break
+
         if step is not None:
             confirmed = _localize_cut(
                 step,
@@ -711,6 +818,12 @@ def analyze_pair(
             cut_magnitude_ms=result.cut.magnitude_ms if result.cut else None,
             cut_uncertainty_s=result.cut.uncertainty_s if result.cut else None,
         )
+        if result.cut is not None and result.cut.levels > 2:
+            result.warnings.append(
+                f"The offset changes at least {result.cut.levels - 1} times across the file, not once: the dub was "
+                f"edited in several places (scenes cut or trimmed). The delay aligns only the part before the first "
+                f"change, about {_clock_of(result.cut.position_s)} in; the whole-timeline check maps every one."
+            )
         if not _survey_is_clean(result):
             measured = timeline and _measure_timeline(
                 result, primary_path, secondary_path, max_offset_ms, token,
@@ -720,6 +833,7 @@ def analyze_pair(
             )
             if not measured:
                 _guard_weak_survey(result)
+                _guard_scattered_survey(result)
                 if result.error:
                     result.error = _explain_no_match(result, timeline, find_speed)
         if progress:
@@ -1005,6 +1119,33 @@ def _guard_weak_survey(result: PairResult) -> None:
     )
 
 
+def _guard_scattered_survey(result: PairResult) -> None:
+    """Keep a survey whose windows disagree from passing as a measurement.
+
+    Agreement is what the confidence of a survey mostly rests on; windows
+    that each found the dub somewhere different, by more than SCATTER_MS,
+    have not agreed on anything, and the delay read from them is only as good
+    as their spread. A cut is the other reason windows disagree, and it is
+    reported as one, so it is left alone here.
+    """
+    if result.error or result.delay_ms is None or result.cut is not None:
+        return
+    usable = sorted((w for w in result.windows if w.usable), key=lambda w: w.position_s)
+    if len(usable) < MIN_USABLE_WINDOWS or result.agreeing_windows >= MIN_USABLE_WINDOWS:
+        return
+    positions = np.array([w.position_s for w in usable], dtype=np.float64)
+    offsets = np.array([w.estimate.delay_ms for w in usable], dtype=np.float64)
+    model = _model_values(positions, offsets, np.zeros(len(offsets), dtype=bool))
+    scatter = float(np.median(np.abs(offsets - model)))
+    if scatter <= SCATTER_MS:
+        return
+    result.confidence = min(result.confidence, WEAK_SURVEY_CONFIDENCE)
+    result.warnings.append(
+        f"The windows found the dub but disagree with each other by about {scatter:.0f} ms, so the delay is "
+        "only that accurate. Check it by ear, or turn on the whole-timeline check."
+    )
+
+
 def _measure_window(
     primary_path: str,
     secondary_path: str,
@@ -1016,6 +1157,8 @@ def _measure_window(
     secondary_track: int = 0,
     secondary_rate: int = ANALYSIS_SR,
     expect_ms: Optional[float] = None,
+    min_peak_ratio: float = MIN_PEAK_RATIO,
+    search_waveform: bool = True,
 ) -> OffsetEstimate:
     """Measure one window, padding the secondary so a shifted match still fits.
 
@@ -1038,13 +1181,20 @@ def _measure_window(
             is brought onto the video's clock before being correlated; at
             ANALYSIS_SR it is an ordinary decode and changes nothing.
         expect_ms: the offset to search around, NARROW_SEARCH_MS either
-            side, instead of the whole range around zero. Only at the files'
-            own speed.
+            side, instead of the whole range around zero. On the clock the
+            window is measured on: with a speed taken off, the stretched one
+            (``_compensated_ms``), where a real conversion's offset holds still.
+        min_peak_ratio: the envelope prominence a match must clear
+            (``correlate.estimate_offset``). Lowered only where agreement with
+            other windows is what decides.
+        search_waveform: let an unconfirmed window search the waveforms over
+            its whole range (``correlate._search_waveform``). Off where
+            speeds are being tried: a wrong speed confirms nothing anywhere,
+            and searching for it at every one tripled what a pair with no
+            match took to say so.
     """
     # How much of the primary's clock one second of decoded secondary covers.
     speed = secondary_rate / ANALYSIS_SR
-    if expect_ms is not None and speed != 1.0:
-        expect_ms = None
 
     # The full head start the user asked for, with no cap of its own. Capping
     # the margin below max_offset_ms quietly made every offset beyond the cap
@@ -1113,14 +1263,18 @@ def _measure_window(
         if highest <= lowest:
             return OffsetEstimate(None, 0.0, 0.0, "the expected offset lies outside the search range")
         bounds = {"search_ms": (lowest, highest)}
-    full = estimate_offset(_mix(primary), _mix(secondary), ANALYSIS_SR, **bounds)
+    bounds["min_peak_ratio"] = min_peak_ratio
+    full_primary, full_secondary = _mix(primary), _mix(secondary)
+    full = estimate_offset(full_primary, full_secondary, ANALYSIS_SR, **bounds, search_waveform=False)
     if full.confirmed:
         # The waveforms already agree through the dialogue, which places the
         # window to a fraction of a sample; the M&E could only say the same.
         estimate = full
     else:
         side_primary, side_secondary = _side(primary), _side(secondary)
-        me = replace(estimate_offset(side_primary, side_secondary, ANALYSIS_SR, **bounds), mix="me")
+        me = replace(
+            estimate_offset(side_primary, side_secondary, ANALYSIS_SR, **bounds, search_waveform=False), mix="me"
+        )
         estimate = _choose_mix(full, me)
         if estimate is me and full.matched and abs(me.delay_ms - full.delay_ms) > MIX_AGREEMENT_MS:
             # Music that repeats sample for sample -- a loop, a reprised cue --
@@ -1130,6 +1284,19 @@ def _measure_window(
             at_full = _refine_against_waveform(side_primary, side_secondary, ANALYSIS_SR, full.delay_ms)
             if at_full is not None:
                 estimate = replace(me, delay_ms=at_full[0], waveform_ratio=at_full[1])
+        if search_waveform and not estimate.confirmed:
+            # Neither mix's envelope led to waveforms that agree. Search the
+            # waveforms themselves over the whole range -- the full mix, then
+            # the M&E -- before settling for an envelope's answer: on music
+            # with a steady beat the envelope's peaks stand level with each
+            # other and the wrong one can win in every window alike
+            # (correlate._search_waveform). Only here, once both cheap reads
+            # have failed, because it costs a transform of the whole range.
+            for mix, a, b in (("full", full_primary, full_secondary), ("me", side_primary, side_secondary)):
+                searched = estimate_offset(a, b, ANALYSIS_SR, **bounds, search_waveform=True)
+                if searched.confirmed:
+                    estimate = replace(searched, mix=mix)
+                    break
     if not estimate.matched:
         return estimate
 
@@ -1265,6 +1432,7 @@ def _search_speed(
     candidates: List[Fraction],
     already_tried: int,
     primary_duration: float,
+    secondary_duration: Optional[float] = None,
 ) -> Optional[int]:
     """Find the playback speed that makes this pair correlate, by trying them.
 
@@ -1300,6 +1468,7 @@ def _search_speed(
         estimate = _measure_window(
             primary_path, secondary_path, position, window_s,
             max_offset_ms, token, primary_track, secondary_track, rate,
+            min_peak_ratio=CORROBORATION_PEAK_RATIO, search_waveform=False,
         )
         # Decisive, not merely matched. Six trials are six chances at a
         # coincidence, so the bar here has to be higher than for a single
@@ -1311,14 +1480,173 @@ def _search_speed(
         # that and nothing else; a reading of the M&E alone -- a second chance
         # per trial -- settles a speed only once the waveforms confirm it,
         # which noise cannot do (see correlate.MIN_REFINE_PEAK_RATIO).
-        decisive = estimate.confirmed or (
-            estimate.mix == "full" and estimate.peak_ratio >= DECISIVE_PEAK_RATIO
+        decisive = _decisive(estimate)
+        # Short of that, windows elsewhere in the file agreeing with this one
+        # settle it: a coincidence does not repeat at the same offset three
+        # times over (see CORROBORATION_MS).
+        plausible = (
+            secondary_duration is None or secondary_duration <= 0
+            or abs(float(candidate) - primary_duration / secondary_duration) <= CORROBORATION_DURATION_SHARE
         )
+        if not decisive and tried <= CORROBORATED_TRIALS and plausible:
+            decisive = _corroborated(
+                primary_path, secondary_path, window_s, max_offset_ms, token,
+                primary_track, secondary_track, rate, primary_duration, position, estimate,
+            )
         if decisive and (best is None or estimate.peak_ratio > best[0]):
             best = (estimate.peak_ratio, rate)
             break
 
     return best[1] if best is not None else None
+
+
+def _decisive(estimate: OffsetEstimate) -> bool:
+    """Whether one window settles a trial speed by itself (see _search_speed)."""
+    return estimate.matched and (
+        estimate.confirmed or (estimate.mix == "full" and estimate.peak_ratio >= DECISIVE_PEAK_RATIO)
+    )
+
+
+def _compensated_ms(position_s: float, native_ms: float, speed: float) -> float:
+    """A window's offset on the stretched clock it was measured on: the
+    inverse of the conversion at the end of ``_measure_window``. Constant
+    across the file when the speed is the right one."""
+    return ((position_s + native_ms / 1000.0) * speed - position_s) * 1000.0
+
+
+def _corroborated(
+    primary_path: str,
+    secondary_path: str,
+    window_s: float,
+    max_offset_ms: float,
+    token: Optional[CancellationToken],
+    primary_track: int,
+    secondary_track: int,
+    rate: int,
+    primary_duration: float,
+    first_position: float,
+    first: OffsetEstimate,
+) -> bool:
+    """Whether a trial speed holds at two more places in the file.
+
+    Three windows that heard different audio -- the one already measured, if
+    it found anything, and up to three more -- must land within
+    CORROBORATION_MS of one offset on the stretched clock, or one of the new
+    ones must be decisive on its own as the first would have had to be.
+    Windows that overlap are one observation read twice (see _independent):
+    on a short file the places below share audio, and a coincidence in what
+    they share would repeat at the same offset in each. Stops as soon as
+    three are out of reach, so a speed that fits nothing costs one window
+    more than it used to.
+    """
+    speed = rate / ANALYSIS_SR
+    span = max(0.0, primary_duration - window_s)
+    found = []
+    if first.matched:
+        found.append((first_position, _compensated_ms(first_position, first.delay_ms, speed)))
+    places = [span * share for share in (0.15, 0.85, 0.32, 0.68)]
+    if _independent([first_position] + places, window_s) < 3:
+        return False
+    for index, position in enumerate(places):
+        remaining = len(places) - index
+        if len(found) + remaining < 3:
+            return False
+        if token:
+            token.raise_if_cancelled()
+        estimate = _measure_window(
+            primary_path, secondary_path, position, window_s,
+            max_offset_ms, token, primary_track, secondary_track, rate,
+            min_peak_ratio=CORROBORATION_PEAK_RATIO, search_waveform=False,
+        )
+        if _decisive(estimate):
+            return True
+        if estimate.matched:
+            found.append((position, _compensated_ms(position, estimate.delay_ms, speed)))
+        elif not found:
+            # Two places in, nothing found at either: not this speed.
+            return False
+        for _, centre in found:
+            agreeing = [at for at, value in found if abs(value - centre) <= CORROBORATION_MS]
+            if _independent(agreeing, window_s) >= 3:
+                return True
+    return False
+
+
+def _standard_ratios() -> List[Fraction]:
+    """Every speed difference two standard frame rates make."""
+    ratios = set()
+    for audio_rate in COMMON_RATES:
+        for video_rate in COMMON_RATES:
+            if audio_rate != video_rate:
+                ratios.add(audio_rate / video_rate)
+    return sorted(ratios)
+
+
+STANDARD_RATIOS = _standard_ratios()
+
+
+def _drift_for(ratio: float) -> float:
+    """The drift, in ms per second, a dub running ``ratio`` as fast shows."""
+    return (1.0 / ratio - 1.0) * 1000.0
+
+
+def _compensating_rate(result: PairResult, current_rate: int) -> Optional[int]:
+    """The decode rate that takes the survey's drift off the dub, or None.
+
+    The drift is the files' own (windows report it on the dub's native clock
+    whatever speed they were measured at), so the rate follows from it
+    directly, snapped to the standard conversion it sits beside when there is
+    one: a smeared survey reads 24 -> 23.976 as 0.92 ms/s, and stretching by
+    that instead of by 1.001 would leave 0.08 ms/s behind. None when there is
+    no drift worth taking off, too few windows to trust it, or the rate it
+    asks for is the one already used.
+    """
+    drift = result.drift_ms_per_s
+    usable = sum(1 for w in result.windows if w.usable)
+    if drift is None or usable < MIN_USABLE_WINDOWS:
+        return None
+    if abs(drift) <= DRIFT_SIGNIFICANT_MS_PER_S or abs(drift) > MAX_RATE_DRIFT_MS_PER_S:
+        return None
+    ratio = speed_ratio_for(drift)
+    if ratio <= 0.0:
+        return None
+    nearest = None
+    for standard in STANDARD_RATIOS:
+        expected = _drift_for(float(standard))
+        gap = abs(drift - expected)
+        if gap <= max(RATE_SNAP_FLOOR_MS_PER_S, RATE_SNAP_SHARE * abs(expected)) and (
+            nearest is None or gap < nearest[0]
+        ):
+            nearest = (gap, float(standard))
+    if nearest is not None:
+        ratio = nearest[1]
+    rate = int(round(ANALYSIS_SR * ratio))
+    return None if rate == current_rate else rate
+
+
+def _sharper(trial: List[WindowResult], before: List[WindowResult]) -> bool:
+    """Whether a sweep with the speed taken off measured better than without.
+
+    It must find the dub in at least as many windows, with at least as many
+    confirmed by the waveforms, and then find it in more of them, confirm
+    more, or be surer of them on average. More windows counts for itself: a
+    pitch-kept PAL dub stretched by 25/24 instead of its 25/23.976 found the
+    dub in three windows and the right speed in all six, at a lower average
+    because the three it gained were its weakest. A drift that was never a
+    speed -- several small edits a line happens to fit -- gains nothing from
+    stretching and is left as it was.
+    """
+    def tally(windows: List[WindowResult]):
+        usable = [w for w in windows if w.usable]
+        confirmed = sum(1 for w in usable if w.estimate.confirmed)
+        mean = float(np.mean([w.estimate.confidence for w in usable])) if usable else 0.0
+        return len(usable), confirmed, mean
+
+    trial_usable, trial_confirmed, trial_mean = tally(trial)
+    usable, confirmed, mean = tally(before)
+    if trial_usable < max(MIN_USABLE_WINDOWS, usable) or trial_confirmed < confirmed:
+        return False
+    return trial_usable > usable or trial_confirmed > confirmed or trial_mean > mean + 0.02
 
 
 def _localize_cut(

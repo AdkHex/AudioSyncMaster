@@ -529,9 +529,18 @@ def test_reference_follows_a_cut_edit():
 
 def test_reference_mappings_carry_cues():
     # Drift: the reference runs 1001/1000 slow and 500 ms late at t=0.
-    mapping = sync.map_from_pair(500.0, 1.0, 1.0)
+    mapping = sync.map_from_pair(500.0, 1.0)
     assert abs(mapping(0.5) - 0.0) < 1e-9
     assert abs(mapping(1000.0 * 1.001 + 0.5) - 1000.0) < 1e-6
+
+    # A PAL reference, measured with its speed taken off: the drift the
+    # survey reports is the files' own (-40.96 ms/s), and it alone maps it.
+    # Applying the decode speed on top of it put every cue 4% further out.
+    pal = 25.0 / (24000.0 / 1001.0)
+    mapping = sync.map_from_pair(2000.0, (1.0 / pal - 1.0) * 1000.0)
+    for video_s in (0.0, 600.0, 2400.0):
+        reference_s = video_s / pal + 2.0
+        assert abs(mapping(reference_s) - video_s) < 1e-6, (video_s, mapping(reference_s))
 
     class Seg:
         def __init__(self, start, end, source):

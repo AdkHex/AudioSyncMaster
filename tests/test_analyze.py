@@ -951,3 +951,29 @@ def test_a_first_window_the_others_disagree_with_is_measured_again_in_full():
     assert [w.estimate.delay_ms for w in result.windows] == [3000.0] * 4, [w.estimate.delay_ms for w in result.windows]
     assert calls[-1] is None, calls
     assert result.cut is None
+
+
+def test_windows_that_scatter_are_not_passed_as_a_measurement():
+    """Six windows that each found the dub, but by +-150 ms around anything a
+    line or a level could make of them, agree on nothing: their delay is held
+    under the 0.5 a caller fills a field at, and the scatter is said."""
+    import numpy as np  # noqa: PLC0415
+
+    from audiosync.analyze import PairResult, WindowResult, _guard_scattered_survey  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    def survey(offsets):
+        result = PairResult("v.mkv", "d.eac3")
+        result.windows = [WindowResult(160.0 * i, OffsetEstimate(o, 0.85, 20.0)) for i, o in enumerate(offsets)]
+        result.delay_ms = result.delay_at_start_ms = float(np.median(offsets))
+        result.confidence = 0.85
+        return result
+
+    scattered = survey([2240.0, 2010.0, 2190.0, 1880.0, 2160.0, 1940.0])
+    _guard_scattered_survey(scattered)
+    assert scattered.confidence < 0.5 and any("disagree" in w for w in scattered.warnings), scattered.warnings
+
+    steady = survey([2000.0, 2003.0, 1998.0, 2001.0, 1999.0, 2002.0])
+    steady.agreeing_windows = 6
+    _guard_scattered_survey(steady)
+    assert steady.confidence == 0.85 and not steady.warnings

@@ -1087,20 +1087,23 @@ class TimeMap:
         return best[1] if best else t
 
 
-def map_from_pair(delay_at_start_ms: float, drift_ms_per_s: Optional[float], speed: float = 1.0) -> TimeMap:
+def map_from_pair(delay_at_start_ms: float, drift_ms_per_s: Optional[float]) -> TimeMap:
     """The mapping analyze_pair measured, turned around.
 
     analyze_pair reports how late the secondary (the reference) runs against
-    the primary (the video): reference analysis time = v + d(v), with d
-    growing linearly by the drift, and the reference decoded ``speed`` times
-    faster than it plays. So reference time T sits at
-    ``v = (T * speed - d0) / (1 + k)`` on the video. A reference with two
-    extra seconds at its head measures +2000 ms, and its cues move 2 s
-    earlier.
+    the primary (the video) on the files' own clocks: reference time
+    T = v + d(v), with d growing linearly by the drift. So T sits at
+    ``v = (T - d0) / (1 + k)`` on the video. A reference with two extra
+    seconds at its head measures +2000 ms, and its cues move 2 s earlier.
+
+    Whatever speed the reference was decoded at to be measured is already in
+    the drift -- every window is reported back on the reference's own clock
+    (see analyze._measure_window), and so is a timeline result -- so it is not
+    applied again: doing so turned a PAL reference's 1.0427 into 1.087.
     """
     d0 = delay_at_start_ms / 1000.0
     k = (drift_ms_per_s or 0.0) / 1000.0
-    return TimeMap([(-math.inf, math.inf, -d0 / (1.0 + k), speed / (1.0 + k))])
+    return TimeMap([(-math.inf, math.inf, -d0 / (1.0 + k), 1.0 / (1.0 + k))])
 
 
 def map_from_plan(plan) -> TimeMap:
@@ -1164,11 +1167,10 @@ def _reference(doc, options, video, reference, ctx) -> SyncOutcome:
     usable = pair.error is None and pair.delay_at_start_ms is not None
     warnings: List[str] = []
     if usable and not pair.is_likely_cut:
-        speed = pair.speed_compensation or 1.0
-        mapping = map_from_pair(pair.delay_at_start_ms, pair.drift_ms_per_s, speed)
+        mapping = map_from_pair(pair.delay_at_start_ms, pair.drift_ms_per_s)
         out, dropped = carry(doc, mapping)
         k = (pair.drift_ms_per_s or 0.0) / 1000.0
-        ratio = speed / (1.0 + k)
+        ratio = 1.0 / (1.0 + k)
         ratio = _snap_ratio(ratio)
         outcome = SyncOutcome(
             doc=out, offset_s=mapping.pieces[0][2], ratio=ratio, method="reference",
@@ -1211,7 +1213,7 @@ def _reference(doc, options, video, reference, ctx) -> SyncOutcome:
     else:
         if not usable:
             raise TaskError(pair.error or "The reference audio did not match this video.")
-        mapping = map_from_pair(pair.delay_at_start_ms, pair.drift_ms_per_s, pair.speed_compensation or 1.0)
+        mapping = map_from_pair(pair.delay_at_start_ms, pair.drift_ms_per_s)
         out, dropped = carry(doc, mapping)
         warnings.append("The two releases are cut differently; allow scene changes to follow the cut.")
         outcome = SyncOutcome(

@@ -281,3 +281,56 @@ def test_a_search_range_keeps_the_answer_inside_it():
     assert inside.matched and abs(inside.delay_ms - 250.0) < 0.5, inside
     outside = estimate_offset(signal, shifted, sr, search_ms=(1000.0, 3000.0))
     assert not outside.matched or 1000.0 <= outside.delay_ms <= 3000.0, outside
+
+
+def test_the_waveforms_overrule_onsets_that_line_up_in_the_wrong_place():
+    """Music with a steady beat, or dialogue timed the same way in a dub that
+    sits elsewhere, can make the onset envelope's highest peak a wrong one.
+    Measured on a real pair, its top peaks were 33.0, 32.1 and 30.0 and the
+    first was 667 ms out, while the waveforms of the shared bed placed the dub
+    with a prominence of 555. Here the dub's dialogue carries the original's
+    exact onset pattern 667 ms away from where its bed lines up: the envelope
+    points at the dialogue, and only searching the waveforms finds the bed."""
+    sr = 16000
+    seconds = 40
+    n = seconds * sr
+    rng = np.random.default_rng(31)
+    bed = np.zeros(n)
+    for _ in range(seconds * 3):
+        at = int(rng.uniform(0, seconds - 1) * sr)
+        length = int(rng.uniform(0.05, 0.4) * sr)
+        bed[at:at + length] += rng.standard_normal(length) * np.exp(-np.linspace(0, 6, length)) * 0.3
+    envelope = np.zeros(n)
+    at = 0
+    while at < n:
+        burst = int(rng.uniform(0.25, 0.9) * sr)
+        envelope[at:at + burst] = rng.uniform(0.6, 1.0)
+        at += burst + int(rng.uniform(0.1, 0.5) * sr)
+    envelope = np.convolve(envelope, np.ones(64) / 64.0, mode="same")
+
+    def voice(seed):
+        noise = np.random.default_rng(seed).standard_normal(n)
+        return np.convolve(noise, np.ones(24) / 24.0, mode="same") * envelope * 3.0
+
+    def late(signal, ms):
+        k = int(round(ms / 1000.0 * sr))
+        return np.concatenate([np.zeros(k), signal])[:n]
+
+    original = (bed + voice(1)).astype(np.float32)
+    dub = (late(bed, 250.0) + late(voice(2), 250.0 + 667.0)).astype(np.float32)
+
+    estimate = estimate_offset(original, dub, sr, max_offset_ms=3000.0)
+    assert estimate.matched and estimate.confirmed, estimate
+    assert abs(estimate.delay_ms - 250.0) < 0.1, f"measured {estimate.delay_ms:+.3f} ms, want +250"
+
+
+def test_an_inverted_track_is_found_on_its_waveforms():
+    """A track wired with its polarity inverted lines up as a negative spike,
+    exactly as sharp; the waveform search counts it."""
+    from audiosync.correlate import _search_waveform
+
+    sr = 16000
+    signal = _speechlike(20.0, sr, seed=12)
+    inverted = -np.concatenate([np.zeros(2400, dtype=np.float32), signal])[: len(signal)]  # 150 ms
+    found = _search_waveform(signal, inverted, sr, -2000.0, 2000.0)
+    assert found is not None and abs(found[0] - 150.0) < 0.1, found

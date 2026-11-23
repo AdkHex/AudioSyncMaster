@@ -52,6 +52,19 @@ NOISE_MULTIPLE = 5.0
 # make the noise test vacuous, so it never falls below this.
 NOISE_FLOOR_MS = 1.0
 
+# Two windows read the same level of a staircase when they agree this closely.
+# Matched windows land within a fraction of a millisecond of each other on a
+# shared music-and-effects bed and within a few through a dub's own mix;
+# agreement this tight between windows minutes apart is what a drift never
+# shows (see _first_of_staircase).
+LEVEL_MATCH_MS = 5.0
+
+# How far apart the line must put two windows that agree before their
+# agreement refutes it. Four times LEVEL_MATCH_MS, so the slope of a real but
+# small drift -- which moves close windows by less than their own scatter --
+# is never mistaken for a staircase.
+STAIRCASE_CONTRADICTION_MS = 4.0 * LEVEL_MATCH_MS
+
 
 @dataclass
 class Step:
@@ -76,6 +89,10 @@ class Step:
     """One side of the split is a single window. That is also exactly what a
     window which locked onto a repeated musical phrase looks like, so this side
     has to be reproduced somewhere else before the cut is believed."""
+
+    levels: int = 2
+    """How many different offsets the windows hold in order: 2 for one cut,
+    more for a file cut in several places, of which this step is the first."""
 
     @property
     def magnitude_ms(self) -> float:
@@ -157,7 +174,14 @@ def find_step(
             best_index, best_error = index, error
 
     if best_error > line_error * STEP_PREFERENCE:
-        return None
+        # One step loses to the line; several may not. A dub cut in three
+        # places reads 700, -3300, -3300, -11300, -14300, -14300 ms: no single
+        # split explains that better than a slope does, and the slope (-23
+        # ms/s) was reported as a drift whose t=0 intercept, 34 ms from the
+        # truth, went into the delay field. A drift cannot do what those
+        # windows did, though -- read the same offset to the millisecond 164
+        # seconds apart -- so the line is tested against that before it wins.
+        return _first_of_staircase(positions, offsets, window_s)
 
     # Least squares chose the split, because that is what makes the comparison
     # with the line fair. The levels it reports are medians, which one bad
@@ -167,7 +191,10 @@ def find_step(
 
     scale = max(NOISE_FLOOR_MS, _noise_scale(offsets))
     if abs(after - before) < max(MIN_STEP_MS, NOISE_MULTIPLE * scale):
-        return None
+        # Consecutive windows disagreeing is also what several cuts look
+        # like, each in its own gap; a staircase is told apart by its
+        # repeated levels instead.
+        return _first_of_staircase(positions, offsets, window_s)
 
     last_before = float(positions[best_index - 1])
     first_after = float(positions[best_index])
@@ -179,3 +206,89 @@ def find_step(
         latest_s=first_after + window_s,
         lone_group=min(best_index, count - best_index) < 2,
     )
+
+
+def _first_of_staircase(
+    positions: np.ndarray,
+    offsets: np.ndarray,
+    window_s: float,
+) -> Optional[Step]:
+    """The first step of a file the offset changes in several times, or None
+    when a line describes the windows after all.
+
+    The line is refused only on evidence a drift cannot produce: two windows
+    LEVEL_MATCH_MS apart or closer whose distance in the file means the line
+    has them STAIRCASE_CONTRADICTION_MS or more apart. A real conversion moves
+    every window, so its windows never repeat an offset; a file cut in
+    places holds each offset between its cuts, and its windows do. The first
+    level is then the run of windows from the start that agree, and the step
+    is where the next window leaves it.
+    """
+    count = len(offsets)
+    slope, intercept = np.polyfit(positions, offsets, 1)
+    residual = offsets - (slope * positions + intercept)
+    if float(np.sqrt(np.mean(residual ** 2))) < MIN_STEP_MS:
+        return None
+    contradicted = False
+    for i in range(count):
+        for j in range(i + 1, count):
+            if (
+                abs(offsets[j] - offsets[i]) <= LEVEL_MATCH_MS
+                and abs(slope) * (positions[j] - positions[i]) >= STAIRCASE_CONTRADICTION_MS
+            ):
+                contradicted = True
+    if not contradicted:
+        return None
+    # A staircase also has to look like one: every change the same way --
+    # scenes the dub lacks each pull the offset down, scenes it adds each push
+    # it up -- and levels that hold across more than one window, two windows
+    # at least sharing one. Windows scattering about one offset repeat a value
+    # by chance, but they wander up and down and rarely twice.
+    changes = [
+        current - previous for previous, current in zip(offsets[:-1], offsets[1:])
+        if abs(current - previous) > LEVEL_MATCH_MS
+    ]
+    if not changes or not (all(c > 0 for c in changes) or all(c < 0 for c in changes)):
+        return None
+    if _level_count(offsets) > count - 2:
+        return None
+
+    first_run = 1
+    while first_run < count and abs(offsets[first_run] - offsets[0]) <= LEVEL_MATCH_MS:
+        first_run += 1
+    if first_run >= count:
+        return None
+    before = float(np.median(offsets[:first_run]))
+    # The level the second run holds: the windows that agree with the first
+    # one past the step.
+    second = [first_run]
+    while first_run + len(second) < count and abs(
+        offsets[first_run + len(second)] - offsets[first_run]
+    ) <= LEVEL_MATCH_MS:
+        second.append(first_run + len(second))
+    after = float(np.median(offsets[second]))
+    if abs(after - before) < MIN_STEP_MS:
+        return None
+    last_before = float(positions[first_run - 1])
+    first_after = float(positions[first_run])
+    return Step(
+        before_ms=before,
+        after_ms=after,
+        split_position_s=(last_before + first_after) / 2.0,
+        earliest_s=last_before,
+        latest_s=first_after + window_s,
+        # Either level on a single window is what one stray reading looks
+        # like, so probing has to reproduce it before the step is believed.
+        lone_group=first_run < 2 or len(second) < 2,
+        levels=_level_count(offsets),
+    )
+
+
+def _level_count(offsets: np.ndarray) -> int:
+    """How many distinct offsets, LEVEL_MATCH_MS apart or more, the windows
+    hold in the order they come: the steps a staircase has, plus one."""
+    levels = 1
+    for previous, current in zip(offsets[:-1], offsets[1:]):
+        if abs(current - previous) > LEVEL_MATCH_MS:
+            levels += 1
+    return levels

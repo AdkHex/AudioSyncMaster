@@ -266,6 +266,182 @@ def test_every_audio_format_names_the_same_conversion():
     )
 
 
+def _survey(drift_ms_per_s, usable=6):
+    """A PairResult as a survey with this drift leaves it, for the pure helpers."""
+    from audiosync.analyze import PairResult, WindowResult
+    from audiosync.correlate import OffsetEstimate
+
+    result = PairResult("p", "s")
+    result.drift_ms_per_s = drift_ms_per_s
+    result.windows = [
+        WindowResult(60.0 * i, OffsetEstimate(100.0 if i < usable else None, 0.7, 20.0))
+        for i in range(6)
+    ]
+    return result
+
+
+def test_a_smeared_drift_is_taken_off_at_the_conversion_it_sits_beside():
+    """45 s windows read 24 -> 23.976 (1.0 ms/s) as 0.92 ms/s. Stretching by
+    that would leave 0.08 ms/s behind; snapped, it leaves nothing."""
+    from audiosync.analyze import ANALYSIS_SR, _compensating_rate
+
+    assert _compensating_rate(_survey(-0.924), ANALYSIS_SR) == 16016  # 24/23.976
+    assert _compensating_rate(_survey(+0.95), ANALYSIS_SR) == 15984  # 23.976/24
+    assert _compensating_rate(_survey(-40.9), ANALYSIS_SR) == 16683  # 25/23.976
+    # Off every conversion: the measured speed itself.
+    assert _compensating_rate(_survey(-10.0), ANALYSIS_SR) == round(16000 / 0.99)
+
+
+def test_no_speed_is_taken_off_without_a_drift_to_take():
+    from audiosync.analyze import ANALYSIS_SR, _compensating_rate
+
+    assert _compensating_rate(_survey(0.01), ANALYSIS_SR) is None  # noise
+    assert _compensating_rate(_survey(None), ANALYSIS_SR) is None
+    assert _compensating_rate(_survey(-0.924, usable=2), ANALYSIS_SR) is None  # too little to trust
+    assert _compensating_rate(_survey(-80.0), ANALYSIS_SR) is None  # a cut, not a speed
+    # Already measured at that speed: nothing more to do.
+    assert _compensating_rate(_survey(-0.999), 16016) is None
+
+
+def test_a_stretched_sweep_is_kept_only_when_it_is_sharper():
+    from audiosync.analyze import WindowResult, _sharper
+    from audiosync.correlate import OffsetEstimate
+
+    def windows(confirmed, confidence, usable=6):
+        return [
+            WindowResult(60.0 * i, OffsetEstimate(1.0 if i < usable else None, confidence, 20.0, confirmed=confirmed))
+            for i in range(6)
+        ]
+
+    assert _sharper(windows(True, 0.95), windows(False, 0.7))
+    assert _sharper(windows(False, 0.9), windows(False, 0.7))
+    assert not _sharper(windows(False, 0.7), windows(False, 0.7))
+    assert not _sharper(windows(True, 0.99, usable=4), windows(False, 0.7))  # lost windows
+    # Found in all six where it was found in three, weaker ones included.
+    assert _sharper(windows(False, 0.6), windows(False, 0.75, usable=3))
+    assert not _sharper(windows(False, 0.9), windows(True, 0.75, usable=3))  # lost confirmations
+
+
+def _scripted_windows(right_rate, compensated_ms, peak):
+    """A stand-in for _measure_window: at ``right_rate`` every window finds
+    the dub at one offset on the stretched clock, with a peak of ``peak``;
+    at any other rate it finds nothing."""
+    from audiosync.analyze import ANALYSIS_SR
+    from audiosync.correlate import MIN_PEAK_RATIO, NO_PEAK, OffsetEstimate
+
+    def measure(primary, secondary, position, window_s, max_offset_ms, token, primary_track,
+                secondary_track, rate, expect_ms=None, min_peak_ratio=MIN_PEAK_RATIO, search_waveform=True):
+        if rate != right_rate or peak < min_peak_ratio:
+            return OffsetEstimate(None, 0.3, 6.0, NO_PEAK)
+        speed = rate / ANALYSIS_SR
+        native = ((position + compensated_ms / 1000.0) / speed - position) * 1000.0
+        return OffsetEstimate(native, 0.55, peak)
+
+    return measure
+
+
+def test_a_pitch_kept_speedup_is_found_by_windows_that_agree():
+    """A PAL dub sped up with its pitch kept never confirms on the waveforms
+    and peaks at 8-17 on its envelope at the right speed -- under the bar one
+    window needed to clear, so the speed was never taken off and the pair was
+    reported as unrelated, or as a cut. Its windows agree to the millisecond,
+    which is what settles it now."""
+    import audiosync.analyze as analyze
+    from fractions import Fraction
+
+    right = round(analyze.ANALYSIS_SR * 25 / 24)
+    saved = analyze._measure_window
+    analyze._measure_window = _scripted_windows(right, -1200.0, peak=9.0)
+    try:
+        chosen = analyze._search_speed(
+            "p", "s", 45.0, 60000.0, None, 0, 0,
+            [Fraction(25, 24), Fraction(24, 25)], analyze.ANALYSIS_SR, 2700.0,
+        )
+    finally:
+        analyze._measure_window = saved
+    assert chosen == right, chosen
+
+
+def test_weak_windows_settle_only_a_speed_the_durations_allow():
+    """Agreement among weak windows settles a speed only near the ratio the
+    two files' lengths suggest; two files of the same length are 4% from any
+    PAL speed, and trying to corroborate one there only cost time."""
+    import audiosync.analyze as analyze
+    from fractions import Fraction
+
+    right = round(analyze.ANALYSIS_SR * 25 / 24)
+    saved = analyze._measure_window
+    analyze._measure_window = _scripted_windows(right, -1200.0, peak=9.0)
+    try:
+        same_length = analyze._search_speed(
+            "p", "s", 45.0, 60000.0, None, 0, 0,
+            [Fraction(25, 24)], analyze.ANALYSIS_SR, 2700.0, 2700.0,
+        )
+        pal_length = analyze._search_speed(
+            "p", "s", 45.0, 60000.0, None, 0, 0,
+            [Fraction(25, 24)], analyze.ANALYSIS_SR, 2700.0, 2700.0 * 24 / 25,
+        )
+    finally:
+        analyze._measure_window = saved
+    assert same_length is None, same_length
+    assert pal_length == right, pal_length
+
+
+def test_windows_that_scatter_do_not_settle_a_speed():
+    """The lowered bar is safe only because agreement decides: weak peaks all
+    over the range are what unrelated audio gives at every speed."""
+    import audiosync.analyze as analyze
+    from audiosync.correlate import MIN_PEAK_RATIO, OffsetEstimate
+    from fractions import Fraction
+
+    landing = iter([-41000.0, 12000.0, 3300.0, -800.0, 25000.0, -17000.0] * 4)
+
+    def scatter(primary, secondary, position, window_s, max_offset_ms, token, primary_track,
+                secondary_track, rate, expect_ms=None, min_peak_ratio=MIN_PEAK_RATIO, search_waveform=True):
+        return OffsetEstimate(next(landing), 0.4, 8.0)
+
+    saved = analyze._measure_window
+    analyze._measure_window = scatter
+    try:
+        chosen = analyze._search_speed(
+            "p", "s", 45.0, 60000.0, None, 0, 0,
+            [Fraction(25, 24), Fraction(24, 25)], analyze.ANALYSIS_SR, 2700.0,
+        )
+    finally:
+        analyze._measure_window = saved
+    assert chosen is None, chosen
+
+
+def test_a_small_speed_difference_is_taken_off_before_the_delay_is_read():
+    """24 fps audio on a 23.976 video slides 45 ms inside every 45 s window,
+    so the windows measured it blunt and the delay at the start came out tens
+    of milliseconds wrong -- the speed was never taken off, because it was
+    'small enough to measure as it is'. Now the survey's own drift is taken
+    off and the windows measured again."""
+    sys.path.insert(0, HERE)
+    import soundfile as sf
+    from make_fixtures import _resample_linear, _shift, _speechlike
+
+    sr = 16000
+    base = _speechlike(240.0, sr, seed=11)
+    timed = _resample_linear(base, NTSC_FILM / 24.0)
+    workspace = tempfile.mkdtemp(prefix="asm-ntsc-")
+    try:
+        primary = os.path.join(workspace, "video.wav")
+        secondary = os.path.join(workspace, "dub.wav")
+        sf.write(primary, base, sr)
+        sf.write(secondary, _shift(timed, int(0.25 * sr)), sr)
+        result = analyze_pair(
+            primary, secondary, window_s=45.0, window_count=6, max_offset_ms=5000.0, timeline=False,
+        )
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+    assert result.error is None, result.error
+    assert abs(result.speed_compensation - 24.0 / NTSC_FILM) < 1e-4, result.speed_compensation
+    assert abs(result.delay_at_start_ms - 250.0) < 2.0, result.delay_at_start_ms
+    assert abs(result.drift_ms_per_s - (NTSC_FILM / 24.0 - 1.0) * 1000.0) < 0.02, result.drift_ms_per_s
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

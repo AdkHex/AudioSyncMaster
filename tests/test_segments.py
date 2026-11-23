@@ -108,6 +108,47 @@ def test_the_position_is_the_middle_of_what_is_still_possible():
     assert abs(step.uncertainty_s - (step.latest_s - step.earliest_s) / 2.0) < 1e-9
 
 
+def test_a_dub_cut_in_several_places_is_not_a_drift():
+    """Three TV edits read as a staircase, which a line fits better than any
+    one split: measured on a real dub, the slope was reported as a -23 ms/s
+    drift and its intercept, 34 ms from the truth, filled the delay in. Two
+    windows minutes apart reading the same offset to the millisecond is what
+    no drift does, so the file is called cut, at its first step."""
+    offsets = [700.0, -3300.0, -3300.0, -11300.0, -14300.0, -14300.0]
+    step = find_step(POSITIONS, offsets, WINDOW_S)
+    assert step is not None, "a staircase of three cuts was taken for a drift"
+    assert step.before_ms == 700.0 and step.after_ms == -3300.0
+    assert step.levels == 4
+    assert step.earliest_s == POSITIONS[0] and step.latest_s == POSITIONS[1] + WINDOW_S
+    # The first level rests on one window: probing has to reproduce it.
+    assert step.lone_group
+
+
+def test_a_staircase_that_holds_its_first_level_is_split_after_it():
+    offsets = [300.0, 300.0, -700.0, -700.0, -2700.0, -2700.0]
+    step = find_step(POSITIONS, offsets, WINDOW_S)
+    assert step is not None
+    assert step.before_ms == 300.0 and step.after_ms == -700.0
+    assert step.earliest_s == POSITIONS[1]
+
+
+def test_scatter_that_repeats_a_value_is_not_a_staircase():
+    """Steps that wander up and down are noise, however exactly two windows
+    happen to agree."""
+    assert find_step(POSITIONS, [300.0, 340.0, 300.0, 380.0, 340.0, 420.0], WINDOW_S) is None
+
+
+def test_a_drift_with_scatter_is_never_a_staircase():
+    """A real conversion moves every window, so none repeat; scatter on top of
+    it must not change that."""
+    for drift in (1.0, 4.27, 40.96):
+        offsets = [
+            300.0 - drift * position + noise
+            for position, noise in zip(POSITIONS, (0.4, -0.3, 0.2, -0.5, 0.1, 0.3))
+        ]
+        assert find_step(POSITIONS, offsets, WINDOW_S) is None, f"{drift} ms/s read as a staircase"
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
