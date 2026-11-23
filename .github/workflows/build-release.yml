@@ -79,6 +79,9 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The slowest platform takes about 35 minutes. Without a bound, a tool that
+    # hangs (FFmpeg 9.1's AAC encoder did) holds the release for GitHub's six.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -103,9 +106,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg
 
+      # Pinned: Chocolatey moved to FFmpeg 9.1 on 2026-11-20, whose native AAC
+      # encoder spins forever on stereo 192k opening on silence; two subtitle
+      # tests (VAD streaming, HDR burn-in) also fail on a 9.1 build. 9.0.2 is
+      # what the suite was green on, and what Homebrew still ships to macOS.
       - name: Install FFmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        run: choco install ffmpeg --version=9.0.2 -y --no-progress
 
       - name: Install JS dependencies
         run: npm ci
@@ -225,7 +232,7 @@ jobs:
 
       - name: Install FFmpeg (Windows)
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        run: choco install ffmpeg --version=9.0.2 -y --no-progress
 
       - name: Install dependencies
         run: |

@@ -35,8 +35,13 @@ from audiosync.media import ffmpeg_path  # noqa: E402
 SR = 48000
 
 # Enough to be realistic without making the suite slow.
+#
+# Not 192k for AAC: FFmpeg 9.1's native encoder spins forever on stereo at
+# 192k that opens on digital silence -- which is what every delayed dub here
+# is -- and a CI runner that picked 9.1 up held the release for hours. Any
+# other rate encodes it, and the rate is not what these tests are about.
 CODECS = {
-    "aac": (["-c:a", "aac", "-b:a", "192k"], "m4a"),
+    "aac": (["-c:a", "aac", "-b:a", "256k"], "m4a"),
     "eac3": (["-c:a", "eac3", "-b:a", "384k"], "eac3"),
     "flac": (["-c:a", "flac"], "flac"),
 }
@@ -70,10 +75,15 @@ def _speech(seconds, seed):
     return (signal / np.max(np.abs(signal)) * 0.7).astype(np.float32)
 
 
+# Far longer than any of these encodes takes; an encoder that never finishes
+# fails the test in minutes rather than holding the run until CI gives up.
+ENCODE_TIMEOUT_S = 180
+
+
 def _encode(source, out, args):
     subprocess.run(
         [ffmpeg_path(), "-nostdin", "-y", "-i", source] + args + [out],
-        capture_output=True, check=True,
+        capture_output=True, check=True, timeout=ENCODE_TIMEOUT_S,
     )
     return out
 
