@@ -65,6 +65,16 @@ LEVEL_MATCH_MS = 5.0
 # is never mistaken for a staircase.
 STAIRCASE_CONTRADICTION_MS = 4.0 * LEVEL_MATCH_MS
 
+# How close, as a share of the jump, the windows either side of a step have to
+# sit to their own level for the levels to speak for themselves (with
+# LEVEL_MATCH_MS as the least). A four-second cut is as plain through windows
+# that scatter by 50 ms as through windows that do not; a three-frame one is
+# not. A 130 ms step measured on a dub whose windows scattered by tens of
+# milliseconds -- not two of them within 5 ms of each other -- was reported as
+# a cut and its delay withheld, where the windows supported one offset as well
+# as two.
+LEVEL_SHARE = 0.025
+
 
 @dataclass
 class Step:
@@ -89,6 +99,12 @@ class Step:
     """One side of the split is a single window. That is also exactly what a
     window which locked onto a repeated musical phrase looks like, so this side
     has to be reproduced somewhere else before the cut is believed."""
+
+    loose: bool = False
+    """The windows do not hold either level between them: they scatter about
+    it by more than LEVEL_SHARE of the jump, as windows scattering about one
+    offset do. Fresh audio from each side has to read that side's level before
+    the cut is believed."""
 
     levels: int = 2
     """How many different offsets the windows hold in order: 2 for one cut,
@@ -205,7 +221,19 @@ def find_step(
         earliest_s=last_before,
         latest_s=first_after + window_s,
         lone_group=min(best_index, count - best_index) < 2,
+        loose=not (
+            _holds_level(offsets[:best_index], before, after - before)
+            and _holds_level(offsets[best_index:], after, after - before)
+        ),
     )
+
+
+def _holds_level(offsets: np.ndarray, level: float, magnitude: float) -> bool:
+    """Whether at least half of one side's windows sit at its level, as closely
+    as a step of this size needs (see LEVEL_SHARE). Half, because a window or
+    two that read something else do not make a level any less shared."""
+    tolerance = max(LEVEL_MATCH_MS, LEVEL_SHARE * abs(magnitude))
+    return float(np.median(np.abs(offsets - level))) <= tolerance
 
 
 def _first_of_staircase(

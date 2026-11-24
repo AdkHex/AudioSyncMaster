@@ -259,8 +259,9 @@ export interface AppSettings {
    *  from them (a dub whose voices were cut separately from its music).
    *  Needs the voice tools installed; on by default. */
   fixVoices: boolean;
-  /** Delay finding: look for a cut between the sample windows and probe for
-   *  where it is. Off by default: one delay is fitted across the file. */
+  /** Delay finding: report a cut between the sample windows and probe for
+   *  where it is. Off by default: the delay is the same either way (the one
+   *  before the cut), and off it comes with a note instead. */
   cutCheck: boolean;
   /** Delay finding: when the sample windows do not settle a pair, lay the
    *  dub along the whole video and list every cut, gap and frame-rate

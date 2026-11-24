@@ -953,6 +953,159 @@ def test_a_first_window_the_others_disagree_with_is_measured_again_in_full():
     assert result.cut is None
 
 
+# What the windows of a dub mixed apart from the video read: an offset that
+# wanders by tens of milliseconds, no two windows within 5 ms of each other,
+# and the last three of twenty 130 ms away.
+WANDER = (2, 14, 22, 30, 21, 13, -8, -19, -27, -33, -24, -14, 9, 17, 26, 16, -11, 125, 140, 151)
+
+
+def _scripted_pair(read, window_count, find_cuts=True):
+    """analyze_pair over windows that read whatever ``read(position, survey)``
+    says, ``survey`` being the window's number in the survey, or None for one
+    measured after it. Returns the result and how many windows came after."""
+    import shutil  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+    import soundfile as sf  # noqa: PLC0415
+
+    import audiosync.analyze as analyze  # noqa: PLC0415
+    from audiosync.correlate import OffsetEstimate  # noqa: PLC0415
+
+    seconds, window_s = 1600.0, 30.0
+    spots = plan_windows(seconds, window_s, window_count)
+    extra = []
+
+    def scripted(primary, secondary, position, *args, **kwargs):
+        survey = min(range(len(spots)), key=lambda i: abs(spots[i] - position))
+        if abs(spots[survey] - position) > 0.5:
+            survey = None
+            extra.append(position)
+        offset = read(position, survey)
+        return OffsetEstimate(offset, 0.74, 20.0) if offset is not None else OffsetEstimate(None, 0.2, 5.0, "nothing")
+
+    original = analyze._measure_window
+    root = tempfile.mkdtemp(prefix="audiosync-scripted-")
+    analyze._measure_window = scripted
+    try:
+        paths = [os.path.join(root, name) for name in ("video.wav", "dub.wav")]
+        for path in paths:
+            sf.write(path, np.zeros(int(seconds * 2000), dtype=np.float32), 2000)
+        result = analyze_pair(*paths, window_s=window_s, window_count=window_count, timeline=False, find_cuts=find_cuts)
+    finally:
+        analyze._measure_window = original
+        shutil.rmtree(root, ignore_errors=True)
+    return result, extra
+
+
+def test_scatter_split_in_two_is_not_a_cut():
+    """The last windows of a scattered pair sit 130 ms from the rest, and it
+    was reported as a cut there and its delay withheld, beside another app
+    that measured the same two files and filled it in. Audio the split was not
+    drawn through reads the one offset on both sides, so there is one."""
+    import numpy as np  # noqa: PLC0415
+
+    def read(position, survey):
+        return 19200.0 + (WANDER[survey] if survey is not None else 11.0)
+
+    on, extra = _scripted_pair(read, 20)
+    assert on.cut is None and not on.is_likely_cut, on.cut
+    assert 0 < len(extra) <= 4, f"{len(extra)} windows spent asking"
+    # The delay is the middle of what the windows read, said once.
+    assert abs(on.delay_ms - float(np.median([19200.0 + d for d in WANDER[:17]]))) < 6.0, on.delay_ms
+    assert on.delay_at_start_ms == on.delay_ms
+    # Where the windows sat apart is said, since one look there settles it.
+    assert any("to the end" in w and "0.1" in w for w in on.warnings), on.warnings
+
+    off, _ = _scripted_pair(read, 20, find_cuts=False)
+    assert off.delay_ms == on.delay_ms and off.delay_at_start_ms == on.delay_at_start_ms
+
+
+def test_a_cut_through_scatter_is_kept_when_new_audio_reads_both_levels():
+    """The same windows, and audio between them that does read 130 ms more on
+    the far side: that is a cut, however much its windows scatter."""
+    split = plan_windows(1600.0, 30.0, 20)[17] - 10.0
+
+    def read(position, survey):
+        if survey is not None:
+            return 19200.0 + WANDER[survey]
+        return 19200.0 + (138.0 if position > split else 8.0)
+
+    result, _ = _scripted_pair(read, 20)
+    assert result.cut is not None and abs(result.cut.magnitude_ms - 130.0) < 20.0, result.cut
+    assert abs(result.delay_ms - 19200.0) < 25.0, result.delay_ms
+
+    # Audio there that reads neither level supports neither.
+    silent, _ = _scripted_pair(lambda position, survey: 19200.0 + WANDER[survey] if survey is not None else None, 20)
+    assert silent.cut is None
+
+
+def test_the_cut_check_never_changes_the_delay():
+    """Off, a cut was not looked for at all, so a spliced pair's delay was an
+    average of its two halves, true of neither. It is the one before the cut
+    either way; the check decides whether a cut is reported, or noted."""
+    case = _case("local_cut")
+    options = dict(window_s=6.0, window_count=6, timeline=False)
+    on = analyze_pair(case["primary"], case["secondary"], **options)
+    off = analyze_pair(case["primary"], case["secondary"], find_cuts=False, **options)
+    assert on.cut is not None and off.cut is None and not off.is_likely_cut
+    assert off.delay_ms == on.delay_ms and off.delay_at_start_ms == on.delay_at_start_ms, (off.delay_ms, on.delay_ms)
+    assert off.confidence == on.confidence
+    assert any("aligns only the part before it" in w for w in off.warnings), off.warnings
+
+
+def test_a_cut_resting_on_one_window_settles_the_delay_either_way():
+    """One window past a cut is the last of the film; probing has to reproduce
+    it before it counts, and with the cut check off it still has to, or the
+    delay would be a line drawn through both sides of the cut."""
+    last = plan_windows(1600.0, 30.0, 6)[-1]
+
+    def read(position, survey):
+        return 3000.0 if position < last - 60.0 else 1000.0
+
+    on, _ = _scripted_pair(read, 6)
+    off, _ = _scripted_pair(read, 6, find_cuts=False)
+    assert on.cut is not None and off.cut is None
+    assert off.delay_ms == on.delay_ms == 3000.0 and off.delay_at_start_ms == 3000.0, (off.delay_ms, on.delay_ms)
+
+
+def test_one_offset_is_one_number():
+    """Where nothing drifts, the delay an app shows and the delay an app
+    applies are the same number: read off a line fitted through scatter, the
+    second sat 1.6 ms from the first. A drift too small to report that the
+    windows do measure is still followed back to the start."""
+    scattered, _ = _scripted_pair(lambda position, survey: 5000.0 + WANDER[survey], 12)
+    assert scattered.delay_at_start_ms == scattered.delay_ms
+    assert abs(scattered.delay_ms - 4997.0) < 0.01, scattered.delay_ms  # the median of what they read
+
+    drifting, _ = _scripted_pair(lambda position, survey: 5000.0 + 0.01 * position, 12)
+    assert drifting.delay_at_start_ms == drifting.delay_ms
+    assert abs(drifting.delay_ms - 5000.0) < 0.01, drifting.delay_ms
+
+
+def test_a_slope_through_scatter_is_not_a_drift():
+    """Six weak windows spread over 250 ms fit a line of 0.15 ms/s, and its
+    t=0, which an app fills in, was 364 ms from a delay their middle had right
+    to 3 ms. A drift has to stand clear of what the windows scatter by; a real
+    one does, by hundreds of times."""
+    offsets = {10: 15.0, 11: -112.0, 12: -172.0, 15: -6.0, 16: 50.0, 18: 78.0}
+    weak, _ = _scripted_pair(lambda position, survey: 5000.0 + offsets[survey] if survey in offsets else None, 20)
+    assert not weak.has_significant_drift and weak.drift_ms_per_s is None, weak.drift_ms_per_s
+    assert weak.delay_at_start_ms == weak.delay_ms and abs(weak.delay_ms - 5000.0) < 45.0, weak.delay_ms
+    assert weak.confidence < 0.5, "six windows over 250 ms are not a measurement"
+
+    # 0.2 ms/s through windows that scatter by 10 ms: 320 ms across the file.
+    noise = (4, -9, 7, -3, 10, -8, 2, -6, 9, -4, 5, -10)
+    real, _ = _scripted_pair(lambda position, survey: 5000.0 + 0.2 * position + noise[survey] if survey is not None else None, 12)
+    assert real.has_significant_drift, real.drift_ms_per_s
+    assert abs(real.delay_at_start_ms - 5000.0) < 15.0, real.delay_at_start_ms
+
+    # One window that found something else entirely hides no drift from the rest.
+    stray, _ = _scripted_pair(
+        lambda position, survey: 9000.0 if survey == 4 else 5000.0 + position + noise[survey or 0], 8)
+    assert stray.has_significant_drift and abs(stray.drift_ms_per_s - 1.0) < 0.05, stray.drift_ms_per_s
+
+
 def test_windows_that_scatter_are_not_passed_as_a_measurement():
     """Six windows that each found the dub, but by +-150 ms around anything a
     line or a level could make of them, agree on nothing: their delay is held
@@ -972,6 +1125,22 @@ def test_windows_that_scatter_are_not_passed_as_a_measurement():
     scattered = survey([2240.0, 2010.0, 2190.0, 1880.0, 2160.0, 1940.0])
     _guard_scattered_survey(scattered)
     assert scattered.confidence < 0.5 and any("disagree" in w for w in scattered.warnings), scattered.warnings
+
+    # As scattered as one window to the next, but enough of them to know the
+    # middle: a dub that wanders by 30 ms has one best delay, and it is said
+    # how far parts of the film may sit from it.
+    wandering = survey([2030.0, 2034.0, 1970.0, 1966.0, 2032.0, 1968.0, 2031.0, 1969.0, 2035.0, 1965.0, 2033.0, 1967.0])
+    _guard_scattered_survey(wandering)
+    assert wandering.confidence == 0.85, wandering.warnings
+    assert any("disagree" in w for w in wandering.warnings), wandering.warnings
+
+    # Three windows of six that agree to the millisecond on the waveforms are
+    # the answer, whatever the others found.
+    minority = survey([2000.0, 2000.4, 1999.8, 2400.0, 1500.0, 2900.0])
+    for w in minority.windows[:3]:
+        w.agrees, w.estimate.confirmed = True, True
+    _guard_scattered_survey(minority)
+    assert minority.confidence == 0.85 and not minority.warnings, minority.warnings
 
     steady = survey([2000.0, 2003.0, 1998.0, 2001.0, 1999.0, 2002.0])
     steady.agreeing_windows = 6

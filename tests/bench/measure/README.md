@@ -86,6 +86,12 @@ the fast route over +-300 s. Scored on `delayAtStartMs`:
 | censor cut | a cut, exact before it | a cut, exact before it |
 | unrelated (2) | refused | refused |
 
+The delay does not depend on the cut check (`find_cuts`, off by default in
+AudioSyncMaster and on in MkvBatchMux). It used to: with v2.23.0 the censor cut
+read 1000 ms with the check on and 4015 ms with it off, the three TV edits 700
+and 666 ms (6 windows) or 1287 ms (12). Since v2.24.0 each pair gives the same
+number either way, at 6 windows and at 12.
+
 MkvBatchMux's own test season (`make_media.py`), whose music repeats every
 20 s, adds the case that moved the waveform search: an episode the old engine
 placed 667 ms out at 99%, now exact.

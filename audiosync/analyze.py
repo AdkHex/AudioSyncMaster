@@ -209,6 +209,13 @@ TIMELINE_MIN_STRETCH_S = 30.0
 # 0.5 bar for using a delay unchecked.
 WEAK_SURVEY_CONFIDENCE = 0.45
 
+# How many new windows on each side of a loose step may be spent asking whether
+# they read that side's level (see _levels_reproduced).
+STEP_CORROBORATIONS = 2
+
+# The shortest such window worth measuring between two of the survey's.
+MIN_CORROBORATION_S = 10.0
+
 # Windows that each found the dub but sit this far apart, typically, from what
 # the file is doing cannot place it to better than that, however sure each
 # one was. Half the 45 ms BT.1359 puts lip sync at: past it, a delay read from
@@ -216,6 +223,18 @@ WEAK_SURVEY_CONFIDENCE = 0.45
 # repeats every few seconds, six windows scattered by +-150 ms and their delay
 # came out 220 ms wrong at 68%.
 SCATTER_MS = 25.0
+
+# Student's t at 98%, two-sided, for 1 to 10 degrees of freedom; more than that
+# is taken as the last. A slope has to stand this many of its standard errors
+# from none to be a drift at all (see _slope_measured). The first, for a
+# survey of three windows, is at 95%: 98% asks for 31.8, which a 24 -> 23.976
+# dub smeared by its own drift does not reach on a short file.
+STUDENT_T_98 = (12.71, 6.96, 4.54, 3.75, 3.36, 3.14, 3.00, 2.90, 2.82, 2.76)
+
+# Windows at one end of the file further than this many times the typical
+# scatter from the rest are somewhere else, not scattered (see
+# _note_stray_stretch).
+STRAY_SCATTERS = 4.0
 
 # Shorter than this, a file has too little audio to measure a delay from:
 # fewer than two of the shortest windows the survey uses.
@@ -269,9 +288,10 @@ class PairResult:
     primary_path: str
     secondary_path: str
     delay_ms: Optional[float] = None
-    """Representative offset. With drift this is the value at the file midpoint,
-    which is the best single number to quote; corrections must use
-    `delay_at_start_ms` instead, since they are applied from t=0."""
+    """The offset. Where nothing drifts it is the one a correction applies, the
+    same number as `delay_at_start_ms`. With drift no one number describes the
+    file: this is then the value at its midpoint, and corrections must use
+    `delay_at_start_ms`, since they are applied from t=0."""
     confidence: float = 0.0
     drift_ms_per_s: Optional[float] = None
     delay_at_start_ms: Optional[float] = None
@@ -529,9 +549,11 @@ def analyze_pair(
             changed, or the match is weak -- lay the dub along the whole video
             and measure from that instead (see ``_measure_timeline``). A clean
             survey is returned exactly as it was measured.
-        find_cuts: look for a step between the survey windows and probe for
-            where it is. False fits one delay across every window and spends
-            no probes, whatever ``cut_probes`` says.
+        find_cuts: report a step between the survey windows as a cut, and
+            probe for where it is. False reports one delay and no cut, and
+            probes only for whether a step the windows do not settle is there:
+            the delay is the one before it either way, so the setting decides
+            what is said about a pair and never its delay.
         find_speed: when too few windows find the dub at its own speed, try
             the standard frame-rate conversions before giving up.
     """
@@ -746,11 +768,42 @@ def analyze_pair(
         result.window_s = effective_window
         result.windows = windows
 
+        def locate(step: Step) -> bool:
+            return _localize_cut(
+                step, primary_path, secondary_path, effective_window, max_offset_ms, token,
+                primary_track, secondary_track, cut_probes, secondary_rate,
+            )
+
+        def settle(step: Optional[Step]) -> Optional[Step]:
+            """The step, if it is one; otherwise every number again without it.
+
+            A level no windows share is reproduced here, from both sides. A
+            single window's is ``_localize_cut``'s to reproduce: below with the
+            cut check on, here with it off, where nothing else calls it.
+            """
+            if step is None:
+                return None
+            if step.lone_group:
+                believed = find_cuts or locate(step)
+            else:
+                believed = not step.loose or (cut_probes > 0 and _levels_reproduced(
+                    step, result.windows, primary_path, secondary_path, effective_window,
+                    max_offset_ms, token, primary_track, secondary_track, secondary_rate,
+                ))
+            return step if believed else _reconcile(result, allow_step=False)
+
         # First pass proposes a split; probing then either pins the cut down or
         # withdraws it, and the second pass re-derives every number from the
         # answer. Re-running is cheaper than unpicking a provisional result,
         # and it keeps one code path deciding what a segmented file reports.
-        step = _reconcile(result, allow_step=find_cuts)
+        #
+        # With the cut check off no cut is reported and none is probed for that
+        # the windows already show, but a step is still one: an average of its
+        # two levels fits neither half of the film (131 ms out on one whose
+        # windows had placed it exactly), and it made a pair's delay depend on
+        # a setting. The delay is then the one before the step, as it is with
+        # the check on, and a note says so.
+        step = settle(_reconcile(result))
 
         # A steady drift the windows measured through is a speed difference
         # they were smeared by: at 24 against 23.976 a 45 s window slides 45 ms
@@ -773,24 +826,12 @@ def analyze_pair(
                 result.window_s = effective_window
                 result.windows = windows
                 result.search_ms = trial_search
-                step = _reconcile(result, allow_step=find_cuts)
+                step = settle(_reconcile(result))
                 if step is not None:
                     break
 
-        if step is not None:
-            confirmed = _localize_cut(
-                step,
-                primary_path,
-                secondary_path,
-                effective_window,
-                max_offset_ms,
-                token,
-                primary_track,
-                secondary_track,
-                cut_probes,
-                secondary_rate,
-            )
-            if confirmed:
+        if step is not None and find_cuts:
+            if locate(step):
                 _reconcile(result, cut=step)
             else:
                 _reconcile(result, allow_step=False)
@@ -814,9 +855,9 @@ def analyze_pair(
             result.drift_ms_per_s,
             result.primary_fps,
             result.secondary_fps,
-            cut_position_s=result.cut.position_s if result.cut else None,
-            cut_magnitude_ms=result.cut.magnitude_ms if result.cut else None,
-            cut_uncertainty_s=result.cut.uncertainty_s if result.cut else None,
+            cut_position_s=result.cut.position_s if result.cut and find_cuts else None,
+            cut_magnitude_ms=result.cut.magnitude_ms if result.cut and find_cuts else None,
+            cut_uncertainty_s=result.cut.uncertainty_s if result.cut and find_cuts else None,
         )
         if result.cut is not None and result.cut.levels > 2:
             result.warnings.append(
@@ -834,8 +875,18 @@ def analyze_pair(
             if not measured:
                 _guard_weak_survey(result)
                 _guard_scattered_survey(result)
+                _note_stray_stretch(result)
+                if result.cut is not None and not find_cuts and result.cut.levels <= 2:
+                    result.warnings.append(
+                        f"The offset changes by {result.cut.magnitude_ms / 1000.0:+.3f} s at about "
+                        f"{_clock_of(result.cut.position_s)}, so the delay aligns only the part before it. "
+                        "The cut check finds where."
+                    )
                 if result.error:
                     result.error = _explain_no_match(result, timeline, find_speed)
+        if not find_cuts:
+            # Off means not reported; the numbers above already rest on it.
+            result.cut = None
         if progress:
             progress(100)
         return result
@@ -1123,15 +1174,18 @@ def _guard_scattered_survey(result: PairResult) -> None:
     """Keep a survey whose windows disagree from passing as a measurement.
 
     Agreement is what the confidence of a survey mostly rests on; windows
-    that each found the dub somewhere different, by more than SCATTER_MS,
-    have not agreed on anything, and the delay read from them is only as good
-    as their spread. A cut is the other reason windows disagree, and it is
-    reported as one, so it is left alone here.
+    that each found the dub somewhere different, by more than SCATTER_MS, have
+    not agreed on anything. The delay is the middle of what they read, which
+    many of them place far better than a few: it is held back when the middle
+    itself is that uncertain, and the scatter is only said when it is not -- a
+    dub that wanders about the video by 30 ms over twenty windows has one best
+    delay, and they know it to about ten. A cut is the other reason windows
+    disagree, and it is reported as one, so it is left alone here.
     """
     if result.error or result.delay_ms is None or result.cut is not None:
         return
     usable = sorted((w for w in result.windows if w.usable), key=lambda w: w.position_s)
-    if len(usable) < MIN_USABLE_WINDOWS or result.agreeing_windows >= MIN_USABLE_WINDOWS:
+    if len(usable) < MIN_USABLE_WINDOWS:
         return
     positions = np.array([w.position_s for w in usable], dtype=np.float64)
     offsets = np.array([w.estimate.delay_ms for w in usable], dtype=np.float64)
@@ -1139,11 +1193,69 @@ def _guard_scattered_survey(result: PairResult) -> None:
     scatter = float(np.median(np.abs(offsets - model)))
     if scatter <= SCATTER_MS:
         return
-    result.confidence = min(result.confidence, WEAK_SURVEY_CONFIDENCE)
-    result.warnings.append(
-        f"The windows found the dub but disagree with each other by about {scatter:.0f} ms, so the delay is "
-        "only that accurate. Check it by ear, or turn on the whole-timeline check."
-    )
+    # A minority that agrees can still be the answer, the rest having found
+    # nothing but noise: unless agreeing that often is what windows scattered
+    # this far do by chance.
+    agreeing = [w for w in usable if w.agrees]
+    if len(agreeing) >= MIN_USABLE_WINDOWS and (
+        sum(w.estimate.confirmed for w in agreeing) >= MIN_USABLE_WINDOWS
+        or _agreement_confidence(len(agreeing), len(usable), scatter) >= 0.5
+    ):
+        return
+    # The standard error of a median, from the scatter's own robust scale.
+    uncertainty = 1.2533 * 1.4826 * scatter / math.sqrt(len(usable))
+    if uncertainty > SCATTER_MS:
+        result.confidence = min(result.confidence, WEAK_SURVEY_CONFIDENCE)
+        result.warnings.append(
+            f"The windows found the dub but disagree with each other by about {scatter:.0f} ms, so the delay is "
+            "only that accurate. Check it by ear, or turn on the whole-timeline check."
+        )
+    else:
+        result.warnings.append(
+            f"The windows disagree with each other by about {scatter:.0f} ms, and the delay is the middle of what "
+            "they read: parts of the film may sit that far from it. Check a scene or two."
+        )
+
+
+def _note_stray_stretch(result: PairResult) -> None:
+    """Say so when the windows at one end of the file sit together away from
+    the rest, and no cut came of it.
+
+    Two or more in a row on the same side of the delay, by more than lip sync
+    tolerates and more than the windows scatter anyway, may be a stretch the
+    dub was edited in, or the credits' music, or a run of bad readings. One
+    delay still fits everything else, so it stands; which of the three it is
+    takes a look at a scene there, and only this says where.
+    """
+    if result.error or result.delay_ms is None or result.cut is not None or result.has_significant_drift:
+        return
+    usable = sorted((w for w in result.windows if w.usable), key=lambda w: w.position_s)
+    if len(usable) < MIN_USABLE_WINDOWS + 2:
+        return
+    positions = np.array([w.position_s for w in usable], dtype=np.float64)
+    offsets = np.array([w.estimate.delay_ms for w in usable], dtype=np.float64)
+    away = offsets - _model_values(positions, offsets, np.zeros(len(offsets), dtype=bool))
+    limit = max(SLIP_FALLBACK_MS, STRAY_SCATTERS * float(np.median(np.abs(away))))
+
+    def run(values) -> int:
+        count = 0
+        while count < len(values) and abs(values[count]) > limit and values[count] * values[0] > 0:
+            count += 1
+        return count
+
+    head, tail = run(away), run(away[::-1])
+    for count, stretch, where in (
+        (head, away[:head], f"Up to about {_clock_of(float(positions[max(head - 1, 0)]) + (result.window_s or 0.0))}"),
+        (tail, away[len(away) - tail:], f"From about {_clock_of(float(positions[-max(tail, 1)]))} to the end"),
+    ):
+        # A minority, or it is the rest that strayed and the delay with it.
+        if count < 2 or 2 * count >= len(usable):
+            continue
+        typical = float(np.median(stretch))
+        result.warnings.append(
+            f"{where}, the dub reads about {abs(typical) / 1000.0:.2f} s {'later' if typical > 0 else 'earlier'} than "
+            "in the rest of the film, but not steadily enough to call it a cut. Check a scene there."
+        )
 
 
 def _measure_window(
@@ -1649,6 +1761,62 @@ def _sharper(trial: List[WindowResult], before: List[WindowResult]) -> bool:
     return trial_usable > usable or trial_confirmed > confirmed or trial_mean > mean + 0.02
 
 
+def _levels_reproduced(
+    step: Step,
+    windows: List[WindowResult],
+    primary_path: str,
+    secondary_path: str,
+    window_s: float,
+    max_offset_ms: float,
+    token: Optional[CancellationToken],
+    primary_track: int,
+    secondary_track: int,
+    secondary_rate: int,
+) -> bool:
+    """Whether new audio from each side of a loose step reads that side's level.
+
+    Windows that scatter by tens of milliseconds can be split somewhere along
+    the file into two groups with different medians whether or not anything
+    was cut, and no arithmetic on the same windows tells the two apart: the
+    split was chosen to make them differ. Audio the split was not chosen from
+    does. A cut holds its level everywhere on its side, so windows between the
+    ones the survey placed, nearest the step and clear of it, read it too; a
+    split drawn through scatter predicts them no better than the single offset
+    does.
+    """
+    speed = secondary_rate / ANALYSIS_SR
+    positions = sorted(w.position_s for w in windows if w.usable)
+    middle_ms = (step.before_ms + step.after_ms) / 2.0
+    # One narrowed search takes in both levels, with room to land elsewhere.
+    narrow = max_offset_ms > NARROW_SEARCH_MS and abs(step.magnitude_ms) < NARROW_SEARCH_MS
+    for side, held in (
+        ("before", [p for p in positions if p < step.split_position_s][::-1]),
+        ("after", [p for p in positions if p >= step.split_position_s]),
+    ):
+        seen = 0
+        for first, second in list(zip(held[:-1], held[1:]))[:STEP_CORROBORATIONS]:
+            if token:
+                token.raise_if_cancelled()
+            # Clear of both windows where there is room to be: on a short file
+            # a full window between them would be mostly the same audio again.
+            first, second = min(first, second), max(first, second)
+            room = second - first - window_s
+            length = min(window_s, room) if room >= MIN_CORROBORATION_S else window_s
+            spot = (first + second + window_s - length) / 2.0
+            estimate = _measure_window(
+                primary_path, secondary_path, spot, length, max_offset_ms, token,
+                primary_track, secondary_track, secondary_rate,
+                expect_ms=_compensated_ms(spot, middle_ms, speed) if narrow else None,
+            )
+            read = _side_of_cut(estimate, step)
+            if read is not None and read != side:
+                return False
+            seen += read == side
+        if not seen:
+            return False
+    return True
+
+
 def _localize_cut(
     step: Step,
     primary_path: str,
@@ -1789,11 +1957,10 @@ def _reconcile(
     # rather than from a single median, which is what lets a coherent minority
     # survive: post-cut windows sit on their own segment's level, so they are
     # no longer outliers to anything.
-    residual = np.abs(offsets - model)
-    spread = float(np.median(residual))
-    tolerance = max(50.0, spread * 4.0)
-    keep = residual <= tolerance
+    keep = _near(offsets, model)
     kept_windows = usable
+    # As they were, for asking how easily a line runs through them.
+    every_position, every_offset = positions, offsets
     if keep.sum() >= 2 and not keep.all():
         kept_windows = [w for w, kept in zip(usable, keep) if kept]
         offsets, positions = offsets[keep], positions[keep]
@@ -1891,7 +2058,31 @@ def _reconcile(
         slope, intercept = np.polyfit(fit_positions, fit_offsets, 1)
         result.drift_ms_per_s = float(slope)
         result.delay_at_start_ms = float(intercept)
-        if abs(slope) > DRIFT_SIGNIFICANT_MS_PER_S:
+        before = every_position < step.split_position_s if step is not None else np.ones(len(every_position), dtype=bool)
+        if abs(slope) > DRIFT_SIGNIFICANT_MS_PER_S and not _slope_measured(
+            every_position[before], every_offset[before], fit_positions, fit_offsets
+        ):
+            # Steep, but no steeper than a line through this scatter comes out
+            # by itself: six weak windows spread over 250 ms fitted 0.15 ms/s,
+            # and its t=0 was 364 ms from a delay their middle had right to 3.
+            # A conversion moves every window by hundreds of times what they
+            # scatter by, so it never comes near this.
+            result.drift_ms_per_s = None
+            result.delay_at_start_ms = result.delay_ms
+        elif abs(slope) <= DRIFT_SIGNIFICANT_MS_PER_S:
+            # Nothing drifts, so there is one delay, and every number that
+            # names it is the same one: an app showing delay_ms beside another
+            # applying delay_at_start_ms showed two delays for one pair, 1.6
+            # ms apart where the windows scattered by tens. How far it leans
+            # on the slope is how well the windows measured one: all the way
+            # when they agree to a fraction of a millisecond (the few
+            # milliseconds a drift too small to report adds up to are kept),
+            # not at all when they scatter, where carrying a line back to t=0
+            # only carries the scatter there.
+            trust = _slope_trust(fit_positions, fit_offsets, float(slope), float(intercept))
+            result.delay_at_start_ms = trust * float(intercept) + (1.0 - trust) * result.delay_ms
+            result.delay_ms = result.delay_at_start_ms
+        else:
             # With real drift no single number describes the whole file. Quote
             # the midpoint value as the representative offset; corrections use
             # the t=0 intercept above, since applying the midpoint value from
@@ -1906,11 +2097,73 @@ def _reconcile(
         slope = float((fit_offsets[-1] - fit_offsets[0]) / span)
         result.drift_ms_per_s = slope
         result.delay_at_start_ms = float(fit_offsets[0] - slope * fit_positions[0])
+        if abs(slope) <= DRIFT_SIGNIFICANT_MS_PER_S:
+            result.delay_ms = result.delay_at_start_ms
 
     if result.delay_at_start_ms is None:
         result.delay_at_start_ms = result.delay_ms
 
     return step
+
+
+def _slope_evidence(positions: np.ndarray, offsets: np.ndarray) -> float:
+    """How many of its own standard errors the slope through these windows
+    stands from none, squared."""
+    freedom = len(offsets) - 2
+    spread = float(np.sum((positions - positions.mean()) ** 2))
+    if freedom < 1 or spread <= 0.0:
+        return 0.0
+    slope, intercept = np.polyfit(positions, offsets, 1)
+    variance = float(np.sum((offsets - (slope * positions + intercept)) ** 2)) / freedom
+    return float(slope) ** 2 * spread / max(variance, 1e-12)
+
+
+def _student_t(freedom: int) -> float:
+    """What a slope that is not there reaches one time in fifty, in its own
+    standard errors (Student's t, two-sided)."""
+    if freedom < 1:
+        return math.inf
+    return STUDENT_T_98[min(freedom, len(STUDENT_T_98)) - 1]
+
+
+def _slope_measured(
+    positions: np.ndarray, offsets: np.ndarray, kept_positions: np.ndarray, kept_offsets: np.ndarray
+) -> bool:
+    """Whether the windows measured the drift fitted through the ones kept.
+
+    Every window first, the trimmed ones included: those left are the ones a
+    line was found to run through, and say nothing about how easily one was.
+    One window that found something else entirely would hide a real drift from
+    that, so the ones kept may speak for themselves when they are nearly all
+    of them and far surer than that takes. Over simulated surveys scatter
+    passes one time in fifty, where it was taken for a drift every time, and a
+    real conversion with a stray window among six or more never fails.
+    """
+    if _slope_evidence(positions, offsets) >= _student_t(len(offsets) - 2) ** 2:
+        return True
+    return (
+        3 * len(kept_offsets) > 2 * len(offsets)
+        and _slope_evidence(kept_positions, kept_offsets) >= (3.0 * _student_t(len(kept_offsets) - 2)) ** 2
+    )
+
+
+def _slope_trust(positions: np.ndarray, offsets: np.ndarray, slope: float, intercept: float) -> float:
+    """How far a slope too small to be a drift can be believed, 0 to 1.
+
+    Windows that do not follow the line (half of them further than
+    AGREEMENT_MS from it) measured no drift this small, whatever it happens to
+    come to: a dub that wanders about the video by tens of milliseconds fits
+    one as steep as it is meaningless, and the middle of what they read is the
+    delay that suits the whole film. Windows that do are believed by how many
+    of the slope's own standard errors it stands from none, as one minus the
+    share of it their scatter would produce by itself (the positive-part
+    shrinkage estimator), which over simulated pairs is never materially worse
+    at t=0 than the line and up to a third better where there is no drift.
+    """
+    if float(np.median(np.abs(offsets - (slope * positions + intercept)))) > AGREEMENT_MS:
+        return 0.0
+    squared_t = _slope_evidence(positions, offsets)
+    return max(0.0, 1.0 - 1.0 / squared_t) if squared_t > 0.0 else 0.0
 
 
 def _independent(positions: List[float], window_s: float) -> int:
@@ -1946,14 +2199,21 @@ def _split_mask(positions: np.ndarray, step: Optional[Step]) -> np.ndarray:
     return positions >= step.split_position_s
 
 
+def _near(offsets: np.ndarray, model: np.ndarray) -> np.ndarray:
+    """Which windows are near enough to what the file is doing to be part of it."""
+    residual = np.abs(offsets - model)
+    return residual <= max(50.0, 4.0 * float(np.median(residual)))
+
+
 def _model_values(
     positions: np.ndarray, offsets: np.ndarray, after_cut: np.ndarray
 ) -> np.ndarray:
     """What the file says each window should have measured.
 
-    Two levels when a cut splits them, a line when the offsets slide, one level
-    otherwise -- and every version of it is fitted robustly, so the reference an
-    outlier is judged against is never one that outlier helped set.
+    Two levels when a cut splits them, a line when the offsets measurably
+    slide, one level otherwise -- and every version of it is fitted robustly,
+    so the reference an outlier is judged against is never one that outlier
+    helped set.
 
     Judging a drifting file against a single level is what made the outlier trim
     inert exactly where it was needed most. On a PAL-sped pair the offsets
@@ -1967,11 +2227,17 @@ def _model_values(
         after = float(np.median(offsets[after_cut]))
         return np.where(after_cut, after, before)
 
+    level = np.full(len(offsets), float(np.median(offsets)))
     if len(offsets) >= 3 and float(np.ptp(positions)) > 1.0:
         slope, intercept = _robust_line(positions, offsets)
-        return slope * positions + intercept
-
-    return np.full(len(offsets), float(np.median(offsets)))
+        line = slope * positions + intercept
+        # Only a slope the windows measured. Through scatter there is always
+        # one that runs close by a few of them, and they were then counted as
+        # agreeing: three of six spread over 250 ms, which made 91%.
+        near = _near(offsets, line)
+        if _slope_measured(positions, offsets, positions[near], offsets[near]):
+            return line
+    return level
 
 
 def _robust_line(positions: np.ndarray, offsets: np.ndarray) -> tuple:

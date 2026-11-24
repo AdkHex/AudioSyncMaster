@@ -149,6 +149,24 @@ def test_a_drift_with_scatter_is_never_a_staircase():
         assert find_step(POSITIONS, offsets, WINDOW_S) is None, f"{drift} ms/s read as a staircase"
 
 
+def test_a_split_the_windows_do_not_hold_is_marked_loose():
+    """A step is proposed wherever two medians differ enough; whether the
+    windows hold either of them is a separate question. These read nothing to
+    within 5 ms of each other, yet split into two groups 130 ms apart."""
+    positions = [410.0 * i for i in range(20)]
+    wander = [2, 14, 22, 30, 21, 13, -8, -19, -27, -33, -24, -14, 9, 17, 26, 16, -11]
+    scattered = find_step(positions, [19200.0 + d for d in wander] + [19325.0, 19340.0, 19351.0], 45.0)
+    assert scattered is not None and not scattered.lone_group and scattered.loose
+
+    held = find_step(positions, [19200.0 + d / 100.0 for d in wander] + [19332.0] * 3, 45.0)
+    assert held is not None and not held.loose
+
+    # What counts as holding grows with the jump: the same scatter around a
+    # four-second cut leaves no doubt about it.
+    large = find_step(positions, [19200.0 + d for d in wander] + [15200.0, 15215.0, 15226.0], 45.0)
+    assert large is not None and not large.loose
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
